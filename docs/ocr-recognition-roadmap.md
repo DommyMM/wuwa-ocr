@@ -83,16 +83,20 @@ Until then, the existing RapidOCR + block-OCR pipeline stays.
   `Resonance Skill DMG Bonus` IS handled in the current `card.py` via
   `clean_echo_substat_name_lines`. The prototype's per-row design needed
   a separate fuzz-line-picker to reproduce that.
-- Under-leveled echoes (<5 substats) are fabricated as 5 substats by the
-  current code; the prototype dropped empty rows correctly. Not a
-  regression in current code, but worth a future fix.
+- Under-leveled echoes (<5 substats) are still zipped against the OCR'd
+  names list in current `card.py` (`process_card` → `zip(cleaned_names,
+  values_lines[:5])`), so missing rows produce fewer substats rather than
+  fabricating five. The original "fabricated 5 substats" complaint no
+  longer applies, but trailing-garbage rows can still slip through.
 - `parse_region_text`'s `rsplit(' ', 1)` on `"<name> <value>"` strings is
   fragile to trailing-garbage tokens in the name. Worth a refactor
   independent of any OCR engine change.
 - Main-stat value OCR is dead code in the current pipeline — `process_card`
-  always overrides with `EchoStats.json` lookup. Could be deleted.
-- A pre-existing crash exists when `parse_region_text` returns `[]` (low-
-  confidence echo): the response builder accesses `.get` on the list.
+  calls `max_main_stat_value(cost, main_name)` from `ECHO_COSTS` and
+  overrides the OCR'd value. Could be deleted.
+- The previous crash when `parse_region_text` returned `[]` for a low-
+  confidence echo is now guarded by `isinstance(echo_data, dict)` before
+  the `.get` calls in `process_card`. Status: shipped.
 
 ## Current finding
 
@@ -122,7 +126,7 @@ are mostly known-class recognition.
 | forte | small fixed classifier or digit templates | Five `LV.X/10` regions, classes 1-10. |
 | echo icon | SIFT | Existing method. |
 | echo cost | template match | Existing method. |
-| echo element | HSV plus SIFT | Existing method. |
+| echo element | HSV histogram, SIFT fallback within same hue cluster (`data.py` `determine_element`) | Existing method. Grayscale elements (ER, Tidebreaking) and same-hue pairs (e.g. Gust/Windward, Pact/Rite, Trailblazing/Chromatic/Flamewing, Midnight/Dream/Thread) resolve via SIFT. |
 | echo main stat name | small classifier or template matcher | Finite class set from `EchoStats.json`. |
 | echo main stat value | derive from cost and stat name | Do not OCR. |
 | echo substat rows | small row classifier | Predict row `(name, value)` or two heads. |
@@ -133,11 +137,14 @@ Phase 1 is character and weapon asset recognition.
 
 Existing local artifacts:
 
-- `docs/phase1-sift-recognition.md`
-- `eval_phase1.py`
-- `inspect_crops.py`
-- `save_debug_crops.py`
-- `Data/Characters/` and `Data/Weapons/` when templates have been generated.
+- `Data/Characters/` and `Data/Weapons/` directories exist but are empty —
+  template PNGs have not been generated yet. The runtime falls back to the
+  existing OCR path for character/weapon until templates ship.
+- `optimize_crops.py` supports `character_sift` and `weapon_sift` tasks for
+  the crop sweep against gold labels.
+- The standalone `eval_phase1.py`, `inspect_crops.py`, `save_debug_crops.py`,
+  and `docs/phase1-sift-recognition.md` artifacts referenced in earlier
+  drafts are no longer in the tree.
 
 Phase 1 acceptance remains:
 

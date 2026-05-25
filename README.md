@@ -7,13 +7,13 @@ Hosted at `https://ocr.wuwabuilds.moe`.
 
 - Single OCR mode: split-card region processing (`card.py`)
 - Legacy full-screen mode (`char.py` / `echo.py`) has been removed
-- Data is loaded from local `backend/Data/*.json` and template PNGs at startup import time
+- Data is loaded from local `backend/Data/*.json` and template PNGs at startup import time (`data.py`)
 - Echo, character, and weapon OCR results include IDs for robust frontend matching
 
 ## Start
 
 ```bash
-python server.py
+py server.py
 ```
 
 Default port is `5000` (`PORT` env var supported).
@@ -95,6 +95,7 @@ Echo region (`echo1`-`echo5`):
 
 - `GET /health` -> health check
 - `GET /` -> API status metadata
+- `GET /ocr-results` -> serves `../ocr_results.json` (output of `batch_ocr.py`); 404 when missing
 
 ## Environment Variables
 
@@ -105,6 +106,9 @@ Echo region (`echo1`-`echo5`):
 | `OCR_WORKERS` | `8` | `ProcessPoolExecutor` size — parallel Tesseract processes. Match to CPU thread count locally (e.g. `16` for 7800X3D). Railway is capped at `8` vCPU. |
 | `OCR_RATE_LIMIT` | `60` | Requests per minute per IP. Set to `10000` locally to disable effective limiting during batch import. |
 | `OCR_TIMEOUT` | `60` | Seconds before a single OCR request times out. |
+| `OCR_OPENCV_THREADS` | `1` | Per-worker `cv2.setNumThreads` value. |
+| `USE_GPU` | `1` locally, `0` on Railway | Enables RapidOCR CUDA providers in `data.py` when `onnxruntime-gpu` is available. |
+| `RAILWAY_ENVIRONMENT_NAME` | — | Auto-set on Railway; toggles GPU default and is used to log environment context. |
 
 ## Limits and Errors
 
@@ -121,6 +125,6 @@ Echo region (`echo1`-`echo5`):
 The backend does not fetch runtime game data from production frontend URLs.  
 Keep `backend/Data` synchronized from `wuwabuilds/scripts`:
 
-1. `python sync_all.py`
-2. `python download_echo_icons.py --clean --force` (when templates need refresh)
+1. `py sync_all.py`
+2. `py download_echo_icons.py --clean --force` (when templates need refresh)
 
