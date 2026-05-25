@@ -4,6 +4,96 @@ This backend should be treated as a fixed-layout recognition service, not a
 general OCR service. The import image format is constrained, the crop geometry
 is stable, and most labels come from small finite game-data vocabularies.
 
+## Attempted but not adopted — Tesseract-only echo substat OCR
+
+A full Tesseract-only replacement for the echo substat OCR path was prototyped
+end-to-end and benchmarked, then **rolled back** rather than adopted. The
+production runtime is unchanged. This section documents what was tried, the
+exact result, and why it didn't ship, so a future attempt can either pick up
+where this left off or know to skip the path entirely.
+
+### What the prototype did
+
+- Removed `rapidocr-onnxruntime` from `requirements.txt`; wrapped the import
+  in try/except (`Rapid = None` when absent); guarded `process_ocr` so
+  character and weapon fall back to Tesseract.
+- Replaced the single block-OCR pass over `subs_names` / `subs_values` with
+  per-row Tesseract calls in a `SUBSTAT_NAME_ROWS` / `SUBSTAT_VALUE_ROWS`
+  loop. Names used PSM 6 with a best-fuzzy-match line picker against
+  `SUB_STAT_NAMES` to handle the "Resonance Liberation DMG Bonus" 2-line
+  wrap from Wuwa Bot cards. Values used a PSM 7→8→6 cascade on plain-gray
+  (then Otsu-thresholded) input, with a regex token cleanup for trailing
+  `.` artifacts and a Levenshtein-distance-≤-1 snap to the nearest legal
+  value when the cascade returned an illegal one.
+- Added a value-driven stat-name inference fallback: when name OCR was
+  garbage (low fuzz score against any known stat) and the value was legal
+  for exactly one stat, override the name. Recovered flat-HP rows where
+  the small 2-char `HP` text reads as `a1` / `Aap` but the numeric value
+  (`320`–`580`) uniquely identifies the stat.
+- Bypassed `parse_region_text`'s `rsplit(' ', 1)` for substats (kept name
+  and value as separate strings end-to-end so trailing-garbage tokens in
+  the name couldn't leak into the value field).
+- Dropped empty/non-numeric rows so under-leveled echoes with <5 substats
+  don't fabricate fake fifth rows.
+
+### Validation, 200-image apples-to-apples comparison
+
+Two git worktrees side by side (old block-OCR + RapidOCR vs. the prototype)
+processed the same 200 randomly-sampled English cards from `r2-backup/`:
+
+| Outcome | Count |
+|---|---:|
+| Images identical between old and new | 135 / 200 (67.5%) |
+| Total substat-level diffs | 145 |
+| **NEW legal, OLD illegal** (improvement) | 14 |
+| **NEW illegal, OLD legal** (regression) | **2** |
+| Both legal but different (ambiguous) | 98 |
+| Both illegal | 7 |
+
+Net: +12 substats more accurate, but **both regressions are on flat ATK
+substats** — `ATK 40` and `ATK 50` were misread as `Crit Rate=40` and
+`Heavy Attack DMG Bonus=50`. Flat ATK / DEF cannot be uniquely
+disambiguated by value-driven inference (`40` is legal for both `ATK` and
+`DEF`), so when name OCR returns garbage with high enough fuzz confidence
+to skip inference, we silently pick the wrong stat.
+
+### Why we didn't adopt it
+
+The current Railway cost is ~$10/month, which is acceptable. ATK and HP
+are critical short stats whose accuracy directly affects every build's
+calculated damage. **Any regression on short flat substats is a
+dealbreaker, even when the aggregate metric improves.** A net-positive
+substat count doesn't compensate for silently mis-attributing flat-ATK
+rolls to other stats — the wrong value still passes downstream
+calculation and shows up in builds as a confidently-wrong number.
+
+The path back to "consider adopting" would require:
+- Extending `_infer_stat_from_value` to use a fuzz-score tiebreaker
+  between flat ATK / DEF when both are legal candidates.
+- Re-validating the result against a hand-audited gold set (not the
+  legality-only smoke test that wouldn't catch "wrong stat, legal value
+  for wrong stat").
+- Zero regressions on flat ATK / HP / DEF rows specifically.
+
+Until then, the existing RapidOCR + block-OCR pipeline stays.
+
+### Other findings worth keeping
+
+- The Wuwa Bot 2-line wrap of `Resonance Liberation DMG Bonus` /
+  `Resonance Skill DMG Bonus` IS handled in the current `card.py` via
+  `clean_echo_substat_name_lines`. The prototype's per-row design needed
+  a separate fuzz-line-picker to reproduce that.
+- Under-leveled echoes (<5 substats) are fabricated as 5 substats by the
+  current code; the prototype dropped empty rows correctly. Not a
+  regression in current code, but worth a future fix.
+- `parse_region_text`'s `rsplit(' ', 1)` on `"<name> <value>"` strings is
+  fragile to trailing-garbage tokens in the name. Worth a refactor
+  independent of any OCR engine change.
+- Main-stat value OCR is dead code in the current pipeline — `process_card`
+  always overrides with `EchoStats.json` lookup. Could be deleted.
+- A pre-existing crash exists when `parse_region_text` returns `[]` (low-
+  confidence echo): the response builder accesses `.get` on the list.
+
 ## Current finding
 
 The Hiyuki/Frostburn reference card confirmed the key observation:
