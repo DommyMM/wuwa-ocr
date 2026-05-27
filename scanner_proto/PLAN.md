@@ -203,8 +203,10 @@ For each cell:
 
 ## Open questions (when you wake up)
 1. **Distribution target:** standalone .exe (PyInstaller, ~80MB) or pip-installable? Affects whether we bundle the 200MB Data/ folder or fetch it on first run from R2.
+   - **Decided: single .exe via PyInstaller**, Data/ bundled. Phase 4 packaging targets ~80MB binary.
 2. **Output consumer:** is there a frontend that'll eat the JSON, or is this raw export for now? If the existing wuwa-ocr-api response shape is the consumer, we should match it.
 3. **Sort dependency:** UI offers Sort by Level / Sort by Cost. Do we lock sort to a known order before scanning (recommended; otherwise scroll-back-to-top detection is harder)?
 4. **Lock-state read:** the lock icon on the grid cell is binary — do you want it scanned? (cheap, 1 template match per cell).
 5. **Equipped-by reliability:** at 1080p the footer is 14-16px tall — Tesseract works but it's tight. Would you accept "unknown" when uncertain rather than guessing?
-6. **CNN fallback green-light:** if SIFT fails on low-res JPG-like captures, do you want a small CNN (~5MB, trains in 20 min on the 162 templates + augmentations) as Phase 4? It would close the Dreamless-class failure permanently.
+6. **Resolution policy:** sub-1080p captures — hard floor, CNN fallback, or mark uncertain?
+   - **Decided: hard 1080p floor.** Scanner refuses below 1920×1080 native at startup. Matches Kamera / HSR-Scanner. Removes the Dreamless-class failure without needing a CNN. CNN deferred indefinitely.
