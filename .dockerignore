@@ -5,3 +5,8 @@
 **/.vscode
 **/tests
 **/.pytest_cache
+
+# Scanner is a dev-only tool; not part of the deployed OCR API image.
+scanner/
+echo_bag/
+r2-backup/
