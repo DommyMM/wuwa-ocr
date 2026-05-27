@@ -131,6 +131,21 @@ are mostly known-class recognition.
 | echo main stat value | derive from cost and stat name | Do not OCR. |
 | echo substat rows | small row classifier | Predict row `(name, value)` or two heads. |
 
+### Echo element fallback note
+
+The Luuk Herssen report `4099f333-2e9c-4938-84fa-df08138f9f45` exposed a
+sonata-element edge case on echo5 (`Flora Drone`). Echo identity was correct,
+but the `Rite` element crop had too few SIFT keypoints. The old fallback
+accepted an all-zero SIFT result and returned an arbitrary candidate by
+iteration order, producing `Memories` even though HSV had already rejected that
+color family.
+
+Current runtime behavior keeps HSV as the coarse filter, only accepts SIFT when
+the best SIFT score is positive, and otherwise falls back to direct color
+template comparison among close same-hue candidates. Longer term, echo elements
+should move toward deterministic template/mask matching; SIFT is a better fit
+for textured echo monster icons than for small circular sonata glyphs.
+
 ## Phase 1 status
 
 Phase 1 is character and weapon asset recognition.

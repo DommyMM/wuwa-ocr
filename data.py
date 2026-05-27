@@ -204,6 +204,15 @@ def _same_cluster(candidates: list) -> bool:
     cset = set(candidates)
     return any(cset <= cluster for cluster in _HUE_CLUSTERS)
 
+def _template_color_score(image, template) -> float:
+    """Compare an element crop against a resized color template."""
+    tmpl = cv2.resize(template, (image.shape[1], image.shape[0]), interpolation=cv2.INTER_AREA)
+    channel_scores = [
+        cv2.matchTemplate(image[:, :, ch], tmpl[:, :, ch], cv2.TM_CCOEFF_NORMED).max()
+        for ch in range(3)
+    ]
+    return float(np.mean(channel_scores))
+
 def determine_element(image, filter_elements):
     """Match element: HSV histogram first, SIFT fallback only within same hue cluster."""
     if isinstance(filter_elements, str):
@@ -262,7 +271,25 @@ def determine_element(image, filter_elements):
                 good = [m for m, n in ml if m.distance < 0.7 * n.distance]
                 sift_scores.append((name, len(good) / max(len(kp1), len(kp2)) if kp1 and kp2 else 0))
             if sift_scores:
-                return max(sift_scores, key=lambda x: x[1])[0]
+                best_sift = max(sift_scores, key=lambda x: x[1])
+                if best_sift[1] > 0:
+                    return best_sift[0]
+
+        # Low-detail sonata crops can produce no usable SIFT matches. In that
+        # case, do not let an arbitrary zero-score candidate override HSV.
+        best_score = best[1]
+        same_hue_candidates = [
+            name
+            for name, score in scores
+            if _same_cluster([best[0], name]) and (best_score - score) < 0.02
+        ]
+        color_scores = [
+            (name, _template_color_score(image, ELEMENT_TEMPLATES[name]))
+            for name in same_hue_candidates
+            if name in ELEMENT_TEMPLATES
+        ]
+        if color_scores:
+            return max(color_scores, key=lambda x: x[1])[0]
 
     return best[0]
 
