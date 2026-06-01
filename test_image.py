@@ -10,7 +10,6 @@ import aiohttp
 import cv2
 import numpy as np
 
-IMAGE_PATH = r"C:\Users\domin\Downloads\259db4a7292c2c616e88810762aff7b126684d85.jpeg"
 BASE_URL = "http://localhost:5000"
 
 REGIONS = {
@@ -41,9 +40,14 @@ async def send_region(session, name, b64):
         return name, resp.status, await resp.json()
 
 async def main():
-    img = cv2.imread(IMAGE_PATH)
+    if len(sys.argv) < 2:
+        print("Usage: python test_image.py <image-path>")
+        sys.exit(2)
+
+    image_path = sys.argv[1]
+    img = cv2.imread(image_path)
     if img is None:
-        print(f"ERROR: could not read {IMAGE_PATH}")
+        print(f"ERROR: could not read {image_path}")
         sys.exit(1)
     print(f"Image size: {img.shape[1]}x{img.shape[0]}")
 
