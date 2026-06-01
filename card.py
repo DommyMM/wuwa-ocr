@@ -463,17 +463,20 @@ def match_icon(image: np.ndarray) -> Tuple[str, float, str]:
                 if detected_element in possible_elements:
                     element_matches.append((name, conf))
 
-            # USE ELEMENT AS PRIMARY TIEBREAKER
+            # Use element as primary tiebreaker
             if len(element_matches) == 1:
-                # Element clearly identifies ONE candidate - trust it!
+                # Element clearly identifies only one result, use that
                 best_match = element_matches[0][0]
                 best_conf = element_matches[0][1]
                 print(f"→ Matched {detected_element} → '{best_match}'")
             else:
-                # Element doesn't help (matches multiple or none) - fall back to color
+                # Identified multiple candidates, tie with color, but ONLY among element-compatible candidates so we
+                # don't have say Chirpuff with Law badge which we know is then Nightmare Chirpuff
+                # If the element matched nothing, fall back to all close matches (this should never happen)
+                color_pool = element_matches if len(element_matches) >= 2 else close_matches
                 icon_img = image[0:182, 0:188]
                 color_scores = []
-                for name, conf in close_matches:
+                for name, conf in color_pool:
                     color_score = compare_icon_colors(icon_img, name)
                     color_scores.append((name, color_score))
 
