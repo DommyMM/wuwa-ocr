@@ -150,6 +150,44 @@ def choose_substat_value(stat_name: str, tess_value: str, rapid_value: str | Non
 
     return tess_value
 
+def rapid_text_lines(image) -> list[str]:
+    result, _ = Rapid(image)
+    return [text for _, text, _ in result] if result else []
+
+def reconcile_echo_substat_rows(
+    names_img,
+    values_img,
+    names_lines: list[str],
+    tess_values: list[str],
+) -> tuple[list[str], list[str], list[str]]:
+    """Align substat name/value rows without assuming maxed echoes have 5 rows."""
+    cleaned_names = clean_echo_substat_name_lines(names_lines)
+    values_lines = tess_values
+    rapid_values: list[str] = []
+
+    if len(values_lines) < len(cleaned_names):
+        candidate_values = rapid_text_lines(values_img)
+        if len(candidate_values) >= len(cleaned_names):
+            rapid_values = candidate_values
+            values_lines = candidate_values
+
+    if len(cleaned_names) < len(values_lines):
+        rapid_cleaned_names = clean_echo_substat_name_lines(rapid_text_lines(names_img))
+        if len(rapid_cleaned_names) >= len(values_lines):
+            cleaned_names = rapid_cleaned_names
+
+    has_invalid_tess_value = any(
+        not is_legal_substat_value(
+            value,
+            validate_substat_name(name, value),
+        )
+        for name, value in zip(cleaned_names, values_lines)
+    )
+    if has_invalid_tess_value and not rapid_values:
+        rapid_values = rapid_text_lines(values_img)
+
+    return cleaned_names, values_lines, rapid_values
+
 def format_stat_value(value) -> str:
     try:
         numeric = float(value)
@@ -640,28 +678,12 @@ def process_card(image, region: str):
             names_lines = [l.strip() for l in pytesseract.image_to_string(names_processed).splitlines() if l.strip()]
             tess_values = [l.strip() for l in pytesseract.image_to_string(values_processed).splitlines() if l.strip()]
             
-            cleaned_names = clean_echo_substat_name_lines(names_lines)
-            rapid_values = []
-            values_lines = tess_values
-            has_invalid_tess_value = any(
-                not is_legal_substat_value(
-                    value,
-                    validate_substat_name(name, value),
-                )
-                for name, value in zip(cleaned_names, values_lines)
+            cleaned_names, values_lines, rapid_values = reconcile_echo_substat_rows(
+                names_img,
+                values_img,
+                names_lines,
+                tess_values,
             )
-            if has_invalid_tess_value:
-                rapid_result, _ = Rapid(values_img)
-                rapid_values = [text for _, text, _ in rapid_result] if rapid_result else []
-
-            # Use Rapid names only when name OCR lost rows relative to value OCR.
-            # Some echoes are not maxed to have 5 lines, and we can tell since our number reads will be accurate
-            if len(cleaned_names) < len(values_lines):
-                rapid_result, _ = Rapid(names_img)
-                rapid_names = [text for _, text, _ in rapid_result] if rapid_result else []
-                rapid_cleaned_names = clean_echo_substat_name_lines(rapid_names)
-                if len(rapid_cleaned_names) >= len(values_lines):
-                    cleaned_names = rapid_cleaned_names
 
             values = [
                 choose_substat_value(
