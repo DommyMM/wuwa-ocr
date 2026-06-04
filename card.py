@@ -9,6 +9,13 @@ from cv2 import SIFT_create, FlannBasedMatcher
 import io
 import sys
 
+ROVER_ELEMENTS = ("Aero", "Spectro", "Havoc")
+ROVER_ELEMENT_ALIASES = {
+    "Aero": ("aero", "acro"),
+    "Spectro": ("spectro", "speetro"),
+    "Havoc": ("havoc", "lavoc"),
+}
+
 
 WEAPON_REGIONS = {
     "name": {"x1": 152, "y1": 25, "x2": 437, "y2": 79},
@@ -216,21 +223,36 @@ def validate_character_name(raw_name: str) -> str:
     match = process.extractOne(raw_name, CHARACTER_NAMES)
     return match[0] if match else raw_name
 
+def parse_character_title(text: str) -> dict:
+    level = 1
+    if match := re.search(r'\bLV\.?\s*(\d+)\b', text, re.IGNORECASE):
+        level = int(match.group(1))
+
+    name_text = re.sub(r'\bLV\.?\s*\d+\b', ' ', text, flags=re.IGNORECASE)
+    name_text = re.sub(r'\s+', ' ', name_text).strip()
+    compact_name = re.sub(r'[^a-z]', '', name_text.lower())
+    rover_element = next((
+        element
+        for element, aliases in ROVER_ELEMENT_ALIASES.items()
+        if any(alias in compact_name for alias in aliases)
+    ), None)
+
+    if "rover" in compact_name and rover_element:
+        char_name = f"Rover: {rover_element}"
+        return {
+            "name": char_name,
+            "id": CHARACTER_ID_MAP.get(char_name, ""),
+            "level": level,
+            "element": rover_element,
+        }
+
+    char_name = validate_character_name(name_text)
+    return {"name": char_name, "id": CHARACTER_ID_MAP.get(char_name, ""), "level": level}
+
 def parse_region_text(name, text):
     match name:
         case "character":
-            parts = [p for p in text.split() if p.strip()]
-            level = 1
-            for part in parts:
-                if "LV." in part:
-                    match = re.search(r'LV\.(\d+)', part)
-                    if match:
-                        level = int(match.group(1))
-                        parts.remove(part)
-                        break
-            raw_name = " ".join(parts)
-            char_name = validate_character_name(raw_name)
-            return {"name": char_name, "id": CHARACTER_ID_MAP.get(char_name, ""), "level": level}
+            return parse_character_title(text)
             
         case "watermark":
             lines = text.split('\n')
