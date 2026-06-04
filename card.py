@@ -444,6 +444,13 @@ def compare_icon_colors(icon_img: np.ndarray, template_name: str) -> float:
 
     return max(0.0, min(1.0, similarity_score))
 
+# Minimum SIFT confidence required before the badge may promote a base echo to
+# its rarer Nightmare variant. Calibrated against r2-backup: every wrong
+# base->nightmare flip there sat at conf <= 0.28 (wrong-body matches), while clean
+# echoes score 0.3+. Demotions (nightmare->base) are unconditional.
+NIGHTMARE_PROMOTE_FLOOR = 0.30
+
+
 def echo_family_key(template_id: str) -> str:
     """Group normal/nightmare variants that share the same visible echo body."""
     name = ECHO_NAME_MAP.get(template_id, template_id)
@@ -483,6 +490,9 @@ def validate_echo_family_by_element(
     if len(family_elements) < 2:
         return best_match, best_conf, detected_element
 
+    # The badge across the family's combined sets is used only to *select the
+    # variant*. The element shown is recomputed by the caller from the chosen
+    # variant's own legal sets, so a non-flip echo behaves exactly as before.
     badge = determine_element(element_region, family_elements)
     candidates = [
         variant
@@ -490,13 +500,31 @@ def validate_echo_family_by_element(
         if badge in ECHO_ELEMENTS.get(variant, [])
     ]
     if not candidates:
-        return best_match, best_conf, detected_element or badge
+        # determine_element only returns a member of family_elements, so every
+        # badge belongs to some variant; this branch is defensive.
+        return best_match, best_conf, detected_element
 
     conf_of = dict(sorted_matches)
     chosen = max(candidates, key=lambda variant: conf_of.get(variant, 0.0))
-    if chosen != best_match:
-        print(f"Family badge validation: {best_match} -> {chosen} (badge {badge})")
-    return chosen, conf_of.get(chosen, best_conf), badge
+    if chosen == best_match:
+        return best_match, best_conf, detected_element
+
+    # Promoting SIFT's pick *to* a Nightmare variant is the risky direction:
+    # Nightmare echoes are rare, and a low-confidence (wrong-body) SIFT match can
+    # land on a family whose colors don't even include the true badge, forcing the
+    # badge onto a bogus Nightmare sonata. Only promote when SIFT identified the
+    # body confidently enough to trust it. Demoting a Nightmare guess back to base
+    # needs no floor — base is the overwhelmingly common reality.
+    promoting_to_nightmare = (
+        "Nightmare" in ECHO_NAME_MAP.get(chosen, "")
+        and "Nightmare" not in ECHO_NAME_MAP.get(best_match, "")
+    )
+    if promoting_to_nightmare and best_conf < NIGHTMARE_PROMOTE_FLOOR:
+        return best_match, best_conf, detected_element
+
+    print(f"Family badge validation: {best_match} -> {chosen} (badge {badge})")
+    # Reset element so the caller recomputes it from the new identity's own sets.
+    return chosen, conf_of.get(chosen, best_conf), None
 
 
 def _identify_icon_core(image: np.ndarray):
