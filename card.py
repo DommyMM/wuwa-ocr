@@ -349,138 +349,24 @@ def get_echo_cost(image: np.ndarray) -> int:
     best_cost, best_score = max(scores, key=lambda item: item[1])
     return best_cost if best_score >= 0.2 else 0
 
-def calculate_vibrancy_score(img: np.ndarray) -> float:
-    """Calculate vibrancy score based on color intensity and distribution"""
-    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-    mask = cv2.inRange(img, (1, 1, 1), (255, 255, 255))
-
-    h, s, v = cv2.split(hsv)
-    s_masked = s[mask > 0]
-    v_masked = v[mask > 0]
-
-    if len(s_masked) == 0:
-        return 0.0
-
-    avg_saturation = np.mean(s_masked)
-    avg_brightness = np.mean(v_masked)
-
-    # Vibrancy combines saturation and brightness
-    return (avg_saturation * 0.6 + avg_brightness * 0.4) / 2.55
-
-def analyze_nightmare_indicators(img: np.ndarray) -> dict:
-    """Analyze image for nightmare variant indicators"""
-    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-    mask = cv2.inRange(img, (1, 1, 1), (255, 255, 255))
-
-    h, s, v = cv2.split(hsv)
-    s_masked = s[mask > 0]
-    v_masked = v[mask > 0]
-
-    if len(s_masked) == 0:
-        return {"avg_saturation": 0, "avg_brightness": 0, "vibrancy_score": 0, "nightmare_score": 0}
-
-    avg_saturation = np.mean(s_masked)
-    avg_brightness = np.mean(v_masked)
-    vibrancy_score = calculate_vibrancy_score(img)
-    high_saturation_ratio = np.sum(s_masked > 100) / len(s_masked)
-
-    # Nightmare detection scoring (based on analysis of 18 pairs)
-    nightmare_score = 0
-
-    # Primary indicators (1 point each)
-    if avg_saturation > 65.0:
-        nightmare_score += 1
-    if avg_brightness > 190.0:
-        nightmare_score += 1
-    if vibrancy_score > 35.0:
-        nightmare_score += 1
-
-    # Secondary indicators (0.5 points each)
-    if high_saturation_ratio > 0.1:
-        nightmare_score += 0.5
-    if avg_brightness > 170 and avg_saturation > 50:
-        nightmare_score += 0.5
-    if vibrancy_score > 30 and avg_saturation > 45:
-        nightmare_score += 0.5
-
-    return {
-        "avg_saturation": avg_saturation,
-        "avg_brightness": avg_brightness,
-        "vibrancy_score": vibrancy_score,
-        "nightmare_score": nightmare_score
-    }
-
-def compare_icon_colors(icon_img: np.ndarray, template_name: str) -> float:
-    """Enhanced color comparison focusing on nightmare vs normal detection"""
-    from data import ICON_TEMPLATES
-
-    if template_name not in ICON_TEMPLATES:
-        return 0.0
-
-    template_img = ICON_TEMPLATES[template_name]
-
-    # Analyze both images for nightmare indicators
-    icon_analysis = analyze_nightmare_indicators(icon_img)
-    template_analysis = analyze_nightmare_indicators(template_img)
-
-    # Check if this is a nightmare vs normal comparison
-    is_nightmare_template = "Nightmare" in template_name
-
-    # Calculate score similarity based on nightmare score matching
-    score_diff = abs(icon_analysis["nightmare_score"] - template_analysis["nightmare_score"])
-    score_similarity = max(0.0, 1.0 - score_diff / 3.0)  # Normalize by max possible difference
-
-    if is_nightmare_template:
-        # For nightmare templates, icon should also show nightmare characteristics
-        if icon_analysis["nightmare_score"] >= 2.0:
-            score_similarity += 0.3  # Strong bonus for matching nightmare characteristics
-        else:
-            score_similarity *= 0.3  # Strong penalty for normal image vs nightmare template
-
-        # Additional saturation/vibrancy matching for nightmare variants
-        sat_diff = abs(icon_analysis["avg_saturation"] - template_analysis["avg_saturation"]) / 255.0
-        vib_diff = abs(icon_analysis["vibrancy_score"] - template_analysis["vibrancy_score"]) / 100.0
-
-        similarity_score = (score_similarity * 0.7 + (1.0 - sat_diff) * 0.15 + (1.0 - vib_diff) * 0.15)
-
-    else:
-        # For normal templates, icon should NOT show strong nightmare characteristics
-        if icon_analysis["nightmare_score"] < 2.0:
-            score_similarity += 0.3  # Bonus for matching normal characteristics
-        else:
-            score_similarity *= 0.3  # Penalty for nightmare image vs normal template
-
-        # Traditional color histogram comparison for normal variants
-        icon_hsv = cv2.cvtColor(icon_img, cv2.COLOR_BGR2HSV)
-        template_hsv = cv2.cvtColor(template_img, cv2.COLOR_BGR2HSV)
-
-        hist_icon = cv2.calcHist([icon_hsv], [0, 1], None, [50, 60], [0, 180, 0, 256])
-        hist_template = cv2.calcHist([template_hsv], [0, 1], None, [50, 60], [0, 180, 0, 256])
-
-        hist_icon = cv2.normalize(hist_icon, hist_icon).flatten()
-        hist_template = cv2.normalize(hist_template, hist_template).flatten()
-
-        hist_correlation = cv2.compareHist(hist_icon, hist_template, cv2.HISTCMP_CORREL)
-
-        similarity_score = (score_similarity * 0.5 + hist_correlation * 0.5)
-
-    return max(0.0, min(1.0, similarity_score))
-
 # Minimum SIFT confidence required before the badge may promote a base echo to
-# its rarer Nightmare variant. Calibrated against r2-backup: every wrong
+# its rarer Nightmare variant. Calibrated against data: every wrong
 # base->nightmare flip there sat at conf <= 0.28 (wrong-body matches), while clean
 # echoes score 0.3+. Demotions (nightmare->base) are unconditional.
 NIGHTMARE_PROMOTE_FLOOR = 0.30
 
-
 def echo_family_key(template_id: str) -> str:
-    """Group normal/nightmare variants that share the same visible echo body."""
-    name = ECHO_NAME_MAP.get(template_id, template_id)
-    return re.sub(r'^(?:Nightmare:\s*|Phantom\s+)', '', name).strip().lower()
+    """Group an echo with its Nightmare variant by the shared body name.
 
+    Nightmare echoes are recolors that carry a "Nightmare: " name prefix but the
+    same silhouette as their base, so SIFT can't separate them — the badge does
+    (see validate_echo_family_by_element). Phantom echoes are not handled here:
+    they share the base echo's canonical id, so there is no separate template.
+    """
+    name = ECHO_NAME_MAP.get(template_id, template_id)
+    return re.sub(r'^Nightmare:\s*', '', name).strip().lower()
 
 _ECHO_FAMILY_INDEX: dict[str, list[str]] | None = None
-
 
 def _echo_family_index() -> dict[str, list[str]]:
     global _ECHO_FAMILY_INDEX
@@ -573,69 +459,30 @@ def _identify_icon_core(image: np.ndarray):
     best_match, best_conf = sorted_matches[0]
     secondary_matches = [m for m in sorted_matches[1:5] if m[1] > 0.1]
     
-    # Use color comparison when top matches are close (old logic) + minimum confidence filter
+    # When the top SIFT candidates are near-tied, the badge element disambiguates
+    # look-alikes across different bodies (e.g. Chirpuff vs Gulpuff). Same-body
+    # base/Nightmare confusion is resolved later by validate_echo_family_by_element.
     if len(sorted_matches) > 1 and (best_conf - sorted_matches[1][1]) < 0.1:
-        # Lowkey no idea why I chose 10% but 15% was too high so yeah
-        close_matches = [(name, conf) for name, conf in sorted_matches
-                        if conf > 0.1]
+        close_matches = [(name, conf) for name, conf in sorted_matches if conf > 0.1]
+        if len(close_matches) >= 2:
+            print(f"Close matches detected: {[(n, f'{c:.4f}') for n, c in close_matches]}")
 
-        # If we have multiple nightmare variants, something's wrong - filter out the weaker nightmare
-        nightmare_count = sum(1 for name, conf in close_matches if "Nightmare" in name)
-        if nightmare_count >= 2:
-            print(f"Multiple nightmare variants detected, filtering weaker nightmare")
-            # Keep the strongest nightmare and remove other nightmares
-            best_nightmare = max([m for m in close_matches if "Nightmare" in m[0]], key=lambda x: x[1])
-            close_matches = [m for m in close_matches if "Nightmare" not in m[0] or m == best_nightmare]
-
-        if len(close_matches) >= 2:  # Only if there are actually multiple decent close matches
-            close_scores = [(name, f"{conf:.4f}") for name, conf in close_matches]
-            print(f"Close matches detected: {close_scores}")
-
-            # Detect element for disambiguation
             element_region = get_element_region(image)
-
-            # Get union of all possible elements for candidates
             candidate_elements = set()
             for name, _ in close_matches:
                 candidate_elements.update(ECHO_ELEMENTS.get(name, []))
-
-            # Match against candidate elements only
             detected_element = determine_element(element_region, list(candidate_elements))
 
-            # Check which candidates match the detected element
-            element_matches = []
-            for name, conf in close_matches:
-                possible_elements = ECHO_ELEMENTS.get(name, ["Unknown"])
-                if detected_element in possible_elements:
-                    element_matches.append((name, conf))
-
-            # Use element as primary tiebreaker
+            element_matches = [
+                (name, conf)
+                for name, conf in close_matches
+                if detected_element in ECHO_ELEMENTS.get(name, ["Unknown"])
+            ]
+            # Only override SIFT when the badge points to exactly one candidate.
             if len(element_matches) == 1:
-                # Element clearly identifies only one result, use that
-                best_match = element_matches[0][0]
-                best_conf = element_matches[0][1]
-                print(f"→ Matched {detected_element} → '{best_match}'")
-            else:
-                # Identified multiple candidates, tie with color, but ONLY among element-compatible candidates so we
-                # don't have say Chirpuff with Law badge which we know is then Nightmare Chirpuff
-                # If the element matched nothing, fall back to all close matches (this should never happen)
-                color_pool = element_matches if len(element_matches) >= 2 else close_matches
-                icon_img = image[0:182, 0:188]
-                color_scores = []
-                for name, conf in color_pool:
-                    color_score = compare_icon_colors(icon_img, name)
-                    color_scores.append((name, color_score))
+                best_match, best_conf = element_matches[0]
+                print(f"-> badge {detected_element} -> '{best_match}'")
 
-                # Pick the best color match
-                best_color_match = max(color_scores, key=lambda x: x[1])
-                if best_color_match[0] != best_match:
-                    print(f"→ Color-based: {best_match} -> {best_color_match[0]}")
-                    best_match = best_color_match[0]
-                    for name, conf in sorted_matches:
-                        if name == best_match:
-                            best_conf = conf
-                            break
-    
     if secondary_matches and (best_conf - secondary_matches[0][1]) < 0.25:
         actual_cost = get_echo_cost(image)
         print(f"Close match detected, using cost disambiguation. Actual cost: {actual_cost}")
@@ -652,7 +499,6 @@ def _identify_icon_core(image: np.ndarray):
     element_region = get_element_region(image)
     return best_match, best_conf, detected_element, sorted_matches, element_region
 
-
 def match_icon(image: np.ndarray) -> Tuple[str, float, str]:
     """SIFT-based icon matching - returns best match with confidence check and element.
 
@@ -667,11 +513,9 @@ def match_icon(image: np.ndarray) -> Tuple[str, float, str]:
         element_region,
         detected_element,
     )
-
     # Only detect element if we haven't already
     if detected_element is None:
         detected_element = determine_element(element_region, best_match)
-
     return (best_match, best_conf, detected_element)
 
 def parse_sequence_region(image) -> int:
