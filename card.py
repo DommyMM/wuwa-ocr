@@ -444,11 +444,66 @@ def compare_icon_colors(icon_img: np.ndarray, template_name: str) -> float:
 
     return max(0.0, min(1.0, similarity_score))
 
-def match_icon(image: np.ndarray) -> Tuple[str, float, str]:
-    """SIFT-based icon matching - returns best match with confidence check and element
+def echo_family_key(template_id: str) -> str:
+    """Group normal/nightmare variants that share the same visible echo body."""
+    name = ECHO_NAME_MAP.get(template_id, template_id)
+    return re.sub(r'^(?:Nightmare:\s*|Phantom\s+)', '', name).strip().lower()
+
+
+_ECHO_FAMILY_INDEX: dict[str, list[str]] | None = None
+
+
+def _echo_family_index() -> dict[str, list[str]]:
+    global _ECHO_FAMILY_INDEX
+    if _ECHO_FAMILY_INDEX is None:
+        index: dict[str, list[str]] = {}
+        for template_id in ECHO_NAME_MAP:
+            if template_id not in TEMPLATE_FEATURES:
+                continue
+            index.setdefault(echo_family_key(template_id), []).append(template_id)
+        _ECHO_FAMILY_INDEX = index
+    return _ECHO_FAMILY_INDEX
+
+
+def validate_echo_family_by_element(
+    best_match: str,
+    best_conf: float,
+    sorted_matches: list[tuple[str, float]],
+    element_region: np.ndarray,
+    detected_element: str | None,
+) -> tuple[str, float, str | None]:
+    """Resolve same-body variant confusion using the visible set badge."""
+    variants = _echo_family_index().get(echo_family_key(best_match), [])
+    if len(variants) < 2:
+        return best_match, best_conf, detected_element
+
+    family_elements = sorted({
+        element for variant in variants for element in ECHO_ELEMENTS.get(variant, [])
+    })
+    if len(family_elements) < 2:
+        return best_match, best_conf, detected_element
+
+    badge = determine_element(element_region, family_elements)
+    candidates = [
+        variant
+        for variant in variants
+        if badge in ECHO_ELEMENTS.get(variant, [])
+    ]
+    if not candidates:
+        return best_match, best_conf, detected_element or badge
+
+    conf_of = dict(sorted_matches)
+    chosen = max(candidates, key=lambda variant: conf_of.get(variant, 0.0))
+    if chosen != best_match:
+        print(f"Family badge validation: {best_match} -> {chosen} (badge {badge})")
+    return chosen, conf_of.get(chosen, best_conf), badge
+
+
+def _identify_icon_core(image: np.ndarray):
+    """SIFT match plus close-match/cost disambiguation before family validation.
 
     Returns:
-        Tuple of (echo_name, confidence, element)
+        Tuple of (echo_name, confidence, element, sorted_matches, element_region)
     """
     icon_img = image[0:182, 0:188]
     sift = SIFT_create()
@@ -544,9 +599,27 @@ def match_icon(image: np.ndarray) -> Tuple[str, float, str]:
                         best_conf = conf
                         break
 
+    element_region = get_element_region(image)
+    return best_match, best_conf, detected_element, sorted_matches, element_region
+
+
+def match_icon(image: np.ndarray) -> Tuple[str, float, str]:
+    """SIFT-based icon matching - returns best match with confidence check and element.
+
+    The visible set badge arbitrates same-body variants such as base vs Nightmare
+    echoes, where icon SIFT can prefer the wrong regional variant.
+    """
+    best_match, best_conf, detected_element, sorted_matches, element_region = _identify_icon_core(image)
+    best_match, best_conf, detected_element = validate_echo_family_by_element(
+        best_match,
+        best_conf,
+        sorted_matches,
+        element_region,
+        detected_element,
+    )
+
     # Only detect element if we haven't already
     if detected_element is None:
-        element_region = get_element_region(image)
         detected_element = determine_element(element_region, best_match)
 
     return (best_match, best_conf, detected_element)
