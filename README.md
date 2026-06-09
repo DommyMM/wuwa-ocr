@@ -7,7 +7,7 @@ Hosted at `https://ocr.wuwabuilds.moe`.
 
 - Single OCR mode: split-card region processing (`card.py`)
 - Legacy full-screen mode (`char.py` / `echo.py`) has been removed
-- Data is loaded from local `backend/Data/*.json` and template PNGs at startup import time (`data.py`)
+- Data is loaded from local `backend/Data/*.json` and image templates at startup import time (`data.py`)
 - Echo, character, and weapon OCR results include IDs for robust frontend matching
 
 ## Start
@@ -125,6 +125,6 @@ Echo region (`echo1`-`echo5`):
 The backend does not fetch runtime game data from production frontend URLs.  
 Keep `backend/Data` synchronized from `wuwabuilds/scripts`:
 
-1. `py sync_all.py`
-2. `py download_echo_icons.py --clean --force` (when templates need refresh)
-
+1. From `wuwabuilds/scripts`, run the data sync (`py sync_all.py`, or the targeted Encore merge path documented in `wuwabuilds/docs/sync-sources.md`).
+2. Run `py sync_backend.py` to refresh backend JSONs and Encore element badge templates.
+3. Run `py download_echo_icons.py --clean --force` only when echo icon templates need a full refresh.

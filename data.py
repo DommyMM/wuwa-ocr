@@ -113,13 +113,29 @@ def _load_from_local():
     print(f"Loaded local data: {len(CHARACTER_NAMES)} characters, {len(WEAPON_NAMES)} weapons, {len(ECHO_NAMES)} echoes")
 
 
+def _read_template_image(path: Path):
+    data = np.fromfile(str(path), dtype=np.uint8)
+    if data.size == 0:
+        return None
+    return cv2.imdecode(data, cv2.IMREAD_COLOR)
+
+
 def load_templates(folder: str, templates: dict, features: dict, target_size: tuple = None) -> int:
-    count = 0
+    loaded_names: set[str] = set()
     sift = SIFT_create()
 
-    for icon_path in (DATA_DIR / folder).glob('*.png'):
+    template_paths = sorted(
+        [
+            path
+            for suffix in ("*.png", "*.webp")
+            for path in (DATA_DIR / folder).glob(suffix)
+        ],
+        key=lambda path: (path.stem, path.suffix != ".png"),
+    )
+
+    for icon_path in template_paths:
         try:
-            img = cv2.imread(str(icon_path))
+            img = _read_template_image(icon_path)
             if img is None:
                 print(f"Failed to load template: {icon_path}")
                 continue
@@ -131,13 +147,13 @@ def load_templates(folder: str, templates: dict, features: dict, target_size: tu
             kp, des = sift.detectAndCompute(img, None)
             if des is not None:
                 features[icon_path.stem] = (kp, des)
-                count += 1
+                loaded_names.add(icon_path.stem)
             else:
                 print(f"No features detected for: {icon_path}")
 
         except Exception as e:
             print(f"Error processing template {icon_path}: {e}")
-    return count
+    return len(loaded_names)
 
 
 def load_cost_templates() -> int:

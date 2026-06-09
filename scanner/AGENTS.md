@@ -14,7 +14,7 @@ A dev-only tool that reads a player's Echo bag from the game UI and emits canoni
 | Owns | Reuses from `backend/` | Doesn't touch |
 |---|---|---|
 | `wuwa_scanner/` package (layout, identify, extract, output) | `data.py` lookups (`ECHO_NAME_MAP`, `ECHO_COSTS`, `ECHO_ELEMENTS`, `SUB_STATS`, `MAIN_STATS`, `TEMPLATE_FEATURES`, `COST_TEMPLATES`, `determine_element`) | `server.py`, `card.py`, `batch_ocr.py` — those are the export-card pipeline |
-| `bench_ocr.py`, `extract_regions.py` debug tools | `Data/Echoes/*.png`, `Data/Costs/*.jpg`, `Data/Elements/*.png` template assets | `Dockerfile`, `requirements.txt` (API service deps; scanner can add its own deps later) |
+| `bench_ocr.py`, `extract_regions.py` debug tools | `Data/Echoes/*.png`, `Data/Costs/*.jpg`, `Data/Elements/*.webp` template assets | `Dockerfile`, `requirements.txt` (API service deps; scanner can add its own deps later) |
 | `samples/`, `crops/`, `bench_results.txt` | | |
 
 Imports walk up via `Path(__file__).resolve().parents[3]` to put `backend/` on `sys.path`. When the scanner becomes its own repo or `.exe`, this layer becomes a vendored copy of the lookup tables + Data/ subset.
@@ -52,7 +52,7 @@ OCR is the only reliable signal for Phantom-vs-base because the silhouette is id
 ## Data assets needed at runtime
 
 - `backend/Data/Echoes/*.png` — ~190 icon templates, SIFT keypoints precomputed at import time.
-- `backend/Data/Elements/*.png` — element-badge templates.
+- `backend/Data/Elements/*.webp` — element-badge templates from Encore (`data.py` also supports PNG if needed).
 - `backend/Data/Costs/cost{1,3,4}.jpg` — cost-badge templates (unused in current pipeline; cost comes from name OCR, but kept for fallback).
 - `backend/Data/Echoes.json` + `EchoStats.json` — name/ID/cost/element registry and per-cost main-stat lookup.
 
