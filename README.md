@@ -9,6 +9,7 @@ Hosted at `https://ocr.wuwabuilds.moe`.
 - Legacy full-screen mode (`char.py` / `echo.py`) has been removed
 - Data is loaded from local `backend/Data/*.json` and image templates at startup import time (`data.py`)
 - Echo, character, and weapon OCR results include IDs for robust frontend matching
+- Echo and element templates may be PNG or WebP; current element templates are WebP-only.
 
 ## Start
 
@@ -127,4 +128,10 @@ Keep `backend/Data` synchronized from `wuwabuilds/scripts`:
 
 1. From `wuwabuilds/scripts`, run the data sync (`py sync_all.py`, or the targeted Encore merge path documented in `wuwabuilds/docs/sync-sources.md`).
 2. Run `py sync_backend.py` to refresh backend JSONs and Encore element badge templates.
-3. Run `py download_echo_icons.py --clean --force` only when echo icon templates need a full refresh.
+3. Run `py download_echo_icons.py --clean --force` only when echo icon templates need a full refresh. The downloader stores backend echo templates as WebP by default, converting PNG source assets when needed.
+4. To validate a full echo-template WebP swap without committing converted assets, run `py backend\regress_echo_webp.py --limit 500` from the workspace root after installing `backend/requirements.txt`.
+
+## Local Backfill Helpers
+
+- `py backend\r2_date_summary.py --since 2026-06-07T19:00:00-07:00` counts local R2 screenshots in a patch window.
+- `py backend\stage_r2_backfill.py --since 2026-06-07T19:00:00-07:00 --clean` stages a filtered folder for the frontend `/bulk-import` page.

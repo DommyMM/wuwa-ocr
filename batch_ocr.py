@@ -10,16 +10,18 @@ Usage:
 """
 import asyncio
 import aiohttp
+import argparse
 import base64
 import cv2
 import json
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 BASE_URL    = "http://localhost:5000"
 R2_BACKUP   = Path(__file__).parent.parent / "r2-backup"
 OUT_FILE    = Path(__file__).parent.parent / "ocr_results.json"
-CONCURRENCY = 40  # 10 regions × 4 images in-flight at once
+DEFAULT_CONCURRENCY = 40  # 10 regions x 4 images in-flight at once
 
 REGIONS = {
     "character": (0.0328, 0.0074, 0.3021, 0.0833),
@@ -57,9 +59,9 @@ async def post_region(session, sem, img_name, region, b64):
             return img_name, region, {"success": False, "error": str(e)}
 
 
-async def run_all(images):
+async def run_all(images, concurrency: int):
     tasks = []
-    sem   = asyncio.Semaphore(CONCURRENCY)
+    sem   = asyncio.Semaphore(concurrency)
 
     async with aiohttp.ClientSession() as session:
         for img_path, img in images:
@@ -67,7 +69,7 @@ async def run_all(images):
                 b64 = crop_b64(img, *coords)
                 tasks.append(post_region(session, sem, img_path.name, region, b64))
 
-        print(f"  Firing {len(tasks)} requests ({CONCURRENCY} concurrent) ...")
+        print(f"  Firing {len(tasks)} requests ({concurrency} concurrent) ...")
         return await asyncio.gather(*tasks)
 
 
@@ -95,15 +97,68 @@ def is_valid(entry):
     return has_char and has_echo and has_water
 
 
-def main():
+def parse_since(value: str | None) -> float | None:
+    if not value:
+        return None
+
+    text = value.strip()
+    if text.endswith("Z"):
+        text = f"{text[:-1]}+00:00"
+
+    try:
+        dt = datetime.fromisoformat(text)
+    except ValueError as exc:
+        raise SystemExit(
+            "Invalid --since. Use ISO format, e.g. "
+            "2026-06-07T19:00:00-07:00"
+        ) from exc
+
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.timestamp()
+
+
+def select_images(args) -> list[Path]:
     all_images = sorted(
-        list(R2_BACKUP.glob("*.jpg")) +
-        list(R2_BACKUP.glob("*.jpeg")) +
-        list(R2_BACKUP.glob("*.png"))
+        list(args.r2_dir.glob("*.jpg")) +
+        list(args.r2_dir.glob("*.jpeg")) +
+        list(args.r2_dir.glob("*.png")) +
+        list(args.r2_dir.glob("*.webp"))
     )
+
+    since_ts = parse_since(args.since)
+    if since_ts is not None:
+        all_images = [path for path in all_images if path.stat().st_mtime >= since_ts]
+
+    if args.offset:
+        all_images = all_images[args.offset:]
+    if args.limit:
+        all_images = all_images[:args.limit]
+
+    return all_images
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--r2-dir", type=Path, default=R2_BACKUP)
+    parser.add_argument("--out", type=Path, default=OUT_FILE)
+    parser.add_argument("--since", help="Only process files with mtime >= ISO timestamp")
+    parser.add_argument("--limit", type=int, default=0)
+    parser.add_argument("--offset", type=int, default=0)
+    parser.add_argument("--concurrency", type=int, default=DEFAULT_CONCURRENCY)
+    parser.add_argument("--list-only", action="store_true")
+    args = parser.parse_args()
+
+    all_images = select_images(args)
     if not all_images:
-        print(f"ERROR: no images found in {R2_BACKUP}")
+        print(f"ERROR: no images selected from {args.r2_dir}")
         sys.exit(1)
+
+    if args.list_only:
+        print(f"Selected {len(all_images)} images")
+        for path in all_images:
+            print(path)
+        return
 
     print(f"[1/4] Loading {len(all_images)} images ...")
     loaded = [(p, cv2.imread(str(p))) for p in all_images]
@@ -111,7 +166,7 @@ def main():
     print(f"      {len(loaded)} loaded successfully")
 
     print(f"[2/4] Running full OCR via server ...")
-    raw = asyncio.run(run_all(loaded))
+    raw = asyncio.run(run_all(loaded, args.concurrency))
 
     print(f"[3/4] Merging results ...")
     merged  = merge_results(raw)
@@ -119,14 +174,14 @@ def main():
     skipped = len(merged) - len(valid)
     print(f"      {len(valid)} valid  |  {skipped} skipped (no character/watermark)")
 
-    print(f"[4/4] Saving to {OUT_FILE} ...")
-    with open(OUT_FILE, "w", encoding="utf-8") as f:
+    print(f"[4/4] Saving to {args.out} ...")
+    with open(args.out, "w", encoding="utf-8") as f:
         json.dump(valid, f, indent=2, ensure_ascii=False)
 
     print(f"\n{'='*52}")
     print(f"  Images processed : {len(loaded)}")
     print(f"  Valid entries    : {len(valid)}")
-    print(f"  Output           : {OUT_FILE}")
+    print(f"  Output           : {args.out}")
     print()
 
 
