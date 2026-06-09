@@ -1,7 +1,7 @@
 # =======================
 # Builder stage
 # =======================
-FROM python:3.13-slim AS builder
+FROM python:3.13.13-slim-trixie AS builder
 
 WORKDIR /build
 
@@ -12,18 +12,17 @@ RUN pip install --no-cache-dir --user -r requirements.txt
 # =======================
 # Runtime stage
 # =======================
-FROM python:3.13-slim
+FROM python:3.13.13-slim-trixie
 
 WORKDIR /app
 
 # Install runtime dependencies only
-RUN apt-get update && apt-get install -y \
+RUN apt-get update && apt-get install -y --no-install-recommends \
     tesseract-ocr \
     tesseract-ocr-eng \
     libglib2.0-0 \
     libgomp1 \
     libgl1 \
-    wget \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
