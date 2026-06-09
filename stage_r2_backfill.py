@@ -1,4 +1,4 @@
-"""Stage a date-filtered subset of r2-backup for frontend /bulk-import.
+r"""Stage a date-filtered subset of r2-backup for frontend /bulk-import.
 
 The script hardlinks by default, so staging is fast and does not duplicate image
 bytes. It falls back to copying if hardlinks are unavailable.
@@ -12,6 +12,7 @@ Examples:
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shutil
 from datetime import datetime, timezone
@@ -42,6 +43,36 @@ def image_paths(root: Path) -> list[Path]:
     return sorted(paths)
 
 
+def extract_file_names(payload: object) -> set[str]:
+    if isinstance(payload, dict):
+        if isinstance(payload.get("issues"), list):
+            return extract_file_names(payload["issues"])
+        if isinstance(payload.get("files"), list):
+            return extract_file_names(payload["files"])
+        file_value = payload.get("file") or payload.get("name")
+        if isinstance(file_value, str):
+            return {Path(file_value).name}
+        return set()
+    if isinstance(payload, list):
+        names: set[str] = set()
+        for item in payload:
+            names.update(extract_file_names(item))
+        return names
+    if isinstance(payload, str):
+        return {Path(payload).name}
+    return set()
+
+
+def load_file_filter(paths: list[Path]) -> set[str] | None:
+    if not paths:
+        return None
+    names: set[str] = set()
+    for path in paths:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        names.update(extract_file_names(payload))
+    return names
+
+
 def stage_file(src: Path, dest: Path, copy: bool) -> str:
     if dest.exists():
         return "exists"
@@ -63,6 +94,8 @@ def main() -> int:
     parser.add_argument("--out-dir", type=Path, default=DEFAULT_OUT_DIR)
     parser.add_argument("--since", required=True)
     parser.add_argument("--until")
+    parser.add_argument("--files-from", type=Path, action="append", default=[], help="JSON file containing issue/file entries to stage by basename")
+    parser.add_argument("--exclude-files-from", type=Path, action="append", default=[], help="JSON file containing issue/file entries to exclude by basename")
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--offset", type=int, default=0)
     parser.add_argument("--copy", action="store_true", help="Copy files instead of hardlinking")
@@ -71,9 +104,15 @@ def main() -> int:
 
     since_ts = parse_time(args.since)
     until_ts = parse_time(args.until)
+    include_names = load_file_filter(args.files_from)
+    exclude_names = load_file_filter(args.exclude_files_from) or set()
 
     selected = []
     for path in image_paths(args.r2_dir):
+        if include_names is not None and path.name not in include_names:
+            continue
+        if path.name in exclude_names:
+            continue
         ts = path.stat().st_mtime
         if since_ts is not None and ts < since_ts:
             continue
