@@ -1,7 +1,9 @@
 import cv2
 import pytesseract
 import re
-from data import CHARACTER_NAMES, CHARACTER_ID_MAP, WEAPON_NAMES, WEAPON_ID_MAP, MAIN_STAT_NAMES, MAIN_STATS, DEFAULT_MAIN_STATS, SUB_STATS, ECHO_ELEMENTS, ECHO_COSTS, ECHO_NAME_MAP, TEMPLATE_FEATURES, COST_TEMPLATES, Rapid, determine_element
+import os
+import unicodedata
+from data import CHARACTER_NAMES, CHARACTER_ID_MAP, WEAPON_NAMES, WEAPON_ID_MAP, MAIN_STAT_NAMES, MAIN_STATS, DEFAULT_MAIN_STATS, SUB_STATS, STAT_TRANSLATIONS, ECHO_ELEMENTS, ECHO_COSTS, ECHO_NAME_MAP, TEMPLATE_FEATURES, COST_TEMPLATES, Rapid, determine_element
 import numpy as np
 from rapidfuzz import fuzz, process
 from typing import Tuple
@@ -45,6 +47,11 @@ ECHO_REGIONS = {
     "subs_values": {"x1": 290, "y1": 228, "x2": 359, "y2": 400}
 }
 
+ECHO_TEXT_OCR_LANGS = os.getenv("OCR_ECHO_TEXT_LANGS", "eng+fra+jpn+chi_tra+chi_sim")
+ECHO_TEXT_OCR_CONFIG = os.getenv("OCR_ECHO_TEXT_CONFIG", "--psm 6")
+ECHO_VALUE_OCR_CONFIG = "--psm 6 -c tessedit_char_whitelist=0123456789.%"
+STAT_VALUE_RE = re.compile(r"(.+?)\s*([+-]?\d+(?:\.\d+)?%?)$")
+
 
 def process_ocr(name: str, image: np.ndarray) -> str:
     """Process image with appropriate OCR engine"""
@@ -87,6 +94,84 @@ def preprocess_region(image):
     _, thresh = cv2.threshold(sharp, 140, 255, cv2.THRESH_BINARY)
     return thresh
 
+def tesseract_text_lines(image, *, lang: str | None = None, config: str = "--psm 6") -> list[str]:
+    kwargs = {"config": config}
+    if lang:
+        kwargs["lang"] = lang
+    text = pytesseract.image_to_string(image, **kwargs)
+    return [line.strip() for line in text.splitlines() if line.strip()]
+
+def normalize_stat_alias(text: str) -> str:
+    text = unicodedata.normalize("NFKC", text).replace("％", "%")
+    text = "".join(
+        char
+        for char in unicodedata.normalize("NFKD", text)
+        if not unicodedata.combining(char)
+    )
+    text = text.casefold()
+    return re.sub(r"[\s:：・.'’`´\-_/()+]+", "", text)
+
+def _display_aliases_for_stat(canonical: str) -> set[str]:
+    aliases = {
+        canonical,
+        canonical.replace("Crit Rate", "Crit. Rate").replace("Crit DMG", "Crit. DMG"),
+    }
+    if canonical.endswith(" DMG"):
+        aliases.add(f"{canonical} Bonus")
+
+    translations = STAT_TRANSLATIONS.get(canonical, {})
+    aliases.update(
+        str(value)
+        for key, value in translations.items()
+        if key != "icon" and value
+    )
+
+    if canonical in {"HP%", "ATK%", "DEF%"}:
+        base = canonical[:-1]
+        aliases.update(f"{alias}%" for alias in _display_aliases_for_stat(base) if alias)
+
+    return aliases
+
+_STAT_ALIAS_INDEX: dict[str, set[str]] | None = None
+
+def stat_alias_index() -> dict[str, set[str]]:
+    global _STAT_ALIAS_INDEX
+    if _STAT_ALIAS_INDEX is None:
+        canonical_names = set(MAIN_STAT_NAMES) | set(SUB_STATS.keys())
+        canonical_names.update(key for key in STAT_TRANSLATIONS if key in canonical_names)
+        _STAT_ALIAS_INDEX = {
+            canonical: {
+                normalized
+                for alias in _display_aliases_for_stat(canonical)
+                if (normalized := normalize_stat_alias(alias))
+            }
+            for canonical in canonical_names
+        }
+    return _STAT_ALIAS_INDEX
+
+def resolve_localized_stat(name: str, valid_names: set, *, score_cutoff: int = 72) -> str | None:
+    if not valid_names:
+        return None
+
+    normalized = normalize_stat_alias(name)
+    if not normalized:
+        return None
+
+    best_name = None
+    best_score = -1
+    for canonical, aliases in stat_alias_index().items():
+        if canonical not in valid_names:
+            continue
+        if normalized in aliases:
+            return canonical
+        for alias in aliases:
+            score = fuzz.ratio(normalized, alias)
+            if score > best_score:
+                best_name = canonical
+                best_score = score
+
+    return best_name if best_name and best_score >= score_cutoff else None
+
 def clean_stat_name(name: str, value: str) -> str:
     name = re.sub(r'\s+', ' ', name.strip()).replace("Crit.", "Crit").rstrip('.')
     if name.upper() in ["ATK", "HP", "DEF"] and "%" in value:
@@ -96,6 +181,9 @@ def clean_stat_name(name: str, value: str) -> str:
 def validate_stat(name: str, valid_names: set) -> str:
     if not valid_names:
         return name
+    localized = resolve_localized_stat(name, valid_names)
+    if localized:
+        return localized
     match = process.extractOne(name, list(valid_names))
     return match[0] if match else name
 
@@ -106,6 +194,12 @@ def validate_substat_name(name: str, value: str) -> str:
     if base in {"HP", "ATK", "DEF"}:
         return f"{base}%" if "%" in value else base
     return matched
+
+def split_stat_line(line: str) -> tuple[str, str] | None:
+    match = STAT_VALUE_RE.match(line.strip())
+    if not match:
+        return None
+    return match.group(1).strip(), match.group(2).strip()
 
 def validate_value(value: str, stat_name: str) -> str:
     if not SUB_STATS or stat_name not in SUB_STATS:
@@ -161,6 +255,16 @@ def rapid_text_lines(image) -> list[str]:
     result, _ = Rapid(image)
     return [text for _, text, _ in result] if result else []
 
+def recognized_substat_name_count(names: list[str]) -> int:
+    return sum(1 for name in names if resolve_localized_stat(name, SUB_STATS.keys()))
+
+def choose_best_substat_name_lines(*candidates: list[str]) -> list[str]:
+    return max(
+        candidates,
+        key=lambda lines: (recognized_substat_name_count(clean_echo_substat_name_lines(lines)), len(lines)),
+        default=[],
+    )
+
 def reconcile_echo_substat_rows(
     names_img,
     values_img,
@@ -194,6 +298,10 @@ def reconcile_echo_substat_rows(
             names = candidate_names
         if len(candidate_values) > len(values) and len(candidate_values) >= len(names):
             values = candidate_values
+
+    candidate_names = get_rapid_names()
+    if recognized_substat_name_count(candidate_names) > recognized_substat_name_count(names):
+        names = candidate_names
 
     has_invalid_value = any(
         not is_legal_substat_value(
@@ -301,8 +409,8 @@ def parse_region_text(name, text):
             if not lines:
                 return []
             
-            main_parts = lines[0].rsplit(' ', 1)
-            if len(main_parts) != 2:
+            main_parts = split_stat_line(lines[0])
+            if not main_parts:
                 return []
             main_name, main_value = main_parts
             main_name = clean_stat_name(main_name, main_value)
@@ -314,8 +422,8 @@ def parse_region_text(name, text):
             substats = []
             for i, line in enumerate(lines[1:], 1):
                 print(f"Substat {i}: '{line}'")
-                parts = line.rsplit(' ', 1)
-                if len(parts) != 2:
+                parts = split_stat_line(line)
+                if not parts:
                     continue
                     
                 stat_name, stat_value = parts
@@ -589,6 +697,19 @@ def clean_echo_substat_name_lines(lines: list[str]) -> list[str]:
         if not line:
             continue
 
+        if cleaned_names:
+            previous = cleaned_names[-1]
+            combined = f"{previous} {line}"
+            combined_match = resolve_localized_stat(combined, SUB_STATS.keys())
+            previous_match = resolve_localized_stat(previous, SUB_STATS.keys())
+            current_match = resolve_localized_stat(line, SUB_STATS.keys())
+            previous_looks_incomplete = bool(
+                re.search(r"\b(bonus|dmg|attack|attaque|degats|dégats|dégâts)\b", previous, re.IGNORECASE)
+            )
+            if combined_match and not current_match and (not previous_match or previous_looks_incomplete):
+                cleaned_names[-1] = combined
+                continue
+
         fragment = _canonical_stat_fragment(line)
         is_wrapped_dmg_bonus_line = (
             _CAN_MERGE_DMG_BONUS_CONTINUATIONS
@@ -598,7 +719,11 @@ def clean_echo_substat_name_lines(lines: list[str]) -> list[str]:
                 or (len(fragment) <= 12 and fuzz.ratio(fragment, "dmgbonus") >= 75)
             )
         )
-        if cleaned_names and is_wrapped_dmg_bonus_line:
+        if (
+            cleaned_names
+            and is_wrapped_dmg_bonus_line
+            and not resolve_localized_stat(cleaned_names[-1], SUB_STATS.keys())
+        ):
             cleaned_names[-1] = _ensure_dmg_bonus_suffix(cleaned_names[-1])
             continue
 
@@ -643,8 +768,8 @@ def process_card(image, region: str):
             # Process main region
             main_img = image[ECHO_REGIONS["main"]["y1"]:ECHO_REGIONS["main"]["y2"], ECHO_REGIONS["main"]["x1"]:ECHO_REGIONS["main"]["x2"]]
             main_processed = preprocess_region(main_img)
-            main_lines = [l.strip() for l in pytesseract.image_to_string(main_processed).splitlines() if l.strip()]
-            main_text = f"{main_lines[0]} {main_lines[1]}" if len(main_lines) >= 2 else ""
+            main_lines = tesseract_text_lines(main_processed, lang=ECHO_TEXT_OCR_LANGS, config=ECHO_TEXT_OCR_CONFIG)
+            main_text = f"{main_lines[0]} {main_lines[1]}" if len(main_lines) >= 2 else (main_lines[0] if main_lines else "")
             
             # Process subs regions separately
             names_img = image[ECHO_REGIONS["subs_names"]["y1"]:ECHO_REGIONS["subs_names"]["y2"], ECHO_REGIONS["subs_names"]["x1"]:ECHO_REGIONS["subs_names"]["x2"]]
@@ -654,8 +779,11 @@ def process_card(image, region: str):
             values_processed = preprocess_region(values_img)
             
             # Get raw lines
-            names_lines = [l.strip() for l in pytesseract.image_to_string(names_processed).splitlines() if l.strip()]
-            tess_values = [l.strip() for l in pytesseract.image_to_string(values_processed).splitlines() if l.strip()]
+            names_lines = choose_best_substat_name_lines(
+                tesseract_text_lines(names_img, lang=ECHO_TEXT_OCR_LANGS, config=ECHO_TEXT_OCR_CONFIG),
+                tesseract_text_lines(names_processed, lang=ECHO_TEXT_OCR_LANGS, config=ECHO_TEXT_OCR_CONFIG),
+            )
+            tess_values = tesseract_text_lines(values_processed, config=ECHO_VALUE_OCR_CONFIG)
             
             cleaned_names, values_lines, rapid_values = reconcile_echo_substat_rows(
                 names_img,
