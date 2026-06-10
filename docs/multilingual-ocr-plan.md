@@ -39,6 +39,18 @@ panels, OCRs that smaller high-signal area, and classifies likely non-English
 cards by Unicode script plus fuzzy matches against non-English stat
 translations.
 
+Each scan row includes triage fields:
+
+- `alias_backed`: at least one localized stat translation was detected.
+- `hit_count`: number of localized stat aliases detected.
+- `line_count`: number of OCR text lines from the echo-name scout crop.
+- `build_card_signal`: conservative validation-set signal, currently
+  `hit_count >= 5`.
+
+Use broad `candidate=true` rows to discover non-English screenshots. Build
+parser validation sets from `build_card_signal=true` rows first; script-only
+and low-hit candidates can include ordinary character screens or other UI.
+
 Default output:
 
 ```text
@@ -71,6 +83,8 @@ Generated forensic outputs are ignored by git.
   - `f32421ba8b1f3dc0.jpg` as Japanese
   - `cce1a0f29186891b.jpg` as French
   - `5e17036118784d4b.jpg` as CJK
+- Prefer `build_card_signal=true` rows when choosing the 50-100 localized
+  images for parser validation.
 - Run `backend/test_frontend_split.py` on representative English and localized
   cards. Echo outputs should remain schema-compatible and stat names should be
   canonical English.

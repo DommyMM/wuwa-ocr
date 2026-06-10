@@ -167,10 +167,17 @@ def script_counts(text: str) -> dict[str, int]:
 
 def alias_hits(text: str, aliases: list[dict[str, str]], cutoff: int) -> list[dict[str, Any]]:
     normalized_text = normalize_alias(text)
+    if len(normalized_text) < 8:
+        return []
     hits: list[dict[str, Any]] = []
     seen: set[tuple[str, str, str]] = set()
     for alias in aliases:
-        score = 100 if alias["normalized"] in normalized_text else fuzz.partial_ratio(alias["normalized"], normalized_text)
+        alias_norm = alias["normalized"]
+        if len(alias_norm) < 2:
+            continue
+        score = 100 if alias_norm in normalized_text else 0
+        if not score and len(alias_norm) >= 3 and len(normalized_text) >= len(alias_norm):
+            score = fuzz.partial_ratio(alias_norm, normalized_text)
         if score < cutoff:
             continue
         key = (alias["canonical"], alias["lang"], alias["label"])
@@ -224,6 +231,10 @@ def scan_one(
         "bytes": path.stat().st_size,
         "decode_ok": False,
         "candidate": False,
+        "alias_backed": False,
+        "build_card_signal": False,
+        "hit_count": 0,
+        "line_count": 0,
         "language": "unknown",
         "confidence": 0,
         "scripts": {},
@@ -257,6 +268,10 @@ def scan_one(
     candidate, language, confidence = classify(text, hits, scripts)
     base.update({
         "candidate": candidate,
+        "alias_backed": bool(hits),
+        "build_card_signal": len(hits) >= 5,
+        "hit_count": len(hits),
+        "line_count": len(text.splitlines()),
         "language": language,
         "confidence": confidence,
         "scripts": scripts,
@@ -268,7 +283,21 @@ def scan_one(
 
 
 def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
-    fields = ["file", "language", "confidence", "elapsed_ms", "bytes", "width", "height", "hit_count", "top_hits", "text"]
+    fields = [
+        "file",
+        "language",
+        "confidence",
+        "alias_backed",
+        "build_card_signal",
+        "elapsed_ms",
+        "bytes",
+        "width",
+        "height",
+        "hit_count",
+        "line_count",
+        "top_hits",
+        "text",
+    ]
     with path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fields)
         writer.writeheader()
@@ -277,11 +306,14 @@ def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
                 "file": row["file"],
                 "language": row["language"],
                 "confidence": row["confidence"],
+                "alias_backed": row.get("alias_backed", bool(row["hits"])),
+                "build_card_signal": row.get("build_card_signal", len(row["hits"]) >= 5),
                 "elapsed_ms": row.get("elapsed_ms", 0),
                 "bytes": row["bytes"],
                 "width": row.get("width", 0),
                 "height": row.get("height", 0),
-                "hit_count": len(row["hits"]),
+                "hit_count": row.get("hit_count", len(row["hits"])),
+                "line_count": row.get("line_count", len(row["text"].splitlines())),
                 "top_hits": "; ".join(f"{hit['lang']}:{hit['canonical']}={hit['label']}({hit['score']})" for hit in row["hits"][:5]),
                 "text": row["text"].replace("\n", " / "),
             })
@@ -399,6 +431,8 @@ def main() -> int:
         "total": len(rows),
         "decoded": sum(1 for row in rows if row["decode_ok"]),
         "candidates": len(candidates),
+        "alias_backed_candidates": sum(1 for row in candidates if row.get("alias_backed", bool(row["hits"]))),
+        "build_card_signal_candidates": sum(1 for row in candidates if row.get("build_card_signal", len(row["hits"]) >= 5)),
         "languages": dict(Counter(row["language"] for row in candidates)),
         "known_samples": {
             name: next((row for row in rows if row["file"].lower() == name.lower()), None)

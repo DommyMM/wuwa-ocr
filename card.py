@@ -120,11 +120,12 @@ def _display_aliases_for_stat(canonical: str) -> set[str]:
         aliases.add(f"{canonical} Bonus")
 
     translations = STAT_TRANSLATIONS.get(canonical, {})
-    aliases.update(
-        str(value)
-        for key, value in translations.items()
-        if key != "icon" and value
-    )
+    if isinstance(translations, dict):
+        aliases.update(
+            str(value)
+            for key, value in translations.items()
+            if key != "icon" and value
+        )
 
     if canonical in {"HP%", "ATK%", "DEF%"}:
         base = canonical[:-1]
@@ -407,11 +408,11 @@ def parse_region_text(name, text):
         case _ if name.startswith("echo"):
             lines = [l.strip() for l in text.split('\n') if l.strip()]
             if not lines:
-                return []
+                return {"main": {}, "substats": []}
             
             main_parts = split_stat_line(lines[0])
             if not main_parts:
-                return []
+                return {"main": {}, "substats": []}
             main_name, main_value = main_parts
             main_name = clean_stat_name(main_name, main_value)
             main_name = validate_stat(main_name, MAIN_STAT_NAMES)
@@ -826,8 +827,8 @@ def process_card(image, region: str):
                 "success": True,
                 "analysis": {
                     "name": {"name": ECHO_NAME_MAP.get(name, name), "id": name, "confidence": float(confidence)},
-                    "main": echo_data.get("main", {}),
-                    "substats": echo_data.get("substats", []),
+                    "main": main,
+                    "substats": echo_data.get("substats", []) if isinstance(echo_data, dict) else [],
                     "element": element_data
                 }
             }
