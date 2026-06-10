@@ -168,32 +168,44 @@ def reconcile_echo_substat_rows(
     tess_values: list[str],
 ) -> tuple[list[str], list[str], list[str]]:
     """Align substat name/value rows without assuming maxed echoes have 5 rows."""
-    cleaned_names = clean_echo_substat_name_lines(names_lines)
-    values_lines = tess_values
-    rapid_values: list[str] = []
+    names = clean_echo_substat_name_lines(names_lines)
+    values = tess_values
+    rapid_names: list[str] | None = None
+    rapid_values: list[str] | None = None
 
-    if len(values_lines) < len(cleaned_names):
-        candidate_values = rapid_text_lines(values_img)
-        if len(candidate_values) >= len(cleaned_names):
-            rapid_values = candidate_values
-            values_lines = candidate_values
+    def get_rapid_names() -> list[str]:
+        nonlocal rapid_names
+        if rapid_names is None:
+            rapid_names = clean_echo_substat_name_lines(rapid_text_lines(names_img))
+        return rapid_names
 
-    if len(cleaned_names) < len(values_lines):
-        rapid_cleaned_names = clean_echo_substat_name_lines(rapid_text_lines(names_img))
-        if len(rapid_cleaned_names) >= len(values_lines):
-            cleaned_names = rapid_cleaned_names
+    def get_rapid_values() -> list[str]:
+        nonlocal rapid_values
+        if rapid_values is None:
+            rapid_values = rapid_text_lines(values_img)
+        return rapid_values
 
-    has_invalid_tess_value = any(
+    if len(names) != len(values):
+        candidate_names = get_rapid_names()
+        candidate_values = get_rapid_values()
+        target_count = max(len(names), len(values))
+
+        if len(candidate_names) > len(names) and len(candidate_names) >= target_count:
+            names = candidate_names
+        if len(candidate_values) > len(values) and len(candidate_values) >= len(names):
+            values = candidate_values
+
+    has_invalid_value = any(
         not is_legal_substat_value(
             value,
             validate_substat_name(name, value),
         )
-        for name, value in zip(cleaned_names, values_lines)
+        for name, value in zip(names, values)
     )
-    if has_invalid_tess_value and not rapid_values:
-        rapid_values = rapid_text_lines(values_img)
+    if has_invalid_value:
+        get_rapid_values()
 
-    return cleaned_names, values_lines, rapid_values
+    return names, values, rapid_values or []
 
 def format_stat_value(value) -> str:
     try:
