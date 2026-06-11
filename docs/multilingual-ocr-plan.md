@@ -107,6 +107,29 @@ Latest local validation:
 - Strong candidate languages: French `4/4` images, Japanese `93/93`, Chinese
   `26/26`.
 
+## Local Performance Snapshot
+
+`backend/benchmark_card_versions.py` compares the current parser with
+`card.py` from `91f9d2b` on three English cards and three localized cards. It
+includes Python startup, data/template loading, crop encoding, worker startup,
+and parser execution. This is an apples-to-apples local benchmark, not an exact
+production HTTP trace.
+
+Latest local run with `--region-workers 10`:
+
+| Set | Parser | Wall time | Echoes with >=3 substats |
+| --- | --- | ---: | ---: |
+| English, 3 cards | old `91f9d2b` | `18.728s` | `15/15` |
+| English, 3 cards | current multilingual | `30.534s` | `15/15` |
+| Localized, 3 cards | old `91f9d2b` | `19.373s` | `13/15` |
+| Localized, 3 cards | current multilingual | `28.152s` | `15/15` |
+
+Takeaway: localized echo parsing is now materially better, but default
+multilingual echo OCR is slower than the old path on English screenshots. If
+English import latency needs to stay near the old baseline, add an English-first
+fast path and run multilingual OCR only when English echo parsing is weak or the
+scout detects localized scripts/aliases.
+
 ## Contract
 
 The API response shape does not change:
