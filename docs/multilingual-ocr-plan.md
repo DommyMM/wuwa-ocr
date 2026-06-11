@@ -98,6 +98,15 @@ python -u backend\validate_non_english_cards.py --workers 8 --progress-every 10
   canonical English.
 - Confirm legal value snapping still comes from `EchoStats.json`.
 
+Latest local validation:
+
+- Scout run: `10,847` images decoded, `631` broad candidates,
+  `123` strong `build_card_signal=true` candidates.
+- Strong candidate parser run: `123` images, `615` echoes, `615` passed the
+  current parser heuristic (`main.name` plus at least three substats).
+- Strong candidate languages: French `4/4` images, Japanese `93/93`, Chinese
+  `26/26`.
+
 ## Contract
 
 The API response shape does not change:

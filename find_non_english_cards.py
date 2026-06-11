@@ -45,6 +45,13 @@ ECHO_REGIONS = [
 ECHO_SUBSTAT_NAMES = {"x1": 36 / 368, "x2": 290 / 368, "y1": 228 / 413, "y2": 400 / 413}
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
 LANG_KEYS = ("fr", "ja", "zh-Hans", "zh-Hant")
+ALIAS_CHAR_MAP = str.maketrans({
+    "撃": "擊",
+    "击": "擊",
+    "擎": "擊",
+    "鸣": "鳴",
+    "喘": "鳴",
+})
 
 
 def image_paths(root: Path) -> list[Path]:
@@ -82,13 +89,14 @@ def select_images(args: argparse.Namespace) -> list[Path]:
 
 def normalize_alias(text: str) -> str:
     text = unicodedata.normalize("NFKC", text).replace("％", "%")
+    text = text.translate(ALIAS_CHAR_MAP)
     text = "".join(
         char
         for char in unicodedata.normalize("NFKD", text)
         if not unicodedata.combining(char)
     )
     text = text.casefold()
-    return re.sub(r"[\s:：・.'’`´\-_/()+]+", "", text)
+    return re.sub(r"[\d\s:：・.'’`´\-_/()+]+", "", text)
 
 
 def load_aliases(stats_path: Path) -> list[dict[str, str]]:

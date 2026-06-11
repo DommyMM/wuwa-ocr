@@ -51,6 +51,13 @@ ECHO_TEXT_OCR_LANGS = os.getenv("OCR_ECHO_TEXT_LANGS", "eng+fra+jpn+chi_tra+chi_
 ECHO_TEXT_OCR_CONFIG = os.getenv("OCR_ECHO_TEXT_CONFIG", "--psm 6")
 ECHO_VALUE_OCR_CONFIG = "--psm 6 -c tessedit_char_whitelist=0123456789.%"
 STAT_VALUE_RE = re.compile(r"(.+?)\s*([+-]?\d+(?:\.\d+)?%?)$")
+STAT_ALIAS_CHAR_MAP = str.maketrans({
+    "撃": "擊",
+    "击": "擊",
+    "擎": "擊",
+    "鸣": "鳴",
+    "喘": "鳴",
+})
 
 
 def process_ocr(name: str, image: np.ndarray) -> str:
@@ -103,13 +110,14 @@ def tesseract_text_lines(image, *, lang: str | None = None, config: str = "--psm
 
 def normalize_stat_alias(text: str) -> str:
     text = unicodedata.normalize("NFKC", text).replace("％", "%")
+    text = text.translate(STAT_ALIAS_CHAR_MAP)
     text = "".join(
         char
         for char in unicodedata.normalize("NFKD", text)
         if not unicodedata.combining(char)
     )
     text = text.casefold()
-    return re.sub(r"[\s:：・.'’`´\-_/()+]+", "", text)
+    return re.sub(r"[\d\s:：・.'’`´\-_/()+]+", "", text)
 
 def _display_aliases_for_stat(canonical: str) -> set[str]:
     aliases = {
@@ -210,10 +218,23 @@ def validate_value(value: str, stat_name: str) -> str:
     clean_value = value.replace('%', '')
     
     try:
+        valid_numbers = [float(v) for v in SUB_STATS[stat_name]]
         valid_values = [str(v) for v in SUB_STATS[stat_name]]
+        float_value = float(clean_value)
+        for valid in valid_numbers:
+            if abs(float_value - valid) <= 0.05:
+                return f"{valid:g}%" if had_percent else f"{valid:g}"
+
+        if had_percent and re.fullmatch(r"\+?\d(?:\.\d+)?", clean_value.strip()):
+            repaired_text = clean_value.strip().replace("+", "", 1)
+            repaired_value = float(f"1{repaired_text}")
+            for valid in valid_numbers:
+                if abs(repaired_value - valid) <= 0.05:
+                    print(f"Substat value repair: {stat_name} {value!r} -> {valid:g}%")
+                    return f"{valid:g}%"
+
         match = process.extractOne(clean_value, valid_values)
         if match:
-            float_value = float(clean_value)
             matched_value = float(match[0])
             if abs(float_value - matched_value) > 2.0:
                 closest = min(SUB_STATS[stat_name], key=lambda x: abs(float_value - x))
