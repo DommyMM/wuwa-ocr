@@ -47,6 +47,7 @@ ECHO_REGIONS = {
     "subs_values": {"x1": 290, "y1": 228, "x2": 359, "y2": 400}
 }
 
+ECHO_FAST_TEXT_OCR_LANGS = os.getenv("OCR_ECHO_FAST_TEXT_LANGS", "eng")
 ECHO_TEXT_OCR_LANGS = os.getenv("OCR_ECHO_TEXT_LANGS", "eng+fra+jpn+chi_tra+chi_sim")
 ECHO_TEXT_OCR_CONFIG = os.getenv("OCR_ECHO_TEXT_CONFIG", "--psm 6")
 ECHO_VALUE_OCR_CONFIG = "--psm 6 -c tessedit_char_whitelist=0123456789.%"
@@ -107,6 +108,24 @@ def tesseract_text_lines(image, *, lang: str | None = None, config: str = "--psm
         kwargs["lang"] = lang
     text = pytesseract.image_to_string(image, **kwargs)
     return [line.strip() for line in text.splitlines() if line.strip()]
+
+def echo_language_hint(lines: list[str]) -> str:
+    text = "\n".join(lines)
+    kana = len(re.findall(r"[\u3040-\u30ff]", text))
+    cjk = len(re.findall(r"[\u3400-\u9fff]", text))
+    latin_accent = len(re.findall(r"[À-ÖØ-öø-ÿ]", text))
+    if kana:
+        return "eng+jpn"
+    if cjk:
+        return ECHO_TEXT_OCR_LANGS
+    if latin_accent:
+        return "eng+fra"
+    return ECHO_TEXT_OCR_LANGS
+
+def has_localized_text_signal(lines: list[str]) -> bool:
+    return echo_language_hint(lines) != ECHO_TEXT_OCR_LANGS or bool(
+        re.search(r"[\u3400-\u9fff]", "\n".join(lines))
+    )
 
 def normalize_stat_alias(text: str) -> str:
     text = unicodedata.normalize("NFKC", text).replace("％", "%")
@@ -190,10 +209,17 @@ def clean_stat_name(name: str, value: str) -> str:
 def validate_stat(name: str, valid_names: set) -> str:
     if not valid_names:
         return name
+    if name in valid_names:
+        return name
+
+    match = process.extractOne(name, list(valid_names))
+    ascii_like = not re.search(r"[^\x00-\x7F]", name)
+    if ascii_like and match and match[1] >= 80:
+        return match[0]
+
     localized = resolve_localized_stat(name, valid_names)
     if localized:
         return localized
-    match = process.extractOne(name, list(valid_names))
     return match[0] if match else name
 
 def validate_substat_name(name: str, value: str) -> str:
@@ -790,8 +816,6 @@ def process_card(image, region: str):
             # Process main region
             main_img = image[ECHO_REGIONS["main"]["y1"]:ECHO_REGIONS["main"]["y2"], ECHO_REGIONS["main"]["x1"]:ECHO_REGIONS["main"]["x2"]]
             main_processed = preprocess_region(main_img)
-            main_lines = tesseract_text_lines(main_processed, lang=ECHO_TEXT_OCR_LANGS, config=ECHO_TEXT_OCR_CONFIG)
-            main_text = f"{main_lines[0]} {main_lines[1]}" if len(main_lines) >= 2 else (main_lines[0] if main_lines else "")
             
             # Process subs regions separately
             names_img = image[ECHO_REGIONS["subs_names"]["y1"]:ECHO_REGIONS["subs_names"]["y2"], ECHO_REGIONS["subs_names"]["x1"]:ECHO_REGIONS["subs_names"]["x2"]]
@@ -799,36 +823,54 @@ def process_card(image, region: str):
             
             names_processed = preprocess_region(names_img)
             values_processed = preprocess_region(values_img)
-            
-            # Get raw lines
-            names_lines = choose_best_substat_name_lines(
-                tesseract_text_lines(names_img, lang=ECHO_TEXT_OCR_LANGS, config=ECHO_TEXT_OCR_CONFIG),
-                tesseract_text_lines(names_processed, lang=ECHO_TEXT_OCR_LANGS, config=ECHO_TEXT_OCR_CONFIG),
-            )
             tess_values = tesseract_text_lines(values_processed, config=ECHO_VALUE_OCR_CONFIG)
-            
-            cleaned_names, values_lines, rapid_values = reconcile_echo_substat_rows(
-                names_img,
-                values_img,
-                names_lines,
-                tess_values,
-            )
 
-            values = [
-                choose_substat_value(
-                    name,
-                    value,
-                    rapid_values[i] if i < len(rapid_values) else None,
+            def parse_echo_with_lang(lang: str, *, include_raw_names: bool = False):
+                main_lines = tesseract_text_lines(main_processed, lang=lang, config=ECHO_TEXT_OCR_CONFIG)
+                main_text = f"{main_lines[0]} {main_lines[1]}" if len(main_lines) >= 2 else (main_lines[0] if main_lines else "")
+                names_raw_lines = (
+                    tesseract_text_lines(names_img, lang=lang, config=ECHO_TEXT_OCR_CONFIG)
+                    if include_raw_names
+                    else []
                 )
-                for i, (name, value) in enumerate(zip(cleaned_names, values_lines[:5]))
-            ]
-            subs_text = "\n".join(f"{name} {value}" for name, value in zip(cleaned_names, values))
-            cleaned_text = f"{main_text}\n{subs_text}"
+                names_pre_lines = tesseract_text_lines(names_processed, lang=lang, config=ECHO_TEXT_OCR_CONFIG)
+                names_lines = choose_best_substat_name_lines(names_raw_lines, names_pre_lines)
+
+                cleaned_names, values_lines, rapid_values = reconcile_echo_substat_rows(
+                    names_img,
+                    values_img,
+                    names_lines,
+                    tess_values,
+                )
+                values = [
+                    choose_substat_value(
+                        name,
+                        value,
+                        rapid_values[i] if i < len(rapid_values) else None,
+                    )
+                    for i, (name, value) in enumerate(zip(cleaned_names, values_lines[:5]))
+                ]
+                subs_text = "\n".join(f"{name} {value}" for name, value in zip(cleaned_names, values))
+                echo_data = parse_region_text(region, f"{main_text}\n{subs_text}")
+                return echo_data, main_lines + names_raw_lines + names_pre_lines + cleaned_names
+
+            echo_data, language_probe_lines = parse_echo_with_lang(ECHO_FAST_TEXT_OCR_LANGS)
+            main = echo_data.get("main", {}) if isinstance(echo_data, dict) else {}
+            substats = echo_data.get("substats", []) if isinstance(echo_data, dict) else []
+            localized_signal = has_localized_text_signal(language_probe_lines)
+            if not main or len(substats) < 3 or localized_signal:
+                rapid_probe_lines = rapid_text_lines(names_img)
+                fallback_lang = echo_language_hint(language_probe_lines + rapid_probe_lines)
+                if fallback_lang != ECHO_FAST_TEXT_OCR_LANGS:
+                    print(
+                        f"Echo OCR fallback: {ECHO_FAST_TEXT_OCR_LANGS} -> {fallback_lang} "
+                        f"(main={bool(main)}, substats={len(substats)}, localized={localized_signal})"
+                    )
+                    echo_data, _ = parse_echo_with_lang(fallback_lang, include_raw_names=True)
+                    main = echo_data.get("main", {}) if isinstance(echo_data, dict) else {}
 
             name, confidence, element_data = match_icon(image)
             print(f"Echo identified: {name} (confidence: {confidence:.2%})")
-            echo_data = parse_region_text(region, cleaned_text)
-            main = echo_data.get("main", {}) if isinstance(echo_data, dict) else {}
             if main:
                 cost = ECHO_COSTS.get(name, 0)
                 max_value = max_main_stat_value(cost, main.get("name", ""))

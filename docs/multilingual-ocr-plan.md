@@ -115,20 +115,25 @@ includes Python startup, data/template loading, crop encoding, worker startup,
 and parser execution. This is an apples-to-apples local benchmark, not an exact
 production HTTP trace.
 
-Latest local run with `--region-workers 10`:
+Current behavior uses an English-first echo OCR fast path. If that pass is weak
+or localized script/alias text is detected, the parser retries with a targeted
+fallback language set, using the full multilingual set for uncertain CJK.
+
+Latest local run with `--region-workers 10` after the fast path:
 
 | Set | Parser | Wall time | Echoes with >=3 substats |
 | --- | --- | ---: | ---: |
-| English, 3 cards | old `91f9d2b` | `18.728s` | `15/15` |
-| English, 3 cards | current multilingual | `30.534s` | `15/15` |
-| Localized, 3 cards | old `91f9d2b` | `19.373s` | `13/15` |
-| Localized, 3 cards | current multilingual | `28.152s` | `15/15` |
+| English, 3 cards | old `91f9d2b` | `19.286s` | `15/15` |
+| English, 3 cards | current fast path | `29.119s` | `15/15` |
+| Localized, 3 cards | old `91f9d2b` | `19.378s` | `13/15` |
+| Localized, 3 cards | current fast path + fallback | `37.324s` | `15/15` |
 
-Takeaway: localized echo parsing is now materially better, but default
-multilingual echo OCR is slower than the old path on English screenshots. If
-English import latency needs to stay near the old baseline, add an English-first
-fast path and run multilingual OCR only when English echo parsing is weak or the
-scout detects localized scripts/aliases.
+Takeaway: localized echo parsing remains clean, but the current parser is still
+slower than `91f9d2b` in this local process-pool benchmark. The English fast
+path avoids unconditional multilingual OCR, but the newer row reconciliation,
+value repair, and canonicalization work still add local overhead. Production
+HTTP latency should be checked separately because this benchmark includes
+Python startup, data/template loading, crop encoding, and worker startup.
 
 ## Contract
 
