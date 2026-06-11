@@ -85,6 +85,14 @@ Generated forensic outputs are ignored by git.
   - `5e17036118784d4b.jpg` as CJK
 - Prefer `build_card_signal=true` rows when choosing the 50-100 localized
   images for parser validation.
+- Run `backend/validate_non_english_cards.py` against the strong candidate set
+  to write repeatable parser results, summary, and failure CSV files:
+
+```powershell
+$env:PYTHONPATH='C:\Users\domin\AppData\Roaming\Python\Python313\site-packages'
+python -u backend\validate_non_english_cards.py --workers 8 --progress-every 10
+```
+
 - Run `backend/test_frontend_split.py` on representative English and localized
   cards. Echo outputs should remain schema-compatible and stat names should be
   canonical English.
