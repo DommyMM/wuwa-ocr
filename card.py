@@ -11,6 +11,11 @@ from cv2 import SIFT_create, FlannBasedMatcher
 import io
 import sys
 
+# Minimum fuzz.ratio score for a weapon-name OCR read to be trusted. Real reads
+# (even with OCR noise) score ~92-100; unreadable/garbled text stays under ~40.
+# Below this, the weapon is reported as missing rather than guessed.
+WEAPON_NAME_MIN_SCORE = 75
+
 ROVER_ELEMENTS = ("Aero", "Spectro", "Havoc")
 ROVER_ELEMENT_ALIASES = {
     "Aero": ("aero", "acro"),
@@ -347,10 +352,6 @@ def reconcile_echo_substat_rows(
         if len(candidate_values) > len(values) and len(candidate_values) >= len(names):
             values = candidate_values
 
-    candidate_names = get_rapid_names()
-    if recognized_substat_name_count(candidate_names) > recognized_substat_name_count(names):
-        names = candidate_names
-
     has_invalid_value = any(
         not is_legal_substat_value(
             value,
@@ -432,24 +433,36 @@ def parse_region_text(name, text):
             }
 
         case "weapon":
-            def validate_weapon_name(raw_name: str) -> str:
-                if not WEAPON_NAMES:
-                    return raw_name
-                match = process.extractOne(raw_name, WEAPON_NAMES)
-                return match[0] if match else raw_name
+            # Match against the known weapon list with a length-sensitive scorer
+            # and a cutoff so unreadable text resolves to "missing" instead of
+            # snapping to the nearest (often long) name like Legend of Drunken
+            # Hero. Real reads score ~92-100 even with OCR noise; garbage stays
+            # well under the cutoff. Empty/below-cutoff -> "" so the frontend can
+            # apply its signature-weapon fallback or flag the weapon as missing.
+            def validate_weapon_name(raw_name: str):
+                if not WEAPON_NAMES or not raw_name:
+                    return None
+                match = process.extractOne(
+                    raw_name, WEAPON_NAMES,
+                    scorer=fuzz.ratio, score_cutoff=WEAPON_NAME_MIN_SCORE,
+                )
+                return match[0] if match else None
             lines = text.split('\n')
-            raw_name = lines[0].strip() if lines else "Unknown"
+            raw_name = lines[0].strip() if lines else ""
             weapon_name = validate_weapon_name(raw_name)
+            # Scan every line for the level: when the name doesn't render, OCR
+            # returns only "LV.xx" and it lands on line 0 (the name slot), so
+            # restricting to lines[1:] would miss it and default to 1.
             level = 1
-            for line in lines[1:]:
+            for line in lines:
                 if "LV." in line:
                     match = re.search(r'LV\.(\d+)', line)
                     if match:
                         level = int(match.group(1))
                         break
             return {
-                "name": weapon_name,
-                "id": WEAPON_ID_MAP.get(weapon_name, ""),
+                "name": weapon_name or "",
+                "id": WEAPON_ID_MAP.get(weapon_name, "") if weapon_name else "",
                 "level": level
             }
         case _ if name.startswith("echo"):
@@ -816,6 +829,8 @@ def process_card(image, region: str):
             # Process main region
             main_img = image[ECHO_REGIONS["main"]["y1"]:ECHO_REGIONS["main"]["y2"], ECHO_REGIONS["main"]["x1"]:ECHO_REGIONS["main"]["x2"]]
             main_processed = preprocess_region(main_img)
+            main_lines = [l.strip() for l in pytesseract.image_to_string(main_processed).splitlines() if l.strip()]
+            main_text = f"{main_lines[0]} {main_lines[1]}" if len(main_lines) >= 2 else ""
             
             # Process subs regions separately
             names_img = image[ECHO_REGIONS["subs_names"]["y1"]:ECHO_REGIONS["subs_names"]["y2"], ECHO_REGIONS["subs_names"]["x1"]:ECHO_REGIONS["subs_names"]["x2"]]
@@ -823,54 +838,33 @@ def process_card(image, region: str):
             
             names_processed = preprocess_region(names_img)
             values_processed = preprocess_region(values_img)
-            tess_values = tesseract_text_lines(values_processed, config=ECHO_VALUE_OCR_CONFIG)
+            
+            # Get raw lines
+            names_lines = [l.strip() for l in pytesseract.image_to_string(names_processed).splitlines() if l.strip()]
+            tess_values = [l.strip() for l in pytesseract.image_to_string(values_processed).splitlines() if l.strip()]
+            
+            cleaned_names, values_lines, rapid_values = reconcile_echo_substat_rows(
+                names_img,
+                values_img,
+                names_lines,
+                tess_values,
+            )
 
-            def parse_echo_with_lang(lang: str, *, include_raw_names: bool = False):
-                main_lines = tesseract_text_lines(main_processed, lang=lang, config=ECHO_TEXT_OCR_CONFIG)
-                main_text = f"{main_lines[0]} {main_lines[1]}" if len(main_lines) >= 2 else (main_lines[0] if main_lines else "")
-                names_raw_lines = (
-                    tesseract_text_lines(names_img, lang=lang, config=ECHO_TEXT_OCR_CONFIG)
-                    if include_raw_names
-                    else []
+            values = [
+                choose_substat_value(
+                    name,
+                    value,
+                    rapid_values[i] if i < len(rapid_values) else None,
                 )
-                names_pre_lines = tesseract_text_lines(names_processed, lang=lang, config=ECHO_TEXT_OCR_CONFIG)
-                names_lines = choose_best_substat_name_lines(names_raw_lines, names_pre_lines)
-
-                cleaned_names, values_lines, rapid_values = reconcile_echo_substat_rows(
-                    names_img,
-                    values_img,
-                    names_lines,
-                    tess_values,
-                )
-                values = [
-                    choose_substat_value(
-                        name,
-                        value,
-                        rapid_values[i] if i < len(rapid_values) else None,
-                    )
-                    for i, (name, value) in enumerate(zip(cleaned_names, values_lines[:5]))
-                ]
-                subs_text = "\n".join(f"{name} {value}" for name, value in zip(cleaned_names, values))
-                echo_data = parse_region_text(region, f"{main_text}\n{subs_text}")
-                return echo_data, main_lines + names_raw_lines + names_pre_lines + cleaned_names
-
-            echo_data, language_probe_lines = parse_echo_with_lang(ECHO_FAST_TEXT_OCR_LANGS)
-            main = echo_data.get("main", {}) if isinstance(echo_data, dict) else {}
-            substats = echo_data.get("substats", []) if isinstance(echo_data, dict) else []
-            localized_signal = has_localized_text_signal(language_probe_lines)
-            if not main or len(substats) < 3 or localized_signal:
-                rapid_probe_lines = rapid_text_lines(names_img)
-                fallback_lang = echo_language_hint(language_probe_lines + rapid_probe_lines)
-                if fallback_lang != ECHO_FAST_TEXT_OCR_LANGS:
-                    print(
-                        f"Echo OCR fallback: {ECHO_FAST_TEXT_OCR_LANGS} -> {fallback_lang} "
-                        f"(main={bool(main)}, substats={len(substats)}, localized={localized_signal})"
-                    )
-                    echo_data, _ = parse_echo_with_lang(fallback_lang, include_raw_names=True)
-                    main = echo_data.get("main", {}) if isinstance(echo_data, dict) else {}
+                for i, (name, value) in enumerate(zip(cleaned_names, values_lines[:5]))
+            ]
+            subs_text = "\n".join(f"{name} {value}" for name, value in zip(cleaned_names, values))
+            cleaned_text = f"{main_text}\n{subs_text}"
 
             name, confidence, element_data = match_icon(image)
             print(f"Echo identified: {name} (confidence: {confidence:.2%})")
+            echo_data = parse_region_text(region, cleaned_text)
+            main = echo_data.get("main", {}) if isinstance(echo_data, dict) else {}
             if main:
                 cost = ECHO_COSTS.get(name, 0)
                 max_value = max_main_stat_value(cost, main.get("name", ""))
@@ -890,7 +884,7 @@ def process_card(image, region: str):
                 "success": True,
                 "analysis": {
                     "name": {"name": ECHO_NAME_MAP.get(name, name), "id": name, "confidence": float(confidence)},
-                    "main": main,
+                    "main": echo_data.get("main", {}) if isinstance(echo_data, dict) else {},
                     "substats": echo_data.get("substats", []) if isinstance(echo_data, dict) else [],
                     "element": element_data
                 }
