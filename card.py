@@ -1,9 +1,7 @@
 import cv2
 import pytesseract
 import re
-import os
-import unicodedata
-from data import CHARACTER_NAMES, CHARACTER_ID_MAP, WEAPON_NAMES, WEAPON_ID_MAP, MAIN_STAT_NAMES, MAIN_STATS, DEFAULT_MAIN_STATS, SUB_STATS, STAT_TRANSLATIONS, ECHO_ELEMENTS, ECHO_COSTS, ECHO_NAME_MAP, TEMPLATE_FEATURES, COST_TEMPLATES, Rapid, determine_element
+from data import CHARACTER_NAMES, CHARACTER_ID_MAP, WEAPON_NAMES, WEAPON_ID_MAP, MAIN_STAT_NAMES, MAIN_STATS, DEFAULT_MAIN_STATS, SUB_STATS, ECHO_ELEMENTS, ECHO_COSTS, ECHO_NAME_MAP, TEMPLATE_FEATURES, COST_TEMPLATES, Rapid, determine_element
 import numpy as np
 from rapidfuzz import fuzz, process
 from typing import Tuple
@@ -52,19 +50,6 @@ ECHO_REGIONS = {
     "subs_values": {"x1": 290, "y1": 228, "x2": 359, "y2": 400}
 }
 
-ECHO_FAST_TEXT_OCR_LANGS = os.getenv("OCR_ECHO_FAST_TEXT_LANGS", "eng")
-ECHO_TEXT_OCR_LANGS = os.getenv("OCR_ECHO_TEXT_LANGS", "eng+fra+jpn+chi_tra+chi_sim")
-ECHO_TEXT_OCR_CONFIG = os.getenv("OCR_ECHO_TEXT_CONFIG", "--psm 6")
-ECHO_VALUE_OCR_CONFIG = "--psm 6 -c tessedit_char_whitelist=0123456789.%"
-STAT_VALUE_RE = re.compile(r"(.+?)\s*([+-]?\d+(?:\.\d+)?%?)$")
-STAT_ALIAS_CHAR_MAP = str.maketrans({
-    "撃": "擊",
-    "击": "擊",
-    "擎": "擊",
-    "鸣": "鳴",
-    "喘": "鳴",
-})
-
 
 def process_ocr(name: str, image: np.ndarray) -> str:
     """Process image with appropriate OCR engine"""
@@ -107,104 +92,6 @@ def preprocess_region(image):
     _, thresh = cv2.threshold(sharp, 140, 255, cv2.THRESH_BINARY)
     return thresh
 
-def tesseract_text_lines(image, *, lang: str | None = None, config: str = "--psm 6") -> list[str]:
-    kwargs = {"config": config}
-    if lang:
-        kwargs["lang"] = lang
-    text = pytesseract.image_to_string(image, **kwargs)
-    return [line.strip() for line in text.splitlines() if line.strip()]
-
-def echo_language_hint(lines: list[str]) -> str:
-    text = "\n".join(lines)
-    kana = len(re.findall(r"[\u3040-\u30ff]", text))
-    cjk = len(re.findall(r"[\u3400-\u9fff]", text))
-    latin_accent = len(re.findall(r"[À-ÖØ-öø-ÿ]", text))
-    if kana:
-        return "eng+jpn"
-    if cjk:
-        return ECHO_TEXT_OCR_LANGS
-    if latin_accent:
-        return "eng+fra"
-    return ECHO_TEXT_OCR_LANGS
-
-def has_localized_text_signal(lines: list[str]) -> bool:
-    return echo_language_hint(lines) != ECHO_TEXT_OCR_LANGS or bool(
-        re.search(r"[\u3400-\u9fff]", "\n".join(lines))
-    )
-
-def normalize_stat_alias(text: str) -> str:
-    text = unicodedata.normalize("NFKC", text).replace("％", "%")
-    text = text.translate(STAT_ALIAS_CHAR_MAP)
-    text = "".join(
-        char
-        for char in unicodedata.normalize("NFKD", text)
-        if not unicodedata.combining(char)
-    )
-    text = text.casefold()
-    return re.sub(r"[\d\s:：・.'’`´\-_/()+]+", "", text)
-
-def _display_aliases_for_stat(canonical: str) -> set[str]:
-    aliases = {
-        canonical,
-        canonical.replace("Crit Rate", "Crit. Rate").replace("Crit DMG", "Crit. DMG"),
-    }
-    if canonical.endswith(" DMG"):
-        aliases.add(f"{canonical} Bonus")
-
-    translations = STAT_TRANSLATIONS.get(canonical, {})
-    if isinstance(translations, dict):
-        aliases.update(
-            str(value)
-            for key, value in translations.items()
-            if key != "icon" and value
-        )
-
-    if canonical in {"HP%", "ATK%", "DEF%"}:
-        base = canonical[:-1]
-        aliases.update(f"{alias}%" for alias in _display_aliases_for_stat(base) if alias)
-
-    return aliases
-
-_STAT_ALIAS_INDEX: dict[str, set[str]] | None = None
-
-def stat_alias_index() -> dict[str, set[str]]:
-    global _STAT_ALIAS_INDEX
-    if _STAT_ALIAS_INDEX is None:
-        canonical_names = set(MAIN_STAT_NAMES) | set(SUB_STATS.keys())
-        canonical_names.update(key for key in STAT_TRANSLATIONS if key in canonical_names)
-        _STAT_ALIAS_INDEX = {
-            canonical: {
-                normalized
-                for alias in _display_aliases_for_stat(canonical)
-                if (normalized := normalize_stat_alias(alias))
-            }
-            for canonical in canonical_names
-        }
-    return _STAT_ALIAS_INDEX
-
-def resolve_localized_stat(name: str, valid_names: set, *, score_cutoff: int = 72) -> str | None:
-    if not valid_names:
-        return None
-
-    normalized = normalize_stat_alias(name)
-    if not normalized:
-        return None
-
-    best_name = None
-    best_score = -1
-    for canonical, aliases in stat_alias_index().items():
-        if canonical not in valid_names:
-            continue
-        if normalized in aliases:
-            return canonical
-        for alias in aliases:
-            score = fuzz.ratio(normalized, alias)
-            if score > best_score:
-                best_name = canonical
-                best_score = score
-
-    return best_name if best_name and best_score >= score_cutoff else None
-
 def clean_stat_name(name: str, value: str) -> str:
     name = re.sub(r'\s+', ' ', name.strip()).replace("Crit.", "Crit").rstrip('.')
     if name.upper() in ["ATK", "HP", "DEF"] and "%" in value:
@@ -214,17 +101,7 @@ def clean_stat_name(name: str, value: str) -> str:
 def validate_stat(name: str, valid_names: set) -> str:
     if not valid_names:
         return name
-    if name in valid_names:
-        return name
-
     match = process.extractOne(name, list(valid_names))
-    ascii_like = not re.search(r"[^\x00-\x7F]", name)
-    if ascii_like and match and match[1] >= 80:
-        return match[0]
-
-    localized = resolve_localized_stat(name, valid_names)
-    if localized:
-        return localized
     return match[0] if match else name
 
 def validate_substat_name(name: str, value: str) -> str:
@@ -235,12 +112,6 @@ def validate_substat_name(name: str, value: str) -> str:
         return f"{base}%" if "%" in value else base
     return matched
 
-def split_stat_line(line: str) -> tuple[str, str] | None:
-    match = STAT_VALUE_RE.match(line.strip())
-    if not match:
-        return None
-    return match.group(1).strip(), match.group(2).strip()
-
 def validate_value(value: str, stat_name: str) -> str:
     if not SUB_STATS or stat_name not in SUB_STATS:
         return value
@@ -249,23 +120,10 @@ def validate_value(value: str, stat_name: str) -> str:
     clean_value = value.replace('%', '')
     
     try:
-        valid_numbers = [float(v) for v in SUB_STATS[stat_name]]
         valid_values = [str(v) for v in SUB_STATS[stat_name]]
-        float_value = float(clean_value)
-        for valid in valid_numbers:
-            if abs(float_value - valid) <= 0.05:
-                return f"{valid:g}%" if had_percent else f"{valid:g}"
-
-        if had_percent and re.fullmatch(r"\+?\d(?:\.\d+)?", clean_value.strip()):
-            repaired_text = clean_value.strip().replace("+", "", 1)
-            repaired_value = float(f"1{repaired_text}")
-            for valid in valid_numbers:
-                if abs(repaired_value - valid) <= 0.05:
-                    print(f"Substat value repair: {stat_name} {value!r} -> {valid:g}%")
-                    return f"{valid:g}%"
-
         match = process.extractOne(clean_value, valid_values)
         if match:
+            float_value = float(clean_value)
             matched_value = float(match[0])
             if abs(float_value - matched_value) > 2.0:
                 closest = min(SUB_STATS[stat_name], key=lambda x: abs(float_value - x))
@@ -307,16 +165,6 @@ def choose_substat_value(stat_name: str, tess_value: str, rapid_value: str | Non
 def rapid_text_lines(image) -> list[str]:
     result, _ = Rapid(image)
     return [text for _, text, _ in result] if result else []
-
-def recognized_substat_name_count(names: list[str]) -> int:
-    return sum(1 for name in names if resolve_localized_stat(name, SUB_STATS.keys()))
-
-def choose_best_substat_name_lines(*candidates: list[str]) -> list[str]:
-    return max(
-        candidates,
-        key=lambda lines: (recognized_substat_name_count(clean_echo_substat_name_lines(lines)), len(lines)),
-        default=[],
-    )
 
 def reconcile_echo_substat_rows(
     names_img,
@@ -468,11 +316,11 @@ def parse_region_text(name, text):
         case _ if name.startswith("echo"):
             lines = [l.strip() for l in text.split('\n') if l.strip()]
             if not lines:
-                return {"main": {}, "substats": []}
+                return []
             
-            main_parts = split_stat_line(lines[0])
-            if not main_parts:
-                return {"main": {}, "substats": []}
+            main_parts = lines[0].rsplit(' ', 1)
+            if len(main_parts) != 2:
+                return []
             main_name, main_value = main_parts
             main_name = clean_stat_name(main_name, main_value)
             main_name = validate_stat(main_name, MAIN_STAT_NAMES)
@@ -483,8 +331,8 @@ def parse_region_text(name, text):
             substats = []
             for i, line in enumerate(lines[1:], 1):
                 print(f"Substat {i}: '{line}'")
-                parts = split_stat_line(line)
-                if not parts:
+                parts = line.rsplit(' ', 1)
+                if len(parts) != 2:
                     continue
                     
                 stat_name, stat_value = parts
@@ -758,19 +606,6 @@ def clean_echo_substat_name_lines(lines: list[str]) -> list[str]:
         if not line:
             continue
 
-        if cleaned_names:
-            previous = cleaned_names[-1]
-            combined = f"{previous} {line}"
-            combined_match = resolve_localized_stat(combined, SUB_STATS.keys())
-            previous_match = resolve_localized_stat(previous, SUB_STATS.keys())
-            current_match = resolve_localized_stat(line, SUB_STATS.keys())
-            previous_looks_incomplete = bool(
-                re.search(r"\b(bonus|dmg|attack|attaque|degats|dégats|dégâts)\b", previous, re.IGNORECASE)
-            )
-            if combined_match and not current_match and (not previous_match or previous_looks_incomplete):
-                cleaned_names[-1] = combined
-                continue
-
         fragment = _canonical_stat_fragment(line)
         is_wrapped_dmg_bonus_line = (
             _CAN_MERGE_DMG_BONUS_CONTINUATIONS
@@ -780,11 +615,7 @@ def clean_echo_substat_name_lines(lines: list[str]) -> list[str]:
                 or (len(fragment) <= 12 and fuzz.ratio(fragment, "dmgbonus") >= 75)
             )
         )
-        if (
-            cleaned_names
-            and is_wrapped_dmg_bonus_line
-            and not resolve_localized_stat(cleaned_names[-1], SUB_STATS.keys())
-        ):
+        if cleaned_names and is_wrapped_dmg_bonus_line:
             cleaned_names[-1] = _ensure_dmg_bonus_suffix(cleaned_names[-1])
             continue
 
@@ -884,8 +715,8 @@ def process_card(image, region: str):
                 "success": True,
                 "analysis": {
                     "name": {"name": ECHO_NAME_MAP.get(name, name), "id": name, "confidence": float(confidence)},
-                    "main": echo_data.get("main", {}) if isinstance(echo_data, dict) else {},
-                    "substats": echo_data.get("substats", []) if isinstance(echo_data, dict) else [],
+                    "main": echo_data.get("main", {}),
+                    "substats": echo_data.get("substats", []),
                     "element": element_data
                 }
             }

@@ -47,7 +47,6 @@ MAIN_STATS: Dict = {}
 DEFAULT_MAIN_STATS: Dict = {}
 SUB_STATS: Dict = {}
 SUB_STAT_NAMES: Set[str] = set()
-STAT_TRANSLATIONS: Dict[str, Dict[str, str]] = {}
 ECHO_NAMES: List[str] = []       # ordered list of English names (for logging/rapidfuzz)
 ECHO_ELEMENTS: Dict = {}          # CDN id str → list of element/sonata-set names
 ECHO_COSTS: Dict[str, int] = {}   # CDN id str → cost (1 | 3 | 4)
@@ -191,15 +190,6 @@ try:
 
         SUB_STATS = echo_stats.get("subStats", {})
         SUB_STAT_NAMES = set(SUB_STATS.keys())
-
-    stats_path = DATA_DIR / 'Stats.json'
-    if stats_path.exists():
-        with open(stats_path, 'r', encoding='utf-8') as f:
-            STAT_TRANSLATIONS.clear()
-            STAT_TRANSLATIONS.update(json.load(f))
-        print(f"Loaded stat translations: {len(STAT_TRANSLATIONS)} stats")
-    else:
-        print(f"Stat translations not found: {stats_path}")
 
     echo_count = load_templates('Echoes', ICON_TEMPLATES, TEMPLATE_FEATURES, (188, 188))
     element_count = load_templates('Elements', ELEMENT_TEMPLATES, ELEMENT_FEATURES)
