@@ -319,9 +319,10 @@ def parse_region_text(name, text):
                 return []
             
             main_parts = lines[0].rsplit(' ', 1)
-            if len(main_parts) != 2:
-                return []
-            main_name, main_value = main_parts
+            if len(main_parts) == 2 and re.search(r'\d', main_parts[1]):
+                main_name, main_value = main_parts
+            else:
+                main_name, main_value = lines[0], ""
             main_name = clean_stat_name(main_name, main_value)
             main_name = validate_stat(main_name, MAIN_STAT_NAMES)
             if main_name in ["HP", "ATK", "DEF"]:
@@ -661,7 +662,7 @@ def process_card(image, region: str):
             main_img = image[ECHO_REGIONS["main"]["y1"]:ECHO_REGIONS["main"]["y2"], ECHO_REGIONS["main"]["x1"]:ECHO_REGIONS["main"]["x2"]]
             main_processed = preprocess_region(main_img)
             main_lines = [l.strip() for l in pytesseract.image_to_string(main_processed).splitlines() if l.strip()]
-            main_text = f"{main_lines[0]} {main_lines[1]}" if len(main_lines) >= 2 else ""
+            main_text = f"{main_lines[0]} {main_lines[1]}" if len(main_lines) >= 2 else (main_lines[0] if main_lines else "")
             
             # Process subs regions separately
             names_img = image[ECHO_REGIONS["subs_names"]["y1"]:ECHO_REGIONS["subs_names"]["y2"], ECHO_REGIONS["subs_names"]["x1"]:ECHO_REGIONS["subs_names"]["x2"]]
