@@ -274,12 +274,26 @@ def parse_region_text(name, text):
             
         case "watermark":
             lines = text.split('\n')
-            username = lines[0].split(':', 1)[-1].strip() if lines and ':' in lines[0] else ""
-            uid = lines[1].split(':', 1)[-1].strip() if len(lines) > 1 and ':' in lines[1] else "0"
+            username = ""
+            uid = 0
+            for line in lines:
+                if uid_match := re.search(r'\d{6,12}', line):
+                    uid = int(uid_match.group(0))
+                    break
+            if lines:
+                first_line = lines[0].strip()
+                if ':' in first_line:
+                    username = first_line.split(':', 1)[-1].strip()
+                else:
+                    username = re.sub(r'^(?:Player\s*ID|Name|Neme)[.:;]?\s*', '', first_line, flags=re.IGNORECASE).strip()
+                if uid > 0 and str(uid) in username:
+                    username = username.replace(str(uid), "").strip().rstrip(':').strip()
             return {
                 "username": username,
-                "uid": int(uid) if uid.isdigit() else 0
+                "uid": uid
             }
+
+
 
         case "weapon":
             # Match against the known weapon list with a length-sensitive scorer
