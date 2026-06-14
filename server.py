@@ -32,7 +32,6 @@ PROCESS_TIMEOUT = int(os.getenv("OCR_TIMEOUT", "60"))
 REQUESTS_PER_MINUTE = int(os.getenv("OCR_RATE_LIMIT", "60"))
 PORT = int(os.getenv("PORT", "5000"))
 INTERNAL_API_KEY = os.getenv("INTERNAL_API_KEY", "").strip()
-WARM_WORKERS = os.getenv("OCR_WARM_WORKERS", "1") == "1"
 consecutive_500s = 0
 MAX_CONSECUTIVE_500S = 3
 
@@ -107,13 +106,11 @@ class APIStatus(BaseModel):
     }
 
 IMPORT_REGIONS: dict[str, dict[str, float]] = {
-    # Use asset-bearing crops for character/weapon now that those are SIFT
-    # recognizers. The old title-strip/name OCR crop is intentionally skipped.
-    "character": {"x1": 0.0200, "x2": 0.2700, "y1": 0.1000, "y2": 0.4500},
+    "character": {"x1": 0.0328, "x2": 0.3021, "y1": 0.0074, "y2": 0.0833},
     "watermark": {"x1": 0.0073, "x2": 0.1304, "y1": 0.0741, "y2": 0.1370},
     "forte": {"x1": 0.4057, "x2": 0.7422, "y1": 0.0222, "y2": 0.5917},
     "sequences": {"x1": 0.0703, "x2": 0.3318, "y1": 0.4787, "y2": 0.5843},
-    "weapon": {"x1": 0.7590, "x2": 0.8310, "y1": 0.4120, "y2": 0.5380},
+    "weapon": {"x1": 0.7542, "x2": 0.9828, "y1": 0.3843, "y2": 0.5843},
     "echo1": {"x1": 0.0125, "x2": 0.2042, "y1": 0.6019, "y2": 0.9843},
     "echo2": {"x1": 0.2057, "x2": 0.3974, "y1": 0.6019, "y2": 0.9843},
     "echo3": {"x1": 0.4016, "x2": 0.5938, "y1": 0.6019, "y2": 0.9843},
@@ -123,24 +120,9 @@ IMPORT_REGIONS: dict[str, dict[str, float]] = {
 
 REGION_KEYS = tuple(IMPORT_REGIONS.keys())
 
-def warm_worker() -> int:
-    import card
-    blank = np.zeros((64, 64, 3), dtype=np.uint8)
-    card.recognize_character_asset(blank)
-    card.recognize_weapon_asset(blank)
-    return os.getpid()
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     print(f"Server starting on port {PORT} | railway={IS_RAILWAY} gpu={USE_GPU} workers={MAX_WORKERS} opencv_threads={OPENCV_THREADS}", flush=True)
-    if WARM_WORKERS:
-        started = time.perf_counter()
-        loop = asyncio.get_running_loop()
-        await asyncio.gather(*[
-            loop.run_in_executor(executor, warm_worker)
-            for _ in range(MAX_WORKERS)
-        ])
-        print(f"Warmed {MAX_WORKERS} OCR workers in {(time.perf_counter() - started):.2f}s", flush=True)
     yield
     print("Server shutting down", flush=True)
     executor.shutdown(wait=True)
