@@ -140,15 +140,14 @@ bench, the current cropped-PNG set averaged ~1.55 MB, while a full-card JPEG
 q85/q92 averaged ~304-377 KB. Sending the original file is usually smaller than
 sending all region crops.
 
-Recommended import transport:
+Current import transport:
 
 ```text
 browser
-  `- POST original image bytes directly to OCR backend
+  `- POST original image bytes directly to OCR backend through the Cloudflare gateway
 
 OCR backend
   |- compute content hash / training key
-  |- optionally persist original bytes to R2 in the background
   |- decode once
   |- crop internally
   |- run cheap deterministic recognizers inline
@@ -170,26 +169,31 @@ An acceptable transitional shape is two parallel browser requests using the
 same `File`: one to OCR, one to the existing Vercel/R2 training route. This is
 simple but uploads the image twice and keeps Vercel in the storage path. It is
 still better than R2-as-transport because OCR does not wait for a later R2
-download.
+download. This is the current production shape: OCR consumes the original file
+directly, while the normal import page still saves the full image through the
+existing training-image route for reports/backfill.
 
 Do not proxy the OCR image through Vercel Functions. The OCR hot path should
 stay browser to `ocr.wuwa.build` so Vercel does not pay function CPU/memory or
 Fast Origin Transfer for image uploads.
 
-Implementation shape:
+Implemented endpoint shape:
 
-- Replace the public OCR contract with a full-image endpoint. Breaking changes
-  are fine; the old crop-header flow does not need compatibility.
-- Use one straight OCR endpoint, e.g. `POST /api/ocr`, that accepts a full card
-  image and returns the full import analysis.
+- The public OCR contract is now a full-image endpoint. The old crop-header
+  flow has been deleted from the frontend/gateway contract.
+- `POST /api/ocr` accepts a full card image and returns the full import
+  analysis.
 - Accept raw binary or `multipart/form-data`, not JSON base64.
 - Decode once with OpenCV, validate dimensions/layout once, then crop backend
   side.
 - Preserve parallelism inside the backend. A single endpoint must not mean a
   single sequential recognition pass.
-- Update the Cloudflare gateway: remove the `X-OCR-Region` requirement, keep a
-  sensible full-image size cap, and set a timeout for the new full import
-  analysis instead of the old per-region call.
+- The Cloudflare gateway no longer requires `X-OCR-Region`, caps OCR uploads at
+  5 MB, and uses a full-import timeout.
+- The OCR endpoint always streams `application/x-ndjson`: `meta`, per-`region`,
+  and final `done` events keyed by region. Interactive import uses the region
+  events for live progress; bulk import uses the same parser and consumes the
+  final `done` payload.
 
 Local architecture benchmark (`backend/bench_import_architecture.py`) compared
 the old cropped-request shape with a simulated full-image endpoint while keeping
@@ -352,12 +356,13 @@ the newest characters, so SIFT recovers identity where the name OCR would not;
 the weapon panel can be genuinely blank (see "Missing weapon assets"), and that
 empty result is correct.
 
-Existing local artifacts:
+Current runtime status:
 
 - `Data/Characters/` (56 splash WebP) and `Data/Weapons/` (118 icon WebP) are
-  now populated from Encore via `fetch_phase1_templates.py`. `data.py` does not
-  load these two dirs yet, so the runtime still uses the OCR path for
-  character/weapon until the match functions are wired in.
+  populated from Encore and committed with the backend so Railway can match
+  them at runtime.
+- `card.py` now recognizes character and weapon through SIFT over those assets.
+  Character crops use the splash/body region; weapon crops use the square icon.
 - Validation harness `eval_phase1_sift.py` ran on the reference cards: character
   SIFT is **5/5** correct (Hiyuki, Zani, Lucilla, Lucy, Rebecca); weapon SIFT is
   **2/2** on rendered panels (Frostburn, Blazing Justice) and correctly **empty

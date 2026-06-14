@@ -35,40 +35,20 @@ image=<file>
 
 or a raw image body with an image `Content-Type`.
 
-The response contains the merged import analysis, per-region status, and timing
-data:
+The response is always an `application/x-ndjson` stream. Each line is one JSON
+event: `meta`, zero or more per-region `region` events, then a final `done`
+event that contains the merged import analysis, per-region status, and timing
+data.
 
 ```json
-{
-  "success": true,
-  "analysis": {
-    "character": { "name": "Aemeath", "id": "53", "level": 90 },
-    "watermark": { "username": "Player", "uid": 500000000 },
-    "weapon": { "name": "Everbright Polestar", "id": "21020076", "level": 90 },
-    "echo1": {
-      "name": { "name": "Sigillum", "id": "60001915", "confidence": 0.87 },
-      "main": { "name": "Crit DMG", "value": "44%" },
-      "substats": [{ "name": "Crit Rate", "value": "8.7%" }],
-      "element": "Trailblazing"
-    }
-  },
-  "progress": {
-    "character": "done",
-    "watermark": "done",
-    "weapon": "done",
-    "echo1": "done"
-  },
-  "timings": {
-    "bodyReadMs": 0.63,
-    "decodeMs": 8.09,
-    "cropMs": 0.45,
-    "recognitionWallMs": 8691.04,
-    "wallMs": 8700.66,
-    "regions": { "character": 1402.19 }
-  },
-  "trainingImageKey": "training-images/00055f05eb843ecf.jpg"
-}
+{"type":"meta","trainingImageKey":"training-images/00055f05eb843ecf.jpg","image":{"width":1920,"height":1080,"bytes":271977}}
+{"type":"region","region":"watermark","status":"done","analysis":{"username":"Player","uid":500000000},"elapsedMs":180.2}
+{"type":"region","region":"echo1","status":"done","analysis":{"main":{"name":"ATK%","value":"18%"}},"elapsedMs":1111.0}
+{"type":"done","success":true,"analysis":{},"progress":{},"timings":{},"trainingImageKey":"training-images/00055f05eb843ecf.jpg"}
 ```
+
+Interactive import consumes the `region` events for live UI updates. Bulk import
+uses the same stream parser and only consumes the final `done` event.
 
 ### Other Endpoints
 

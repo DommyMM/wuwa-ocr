@@ -1,10 +1,11 @@
 from fastapi import FastAPI, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 import cv2
 import numpy as np
 import hashlib
+import json
 from concurrent.futures import ProcessPoolExecutor
 from typing import Any, Optional, cast
 from card import process_card
@@ -92,14 +93,6 @@ def get_rate_limit_identity(request: Request) -> str:
 
     return request.client.host if request.client and request.client.host else "unknown"
 
-class OCRResponse(BaseModel):
-    success: bool
-    error: Optional[str] = None
-    analysis: Optional[dict] = None
-    progress: Optional[dict] = None
-    timings: Optional[dict] = None
-    trainingImageKey: Optional[str] = None
-
 class APIStatus(BaseModel):
     status: str = "running"
     endpoints: dict = {
@@ -107,9 +100,9 @@ class APIStatus(BaseModel):
             "path": "/api/ocr",
             "method": "POST",
             "request": {
-                "image": "multipart file field or raw image body"
+                "image": "multipart file field or raw image body",
             },
-            "response": "full import analysis with progress and timings",
+            "response": "application/x-ndjson stream with meta, region, and done events",
         }
     }
 
@@ -236,7 +229,39 @@ async def read_upload_image_bytes(request: Request) -> bytes:
 
     return image_bytes
 
-async def process_full_import_image(image_bytes: bytes) -> dict[str, Any]:
+def ndjson_event(payload: dict[str, Any]) -> str:
+    return json.dumps(payload, separators=(",", ":"), ensure_ascii=False) + "\n"
+
+def slow_region_summary(timings: dict[str, Any]) -> str:
+    region_timings = timings.get("regions") if isinstance(timings, dict) else None
+    if not isinstance(region_timings, dict):
+        return ""
+    return ",".join(
+        f"{name}:{elapsed:.0f}"
+        for name, elapsed in sorted(region_timings.items(), key=lambda item: item[1], reverse=True)[:4]
+    )
+
+def log_import_completed(result: dict[str, Any]) -> None:
+    timings = result.get("timings", {})
+    print(
+        "import: Completed "
+        f"wall={timings.get('wallMs')}ms "
+        f"body={timings.get('bodyReadMs')}ms "
+        f"decode={timings.get('decodeMs')}ms "
+        f"crop={timings.get('cropMs')}ms "
+        f"recognition={timings.get('recognitionWallMs')}ms "
+        f"bytes={result.get('image', {}).get('bytes')} "
+        f"slow={slow_region_summary(timings)}",
+        flush=True,
+    )
+
+async def stream_full_import_image(
+    image_bytes: bytes,
+    body_read_ms: float,
+    request_start: float,
+):
+    global consecutive_500s
+
     timing_start = time.perf_counter()
 
     hash_started = time.perf_counter()
@@ -249,7 +274,8 @@ async def process_full_import_image(image_bytes: bytes) -> dict[str, Any]:
     decoded_at = time.perf_counter()
 
     if image is None:
-        raise HTTPException(status_code=400, detail="Failed to decode image.")
+        yield ndjson_event({"type": "error", "success": False, "error": "Failed to decode image."})
+        return
 
     crop_started = time.perf_counter()
     crops = {
@@ -258,40 +284,78 @@ async def process_full_import_image(image_bytes: bytes) -> dict[str, Any]:
     }
     cropped_at = time.perf_counter()
 
-    loop = asyncio.get_event_loop()
+    image_meta = {
+        "width": int(image.shape[1]),
+        "height": int(image.shape[0]),
+        "bytes": len(image_bytes),
+    }
+    yield ndjson_event({
+        "type": "meta",
+        "image": image_meta,
+        "trainingImageKey": f"training-images/{image_hash}.jpg",
+    })
+
+    loop = asyncio.get_running_loop()
     recognition_started = time.perf_counter()
-    tasks = [
-        loop.run_in_executor(executor, process_region_task, (region, crops[region]))
-        for region in REGION_KEYS
-    ]
 
-    try:
-        region_results = await asyncio.wait_for(asyncio.gather(*tasks), timeout=PROCESS_TIMEOUT)
-    except asyncio.TimeoutError:
-        raise HTTPException(status_code=408, detail=f"Processing timeout exceeded ({PROCESS_TIMEOUT} seconds)")
-    except Exception as exc:
-        error_msg = str(exc)
-        if "terminated abruptly" in error_msg.lower():
-            force_restart(f"ProcessPool worker terminated abruptly: {error_msg}")
-        raise HTTPException(status_code=400, detail=f"Image processing error: {error_msg}")
+    async def run_region(region: str) -> dict[str, Any]:
+        return await loop.run_in_executor(executor, process_region_task, (region, crops[region]))
 
-    recognized_at = time.perf_counter()
-
+    tasks = [asyncio.create_task(run_region(region)) for region in REGION_KEYS]
     analysis: dict[str, Any] = {}
     progress: dict[str, str] = {}
     region_timings: dict[str, float] = {}
     region_errors: dict[str, str] = {}
 
-    for result in region_results:
-        region = result["region"]
-        region_timings[region] = round(float(result["elapsedMs"]), 2)
-        if result["success"] and result["analysis"] is not None:
-            analysis[region] = result["analysis"]
-            progress[region] = "done"
-        else:
+    try:
+        for completed in asyncio.as_completed(tasks, timeout=PROCESS_TIMEOUT):
+            result = await completed
+            region = result["region"]
+            elapsed_ms = round(float(result["elapsedMs"]), 2)
+            region_timings[region] = elapsed_ms
+
+            if result["success"] and result["analysis"] is not None:
+                analysis[region] = result["analysis"]
+                progress[region] = "done"
+                yield ndjson_event({
+                    "type": "region",
+                    "region": region,
+                    "status": "done",
+                    "analysis": result["analysis"],
+                    "elapsedMs": elapsed_ms,
+                })
+            else:
+                error = str(result.get("error") or "Region recognition failed")
+                progress[region] = "error"
+                region_errors[region] = error
+                yield ndjson_event({
+                    "type": "region",
+                    "region": region,
+                    "status": "error",
+                    "error": error,
+                    "elapsedMs": elapsed_ms,
+                })
+    except asyncio.TimeoutError:
+        for task in tasks:
+            task.cancel()
+        yield ndjson_event({
+            "type": "error",
+            "success": False,
+            "error": f"Processing timeout exceeded ({PROCESS_TIMEOUT} seconds)",
+        })
+        return
+    except Exception as exc:
+        error_msg = str(exc)
+        if "terminated abruptly" in error_msg.lower():
+            force_restart(f"ProcessPool worker terminated abruptly: {error_msg}")
+        yield ndjson_event({"type": "error", "success": False, "error": f"Image processing error: {error_msg}"})
+        return
+
+    recognized_at = time.perf_counter()
+    for region in REGION_KEYS:
+        if region not in progress:
             progress[region] = "error"
-            if result.get("error"):
-                region_errors[region] = str(result["error"])
+            region_errors[region] = "Region recognition did not complete"
 
     finished_at = time.perf_counter()
     timings = {
@@ -300,24 +364,24 @@ async def process_full_import_image(image_bytes: bytes) -> dict[str, Any]:
         "cropMs": round((cropped_at - crop_started) * 1000, 2),
         "recognitionWallMs": round((recognized_at - recognition_started) * 1000, 2),
         "totalMs": round((finished_at - timing_start) * 1000, 2),
+        "bodyReadMs": round(body_read_ms, 2),
+        "wallMs": round((time.perf_counter() - request_start) * 1000, 2),
         "regions": region_timings,
     }
-
-    return {
+    result = {
         "success": True,
         "analysis": analysis,
         "progress": progress,
         "timings": timings,
         "trainingImageKey": f"training-images/{image_hash}.jpg",
         "regionErrors": region_errors,
-        "image": {
-            "width": int(image.shape[1]),
-            "height": int(image.shape[0]),
-            "bytes": len(image_bytes),
-        },
+        "image": image_meta,
     }
+    log_import_completed(result)
+    consecutive_500s = 0
+    yield ndjson_event({"type": "done", **result})
 
-@app.post("/api/ocr", response_model=OCRResponse)
+@app.post("/api/ocr")
 async def process_image_request(request: Request):
     global consecutive_500s
 
@@ -329,34 +393,11 @@ async def process_image_request(request: Request):
         body_read_started = time.perf_counter()
         image_bytes = await read_upload_image_bytes(request)
         body_read_ms = (time.perf_counter() - body_read_started) * 1000
-        result = await process_full_import_image(image_bytes)
-        if result.get("timings"):
-            result["timings"]["bodyReadMs"] = round(body_read_ms, 2)
-            result["timings"]["wallMs"] = round((time.perf_counter() - request_start) * 1000, 2)
-            
-        timings = result.get("timings", {})
-        region_timings = timings.get("regions") if isinstance(timings, dict) else None
-        if isinstance(region_timings, dict):
-            slow_regions = ",".join(
-                f"{name}:{elapsed:.0f}"
-                for name, elapsed in sorted(region_timings.items(), key=lambda item: item[1], reverse=True)[:4]
-            )
-        else:
-            slow_regions = ""
-        print(
-            "import: Completed "
-            f"wall={timings.get('wallMs')}ms "
-            f"body={timings.get('bodyReadMs')}ms "
-            f"decode={timings.get('decodeMs')}ms "
-            f"crop={timings.get('cropMs')}ms "
-            f"recognition={timings.get('recognitionWallMs')}ms "
-            f"bytes={result.get('image', {}).get('bytes')} "
-            f"slow={slow_regions}",
-            flush=True,
+        return StreamingResponse(
+            stream_full_import_image(image_bytes, body_read_ms, request_start),
+            media_type="application/x-ndjson",
+            headers={"Cache-Control": "no-cache"},
         )
-        
-        consecutive_500s = 0
-        return result
     except HTTPException as e:
         return JSONResponse(
             status_code=e.status_code,
