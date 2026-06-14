@@ -5,7 +5,9 @@ Hosted at `https://ocr.wuwabuilds.moe`.
 
 ## Runtime Model
 
-- Single OCR mode: split-card region processing (`card.py`)
+- Single OCR mode: full-card import processing. The API receives the original
+  screenshot, decodes it once, crops fixed regions server-side, then fans out
+  region recognition through `card.py`.
 - Legacy full-screen mode (`char.py` / `echo.py`) has been removed
 - Data is loaded from local `backend/Data/*.json` and image templates at startup import time (`data.py`)
 - Echo, character, and weapon OCR results include IDs for robust frontend matching
@@ -23,72 +25,48 @@ Default port is `5000` (`PORT` env var supported).
 
 ### `POST /api/ocr`
 
-Process one cropped region image.
+Process one full build-card screenshot.
 
-Request body:
-
-```json
-{
-  "image": "base64_encoded_image"
-}
-```
-
-Recommended header:
+Request body can be `multipart/form-data`:
 
 ```http
-X-OCR-Region: character | weapon | watermark | forte | sequences | echo1 | echo2 | echo3 | echo4 | echo5
+image=<file>
 ```
 
-Compatibility fallbacks (optional body fields):
+or a raw image body with an image `Content-Type`.
 
-- `region`: direct region key
-- `type`: legacy `import-<region>` format
-
-`char-*` legacy mode is not supported.
-
-### Example Responses
-
-Character region:
+The response contains the merged import analysis, per-region status, and timing
+data:
 
 ```json
 {
   "success": true,
   "analysis": {
-    "name": "Aemeath",
-    "id": "53",
-    "level": 90
-  }
-}
-```
-
-Weapon region:
-
-```json
-{
-  "success": true,
-  "analysis": {
-    "name": "Everbright Polestar",
-    "id": "21020076",
-    "level": 90
-  }
-}
-```
-
-Echo region (`echo1`-`echo5`):
-
-```json
-{
-  "success": true,
-  "analysis": {
-    "name": {
-      "name": "Sigillum",
-      "id": "60001915",
-      "confidence": 0.87
-    },
-    "main": { "name": "Crit DMG", "value": "44%" },
-    "substats": [{ "name": "Crit Rate", "value": "8.7%" }],
-    "element": "Trailblazing"
-  }
+    "character": { "name": "Aemeath", "id": "53", "level": 90 },
+    "watermark": { "username": "Player", "uid": 500000000 },
+    "weapon": { "name": "Everbright Polestar", "id": "21020076", "level": 90 },
+    "echo1": {
+      "name": { "name": "Sigillum", "id": "60001915", "confidence": 0.87 },
+      "main": { "name": "Crit DMG", "value": "44%" },
+      "substats": [{ "name": "Crit Rate", "value": "8.7%" }],
+      "element": "Trailblazing"
+    }
+  },
+  "progress": {
+    "character": "done",
+    "watermark": "done",
+    "weapon": "done",
+    "echo1": "done"
+  },
+  "timings": {
+    "bodyReadMs": 0.63,
+    "decodeMs": 8.09,
+    "cropMs": 0.45,
+    "recognitionWallMs": 8691.04,
+    "wallMs": 8700.66,
+    "regions": { "character": 1402.19 }
+  },
+  "trainingImageKey": "training-images/00055f05eb843ecf.jpg"
 }
 ```
 

@@ -1,13 +1,14 @@
 import cv2
 import pytesseract
 import re
-from data import CHARACTER_NAMES, CHARACTER_ID_MAP, WEAPON_NAMES, WEAPON_ID_MAP, MAIN_STAT_NAMES, MAIN_STATS, DEFAULT_MAIN_STATS, SUB_STATS, ECHO_ELEMENTS, ECHO_COSTS, ECHO_NAME_MAP, TEMPLATE_FEATURES, COST_TEMPLATES, Rapid, determine_element
+from data import CHARACTER_NAMES, CHARACTER_ID_MAP, WEAPON_NAMES, WEAPON_ID_MAP, MAIN_STAT_NAMES, MAIN_STATS, DEFAULT_MAIN_STATS, SUB_STATS, ECHO_ELEMENTS, ECHO_COSTS, ECHO_NAME_MAP, TEMPLATE_FEATURES, COST_TEMPLATES, Rapid, determine_element, DATA_DIR
 import numpy as np
 from rapidfuzz import fuzz, process
 from typing import Tuple
 from cv2 import SIFT_create, FlannBasedMatcher
 import io
 import sys
+from pathlib import Path
 
 # Minimum fuzz.ratio score for a weapon-name OCR read to be trusted. Real reads
 # (even with OCR noise) score ~92-100; unreadable/garbled text stays under ~40.
@@ -20,6 +21,117 @@ ROVER_ELEMENT_ALIASES = {
     "Spectro": ("spectro", "speetro"),
     "Havoc": ("havoc", "lavoc"),
 }
+
+CHARACTER_NAME_BY_ID = {cid: name for name, cid in CHARACTER_ID_MAP.items()}
+WEAPON_NAME_BY_ID = {wid: name for name, wid in WEAPON_ID_MAP.items()}
+
+_ASSET_SIFT = None
+_ASSET_FLANN = None
+_CHARACTER_FEATURES: dict[str, tuple[tuple[cv2.KeyPoint, ...], np.ndarray]] | None = None
+_WEAPON_FEATURES: dict[str, tuple[tuple[cv2.KeyPoint, ...], np.ndarray]] | None = None
+
+
+def _resize_long_side(img: np.ndarray, max_side: int = 420) -> np.ndarray:
+    h, w = img.shape[:2]
+    longest = max(h, w)
+    if longest <= max_side:
+        return img
+    scale = max_side / longest
+    return cv2.resize(img, (round(w * scale), round(h * scale)), interpolation=cv2.INTER_AREA)
+
+
+def _read_asset(path: Path):
+    data = np.fromfile(str(path), dtype=np.uint8)
+    if data.size == 0:
+        return None
+    return cv2.imdecode(data, cv2.IMREAD_COLOR)
+
+
+def _asset_sift():
+    global _ASSET_SIFT, _ASSET_FLANN
+    if _ASSET_SIFT is None:
+        _ASSET_SIFT = SIFT_create()
+        _ASSET_FLANN = FlannBasedMatcher(dict(algorithm=1, trees=5), dict(checks=50))
+    return _ASSET_SIFT, _ASSET_FLANN
+
+
+def _load_asset_features(folder: str) -> dict[str, tuple[tuple[cv2.KeyPoint, ...], np.ndarray]]:
+    sift, _ = _asset_sift()
+    features: dict[str, tuple[tuple[cv2.KeyPoint, ...], np.ndarray]] = {}
+    for path in sorted((DATA_DIR / folder).glob("*")):
+        if path.suffix.lower() not in {".png", ".webp", ".jpg", ".jpeg"}:
+            continue
+        img = _read_asset(path)
+        if img is None:
+            continue
+        img = _resize_long_side(img)
+        kp, des = sift.detectAndCompute(img, None)
+        if des is not None and len(des) >= 2:
+            features[path.stem] = (tuple(kp), des)
+    return features
+
+
+def _match_asset(image: np.ndarray, folder: str) -> tuple[str, float, float, str]:
+    global _CHARACTER_FEATURES, _WEAPON_FEATURES
+    if folder == "Characters":
+        if _CHARACTER_FEATURES is None:
+            _CHARACTER_FEATURES = _load_asset_features("Characters")
+        templates = _CHARACTER_FEATURES
+    else:
+        if _WEAPON_FEATURES is None:
+            _WEAPON_FEATURES = _load_asset_features("Weapons")
+        templates = _WEAPON_FEATURES
+
+    if not templates:
+        return "", 0.0, 0.0, "no_templates"
+
+    sift, flann = _asset_sift()
+    image = _resize_long_side(image)
+    kp1, des1 = sift.detectAndCompute(image, None)
+    if des1 is None or len(des1) < 2:
+        return "", 0.0, 0.0, "no_features"
+
+    scores: list[tuple[str, float]] = []
+    for template_id, (kp2, des2) in templates.items():
+        try:
+            matches = flann.knnMatch(des1, des2, k=2)
+        except cv2.error:
+            continue
+        good = [m for m, n in matches if m.distance < 0.7 * n.distance]
+        denom = max(len(kp1), len(kp2))
+        scores.append((template_id, len(good) / denom if denom else 0.0))
+
+    scores.sort(key=lambda item: item[1], reverse=True)
+    if not scores:
+        return "", 0.0, 0.0, "no_scores"
+    best_id, best = scores[0]
+    second = scores[1][1] if len(scores) > 1 else 0.0
+    raw = ";".join(f"{tid}:{score:.4f}" for tid, score in scores[:5])
+    return best_id, float(best), float(best - second), raw
+
+
+def recognize_character_asset(image: np.ndarray) -> dict:
+    char_id, confidence, margin, raw = _match_asset(image, "Characters")
+    return {
+        "name": CHARACTER_NAME_BY_ID.get(char_id, ""),
+        "id": char_id,
+        "level": 90,
+        "confidence": confidence,
+        "margin": margin,
+        "raw": raw,
+    }
+
+
+def recognize_weapon_asset(image: np.ndarray) -> dict:
+    weapon_id, confidence, margin, raw = _match_asset(image, "Weapons")
+    return {
+        "name": WEAPON_NAME_BY_ID.get(weapon_id, ""),
+        "id": weapon_id,
+        "level": 90,
+        "confidence": confidence,
+        "margin": margin,
+        "raw": raw,
+    }
 
 
 WEAPON_REGIONS = {
@@ -641,6 +753,16 @@ def process_card(image, region: str):
             return {
                 "success": True,
                 "analysis": {"sequence": sequence}
+            }
+        elif region == "character":
+            return {
+                "success": True,
+                "analysis": recognize_character_asset(image),
+            }
+        elif region == "weapon":
+            return {
+                "success": True,
+                "analysis": recognize_weapon_asset(image),
             }
         elif region == "forte":
             forte_data = {"levels": [0] * 5}

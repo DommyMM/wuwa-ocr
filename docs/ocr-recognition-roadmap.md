@@ -114,14 +114,154 @@ The expensive runtime path today is not a lack of crop constraints. It is that
 RapidOCR and Tesseract are loaded into multiple workers to solve problems that
 are mostly known-class recognition.
 
+## Transport and endpoint direction
+
+The original split-region browser flow made sense when the client was producing
+PNG crops and the backend had to keep region work parallel. The current corpus
+changes that tradeoff: import images are already overwhelmingly small JPEGs.
+
+Local `r2-backup/` size snapshot from 11,443 images:
+
+| Metric | Value |
+|---|---:|
+| JPEG/JPG files | 11,400 |
+| PNG files | 43 |
+| Average source size | 359,674 bytes |
+| Median source size | 326,790 bytes |
+| p90 source size | 456,098 bytes |
+| p95 source size | 467,838 bytes |
+| Files over 500 KB | 92 |
+| Files over 1 MB | 70 |
+| Max source size | 2,374,908 bytes |
+
+Because the usual source file is already only ~300-450 KB, the frontend should
+not crop regions into PNG payloads for the hot OCR path. In a local packaging
+bench, the current cropped-PNG set averaged ~1.55 MB, while a full-card JPEG
+q85/q92 averaged ~304-377 KB. Sending the original file is usually smaller than
+sending all region crops.
+
+Recommended import transport:
+
+```text
+browser
+  `- POST original image bytes directly to OCR backend
+
+OCR backend
+  |- compute content hash / training key
+  |- optionally persist original bytes to R2 in the background
+  |- decode once
+  |- crop internally
+  |- run cheap deterministic recognizers inline
+  `- fan out expensive recognition work inside the service
+```
+
+Do not use R2 as the OCR transport. Uploading to R2 and then having the OCR
+backend download the image adds a network hop and makes the import wait on
+training storage. R2 remains useful for durable training data and issue reports,
+but OCR should consume the bytes the browser already sent to the OCR request.
+
+The cleanest future shape is a single OCR upload that also schedules the R2
+training-image save. The backend can hash the raw bytes immediately, include the
+training key in the response, and run the R2 write as a background/best-effort
+task. If the R2 write fails, OCR should still return normally and reports can
+fall back to attaching the image or retrying the save.
+
+An acceptable transitional shape is two parallel browser requests using the
+same `File`: one to OCR, one to the existing Vercel/R2 training route. This is
+simple but uploads the image twice and keeps Vercel in the storage path. It is
+still better than R2-as-transport because OCR does not wait for a later R2
+download.
+
+Do not proxy the OCR image through Vercel Functions. The OCR hot path should
+stay browser to `ocr.wuwa.build` so Vercel does not pay function CPU/memory or
+Fast Origin Transfer for image uploads.
+
+Implementation shape:
+
+- Replace the public OCR contract with a full-image endpoint. Breaking changes
+  are fine; the old crop-header flow does not need compatibility.
+- Use one straight OCR endpoint, e.g. `POST /api/ocr`, that accepts a full card
+  image and returns the full import analysis.
+- Accept raw binary or `multipart/form-data`, not JSON base64.
+- Decode once with OpenCV, validate dimensions/layout once, then crop backend
+  side.
+- Preserve parallelism inside the backend. A single endpoint must not mean a
+  single sequential recognition pass.
+- Update the Cloudflare gateway: remove the `X-OCR-Region` requirement, keep a
+  sensible full-image size cap, and set a timeout for the new full import
+  analysis instead of the old per-region call.
+
+Local architecture benchmark (`backend/bench_import_architecture.py`) compared
+the old cropped-request shape with a simulated full-image endpoint while keeping
+today's recognizers unchanged:
+
+| Shape | Avg total | Avg recognition | Avg payload |
+|---|---:|---:|---:|
+| Current split crops | ~9.82 s | ~9.73 s | ~1.56 MB |
+| Full JPEG endpoint simulation | ~9.33 s | ~9.28 s | ~382 KB |
+
+Takeaway: endpoint packaging alone is not the main speed win. It removes waste
+and simplifies orchestration, but the seconds are still in recognition. The
+large win comes from replacing character/weapon OCR with finite asset matching
+and later reducing echo OCR.
+
+Backend decode/crop overhead is negligible relative to recognition. A 1,000-file
+local source-image bench measured:
+
+| Step | Average | Median | p95 |
+|---|---:|---:|---:|
+| Read source bytes from disk | 0.51 ms | 0.49 ms | 0.64 ms |
+| OpenCV decode | 5.67 ms | 5.36 ms | 7.58 ms |
+| Crop all 10 current regions | 0.02 ms | 0.02 ms | 0.03 ms |
+| Decode plus all crops | 5.69 ms | 5.39 ms | 7.60 ms |
+
+In production, network and recognition dominate. Backend-side cropping is cheap
+enough to ignore in the optimization budget.
+
+A headless Chrome benchmark (`backend/bench_frontend_canvas.mjs`) of the current
+frontend-style work on 197 readable source files measured the browser cost
+directly:
+
+| Browser step | Average | Median | p95 |
+|---|---:|---:|---:|
+| Decode original image | 8.36 ms | 7.90 ms | 11.00 ms |
+| Crop 10 regions and PNG/base64 encode | 55.64 ms | 54.20 ms | 61.50 ms |
+| Build `FormData` with original `File` | 0.36 ms | 0.30 ms | 0.70 ms |
+| Re-encode full image as JPEG/base64 for training upload | 18.20 ms | 18.00 ms | 20.70 ms |
+| Hash original bytes in Node | 0.24 ms | 0.19 ms | 0.46 ms |
+
+Payloads from the same browser run:
+
+| Payload | Average | Median | p95 |
+|---|---:|---:|---:|
+| Original source file | 353,127 bytes | 325,705 bytes | 457,344 bytes |
+| Current 10 cropped PNG payloads | 1,520,684 bytes | 1,520,517 bytes | 1,577,487 bytes |
+| Full JPEG/base64 training payload | 325,820 bytes | 323,214 bytes | 338,958 bytes |
+
+Matching backend-side measurements on the same first-200-file slice:
+
+| Backend step | Average | Median | p95 |
+|---|---:|---:|---:|
+| Read source bytes from disk | 0.32 ms | 0.29 ms | 0.57 ms |
+| Hash original bytes | 0.20 ms | 0.16 ms | 0.32 ms |
+| OpenCV decode | 8.53 ms | 8.02 ms | 11.24 ms |
+| Crop all 10 current regions | 0.27 ms | 0.23 ms | 0.45 ms |
+| Decode plus all crops | 8.80 ms | 8.31 ms | 11.46 ms |
+
+This makes the browser/backend tradeoff straightforward: moving crops backend
+side removes roughly 55 ms of browser CPU and about 1.2 MB of upload payload in
+the normal JPEG case, while adding less than 1 ms of backend crop work after the
+decode the backend needs anyway.
+
 ## Region architecture
 
 | Region | Target method | Notes |
 |---|---|---|
-| character | SIFT vs `Data/Characters/<id>.png` | Use splash/portrait region, not the top-left name strip. |
-| weapon | SIFT vs `Data/Weapons/<id>.png` | Crop the square weapon icon or a tightly bounded weapon-icon area. |
+| character | SIFT vs `Data/Characters/<id>.webp` | Match the splash/portrait region, not the top-left name strip. The splash always renders, including for the newest characters. |
+| weapon | SIFT vs `Data/Weapons/<id>.webp` | Crop the square weapon icon. Returns no match when the weapon panel is blank (see "Missing weapon assets"); that empty result is correct, not a failure. |
 | watermark UID | Tesseract digits-only | Use `tessedit_char_whitelist=0123456789`. |
 | watermark username | Tesseract | Leave free-form and Unicode-capable for now. |
+| character level | Optional Tesseract digits/template | Detect the gold LV badge by HSV in the header. Parse only plausible 1-90 values; default/null is acceptable when unreadable. |
 | sequences | HSV pixel ratio | Existing method is already deterministic. |
 | forte | small fixed classifier or digit templates | Five `LV.X/10` regions, classes 1-10. |
 | echo icon | SIFT | Existing method. |
@@ -130,6 +270,28 @@ are mostly known-class recognition.
 | echo main stat name | small classifier or template matcher | Finite class set from `EchoStats.json`. |
 | echo main stat value | derive from cost and stat name | Do not OCR. |
 | echo substat rows | small row classifier | Predict row `(name, value)` or two heads. |
+
+### Missing weapon assets
+
+Some cards render a blank weapon panel: no weapon icon and no weapon name, only
+the `LV.xx` level text and the ascension stars. This is reproducible on the
+current new-character cards Lucilla (`1109`), Lucy (`1511`), and Rebecca
+(`1308`), whose weapon art is absent from the export while their character
+splash renders normally. Verified against the local reference images
+`9054bd4df1f83173715af7b8e9f2f25659089d03.jpeg` (Lucilla),
+`72d21df3ccac4bdb1f39bda63bac6091afb4be8c.jpeg` (Lucy), and
+`15ea0b17db1bc6698226a1eb7d9a2ec33cd33266.jpeg` (Rebecca); Zani (`1507`,
+`7a962dccc5056e841a7c11bf94092de5e912f0e4.jpeg`) is the control with a fully
+rendered Blazing Justice panel.
+
+No recognizer can read a weapon that is not drawn. Weapon SIFT must return an
+empty/no-match result for these, exactly as the OCR path now does (the weapon
+name falls below the fuzz cutoff and resolves to `""`). The frontend owns the
+recovery: `wuwabuilds/lib/import/convert.ts` `IMPORT_WEAPON_FALLBACKS` maps the
+character id to its signature weapon (Lucilla -> Freeze Frame, Lucy -> Spectral
+Trigger, Rebecca -> Skull Thrasher) and only applies when the backend reports an
+empty weapon. Switching weapon recognition to SIFT does not remove this fallback
+and must preserve the empty-weapon contract it keys on.
 
 ### Echo element fallback note
 
@@ -146,17 +308,76 @@ template comparison among close same-hue candidates. Longer term, echo elements
 should move toward deterministic template/mask matching; SIFT is a better fit
 for textured echo monster icons than for small circular sonata glyphs.
 
+## Template source and format
+
+Two CDNs are available for template assets: Wuthery (`files.wuthery.com`, PNG)
+and Encore (`api-v2.encore.moe`, WebP). Testing on the live echo and element
+template sets showed WebP is sufficient for SIFT and color matching — neither
+needs PNG — so the standard template format is WebP, and Encore is the preferred
+single source where it serves the asset.
+
+- Echoes and elements: Encore/WebP, already proven in the running pipeline
+  (`Data/Echoes` is 163 WebP templates, `Data/Elements` is 31).
+- Character splash: Encore serves the `IconRolePile` splash as
+  `FormationRoleCard` on the per-character **detail** endpoint
+  (`/api/en/character/{id}`), e.g.
+  `.../IconRolePile/T_IconRole_Pile_<codename>_UI.webp` (confirmed for Hiyuki,
+  Yangyang, Lucilla). The list endpoint (`/api/en/character`) only carries
+  `RoleHeadIcon` (the round 150px head), so splash fetch needs one detail call
+  per character. The pile filename uses an internal codename, not the numeric
+  id, so save it locally as `<id>.webp`.
+- Weapon icon: Encore's list endpoint `Icon` is the full unique
+  `T_IconWeapon<id>_UI.webp` — the full icon to use, not `iconMiddle`. Several
+  weapon pairs share an identical `iconMiddle`, which makes SIFT ambiguous; the
+  full icons are distinct. One list call covers every weapon.
+
+The three `download_*_icons.py` scripts plus `sync_backend.py`'s element-icon
+step are ~90% identical (resolve a URL from a data field, threadpool-download to
+an `<id>.<ext>` file, with `--force`/`--dry-run`). They should collapse into one
+declarative sync driver with a per-asset-type entry (source JSON or API, URL
+resolver, destination dir). Folding it into `sync_backend.py` lets one command
+refresh both the JSON vocabularies and every template set.
+
 ## Phase 1 status
 
 Phase 1 is character and weapon asset recognition.
 
+The primary motivation is speed: SIFT against a fixed game asset is faster and
+cheaper than running Tesseract/RapidOCR on the name and weapon strips, and it
+drops the dual-engine character path entirely. Robustness is a secondary bonus.
+Missing-asset handling is uniform across both fields — whatever the recognizer
+cannot read (a blank weapon panel, or an unreadable name strip) resolves to
+empty, and the frontend fallback fills it. The character splash renders even for
+the newest characters, so SIFT recovers identity where the name OCR would not;
+the weapon panel can be genuinely blank (see "Missing weapon assets"), and that
+empty result is correct.
+
 Existing local artifacts:
 
-- `Data/Characters/` and `Data/Weapons/` directories exist but are empty —
-  template PNGs have not been generated yet. The runtime falls back to the
-  existing OCR path for character/weapon until templates ship.
+- `Data/Characters/` (56 splash WebP) and `Data/Weapons/` (118 icon WebP) are
+  now populated from Encore via `fetch_phase1_templates.py`. `data.py` does not
+  load these two dirs yet, so the runtime still uses the OCR path for
+  character/weapon until the match functions are wired in.
+- Validation harness `eval_phase1_sift.py` ran on the reference cards: character
+  SIFT is **5/5** correct (Hiyuki, Zani, Lucilla, Lucy, Rebecca); weapon SIFT is
+  **2/2** on rendered panels (Frostburn, Blazing Justice) and correctly **empty
+  on all 3 blank panels**. The "broad" character box `(0.00, 0.00, 0.34, 0.60)`
+  won every time; weapon used a tight icon box around `(0.75, 0.39, 0.83, 0.55)`.
+- Measured separation: character real matches scored conf 0.10-0.22 with the
+  runner-up near zero (margin ~= conf), so accept on **margin**, not an absolute
+  floor like echoes. Weapon real matches scored 0.12-0.16 while blank panels
+  scored 0.016, so a weapon-conf floor around 0.05-0.06 cleanly flags a missing
+  weapon. These bars still need confirming on a larger `r2-backup` slice.
 - `optimize_crops.py` supports `character_sift` and `weapon_sift` tasks for
   the crop sweep against gold labels.
+- `wuwabuilds/scripts/download_character_icons.py` and
+  `wuwabuilds/scripts/download_weapon_icons.py` already cover template
+  downloads, but weapon SIFT should prefer full `icon.icon` assets rather than
+  `iconMiddle`. Current frontend data has duplicate `iconMiddle` assets for
+  several weapon pairs, while full weapon icons are unique.
+- Character banner SIFT can collide for Rover variants that intentionally share
+  the same banner by gender. Treat Rover as a known disambiguation case that may
+  need an element/title fallback or a base-Rover result.
 - The standalone `eval_phase1.py`, `inspect_crops.py`, `save_debug_crops.py`,
   and `docs/phase1-sift-recognition.md` artifacts referenced in earlier
   drafts are no longer in the tree.
@@ -169,6 +390,8 @@ Phase 1 acceptance remains:
   1920x1080 cards.
 - Every disagreement is manually reviewed, because the old OCR baseline can be
   wrong too.
+- Cards with a blank weapon panel count as correct when weapon SIFT returns no
+  match; they must not be scored as weapon misses. See "Missing weapon assets".
 
 ## Phase 2 goal
 
@@ -178,10 +401,18 @@ not proven optimal.
 
 The optimization pass should answer:
 
+- Which full-image import payload shape should be kept for production? Default
+  answer after the latest corpus check is "send the original image file", not
+  client PNG crops.
 - Which crop box gives the best SIFT agreement/margin for character and weapon?
 - Which echo icon crop gives the best echo ID confidence without hurting cost
   or element follow-up?
 - Which watermark UID crop gives the highest exact digit-match rate?
+- Whether username still needs to be OCR-read automatically, or only retained
+  for report metadata/manual confirmation.
+- Whether character level should be parsed at all, and if so whether the HSV
+  gold-badge detector is good enough. Level is lower priority than character,
+  weapon, UID, and echo correctness.
 - Which main-stat-name crop is easiest to classify without reading the value?
 - Which substat row crop best isolates one row for a future row model?
 - Which forte digit crop isolates level text reliably enough for template or
@@ -244,6 +475,20 @@ For the attached Hiyuki/Frostburn card:
 
 Substat rows from current logs are expected to be correct for this card and are
 good seed labels, but they should not be the only validation data.
+
+### Missing-weapon reference cards
+
+These reproduce the blank weapon panel and are the gold set for the empty-weapon
+contract (all share UID `500006092`):
+
+- Lucilla `9054bd4df1f83173715af7b8e9f2f25659089d03.jpeg`: character `1109`,
+  weapon empty, signature `Freeze Frame` `21050086`.
+- Lucy `72d21df3ccac4bdb1f39bda63bac6091afb4be8c.jpeg`: character `1511`,
+  weapon empty, signature `Spectral Trigger` `21030056`.
+- Rebecca `15ea0b17db1bc6698226a1eb7d9a2ec33cd33266.jpeg`: character `1308`,
+  weapon empty, signature `Skull Thrasher` `21030066`.
+- Zani `7a962dccc5056e841a7c11bf94092de5e912f0e4.jpeg` (control, panel renders):
+  character `1507`, weapon `Blazing Justice` `21040036`.
 
 ## Crop sweep tool
 

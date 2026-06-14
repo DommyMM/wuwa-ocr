@@ -1,11 +1,11 @@
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 import cv2
 import numpy as np
-import base64
-from concurrent.futures import TimeoutError, ProcessPoolExecutor
+import hashlib
+from concurrent.futures import ProcessPoolExecutor
 from typing import Any, Optional, cast
 from card import process_card
 import time
@@ -31,6 +31,7 @@ PROCESS_TIMEOUT = int(os.getenv("OCR_TIMEOUT", "60"))
 REQUESTS_PER_MINUTE = int(os.getenv("OCR_RATE_LIMIT", "60"))
 PORT = int(os.getenv("PORT", "5000"))
 INTERNAL_API_KEY = os.getenv("INTERNAL_API_KEY", "").strip()
+WARM_WORKERS = os.getenv("OCR_WARM_WORKERS", "1") == "1"
 consecutive_500s = 0
 MAX_CONSECUTIVE_500S = 3
 
@@ -91,15 +92,13 @@ def get_rate_limit_identity(request: Request) -> str:
 
     return request.client.host if request.client and request.client.host else "unknown"
 
-class ImageRequest(BaseModel):
-    image: str
-    region: Optional[str] = None
-    type: Optional[str] = None  # Legacy fallback ("import-<region>")
-
 class OCRResponse(BaseModel):
     success: bool
     error: Optional[str] = None
     analysis: Optional[dict] = None
+    progress: Optional[dict] = None
+    timings: Optional[dict] = None
+    trainingImageKey: Optional[str] = None
 
 class APIStatus(BaseModel):
     status: str = "running"
@@ -108,19 +107,47 @@ class APIStatus(BaseModel):
             "path": "/api/ocr",
             "method": "POST",
             "request": {
-                "image": "string (base64 encoded image)",
-                "region": "string (optional body fallback)",
-                "type": "string (legacy fallback: 'import-<region>')"
+                "image": "multipart file field or raw image body"
             },
-            "headers": {
-                "X-OCR-Region": "string (recommended region identifier)"
-            },
+            "response": "full import analysis with progress and timings",
         }
     }
+
+IMPORT_REGIONS: dict[str, dict[str, float]] = {
+    # Use asset-bearing crops for character/weapon now that those are SIFT
+    # recognizers. The old title-strip/name OCR crop is intentionally skipped.
+    "character": {"x1": 0.0200, "x2": 0.2700, "y1": 0.1000, "y2": 0.4500},
+    "watermark": {"x1": 0.0073, "x2": 0.1304, "y1": 0.0741, "y2": 0.1370},
+    "forte": {"x1": 0.4057, "x2": 0.7422, "y1": 0.0222, "y2": 0.5917},
+    "sequences": {"x1": 0.0703, "x2": 0.3318, "y1": 0.4787, "y2": 0.5843},
+    "weapon": {"x1": 0.7590, "x2": 0.8310, "y1": 0.4120, "y2": 0.5380},
+    "echo1": {"x1": 0.0125, "x2": 0.2042, "y1": 0.6019, "y2": 0.9843},
+    "echo2": {"x1": 0.2057, "x2": 0.3974, "y1": 0.6019, "y2": 0.9843},
+    "echo3": {"x1": 0.4016, "x2": 0.5938, "y1": 0.6019, "y2": 0.9843},
+    "echo4": {"x1": 0.5969, "x2": 0.7891, "y1": 0.6019, "y2": 0.9843},
+    "echo5": {"x1": 0.7911, "x2": 0.9833, "y1": 0.6019, "y2": 0.9843},
+}
+
+REGION_KEYS = tuple(IMPORT_REGIONS.keys())
+
+def warm_worker() -> int:
+    import card
+    blank = np.zeros((64, 64, 3), dtype=np.uint8)
+    card.recognize_character_asset(blank)
+    card.recognize_weapon_asset(blank)
+    return os.getpid()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     print(f"Server starting on port {PORT} | railway={IS_RAILWAY} gpu={USE_GPU} workers={MAX_WORKERS} opencv_threads={OPENCV_THREADS}", flush=True)
+    if WARM_WORKERS:
+        started = time.perf_counter()
+        loop = asyncio.get_running_loop()
+        await asyncio.gather(*[
+            loop.run_in_executor(executor, warm_worker)
+            for _ in range(MAX_WORKERS)
+        ])
+        print(f"Warmed {MAX_WORKERS} OCR workers in {(time.perf_counter() - started):.2f}s", flush=True)
     yield
     print("Server shutting down", flush=True)
     executor.shutdown(wait=True)
@@ -133,6 +160,35 @@ def worker_init():
     if hasattr(sys.stderr, "reconfigure"):
         cast(Any, sys.stderr).reconfigure(line_buffering=True)
     cv2.setNumThreads(OPENCV_THREADS)
+
+def crop_region(image: np.ndarray, region: dict[str, float]) -> np.ndarray:
+    h, w = image.shape[:2]
+    x1 = round(region["x1"] * w)
+    x2 = round(region["x2"] * w)
+    y1 = round(region["y1"] * h)
+    y2 = round(region["y2"] * h)
+    return np.ascontiguousarray(image[y1:y2, x1:x2])
+
+def process_region_task(task: tuple[str, np.ndarray]) -> dict[str, Any]:
+    region, crop = task
+    started = time.perf_counter()
+    try:
+        result = process_card(crop, region)
+        return {
+            "region": region,
+            "success": bool(result.get("success")),
+            "analysis": result.get("analysis"),
+            "error": result.get("error"),
+            "elapsedMs": (time.perf_counter() - started) * 1000,
+        }
+    except Exception as exc:
+        return {
+            "region": region,
+            "success": False,
+            "analysis": None,
+            "error": str(exc),
+            "elapsedMs": (time.perf_counter() - started) * 1000,
+        }
 
 executor = ProcessPoolExecutor(
     max_workers=MAX_WORKERS,
@@ -163,71 +219,141 @@ async def rate_limit_middleware(request: Request, call_next):
     response = await call_next(request)
     return response
 
-async def process_card_image(image_bytes: bytes, region: str):
+async def read_upload_image_bytes(request: Request) -> bytes:
+    content_type = request.headers.get("content-type", "").lower()
+
+    if content_type.startswith("multipart/form-data"):
+        form = await request.form()
+        value = form.get("image")
+        if not isinstance(value, UploadFile) and not hasattr(value, "read"):
+            raise HTTPException(status_code=400, detail="Missing multipart file field 'image'.")
+        image_bytes = await value.read()
+    else:
+        image_bytes = await request.body()
+
+    if not image_bytes:
+        raise HTTPException(status_code=400, detail="Missing image bytes.")
+
+    return image_bytes
+
+async def process_full_import_image(image_bytes: bytes) -> dict[str, Any]:
+    timing_start = time.perf_counter()
+
+    hash_started = time.perf_counter()
+    image_hash = hashlib.sha256(image_bytes).hexdigest()[:16]
+    hashed_at = time.perf_counter()
+
+    decode_started = time.perf_counter()
+    nparr = np.frombuffer(image_bytes, np.uint8)
+    image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+    decoded_at = time.perf_counter()
+
+    if image is None:
+        raise HTTPException(status_code=400, detail="Failed to decode image.")
+
+    crop_started = time.perf_counter()
+    crops = {
+        region: crop_region(image, coords)
+        for region, coords in IMPORT_REGIONS.items()
+    }
+    cropped_at = time.perf_counter()
+
+    loop = asyncio.get_event_loop()
+    recognition_started = time.perf_counter()
+    tasks = [
+        loop.run_in_executor(executor, process_region_task, (region, crops[region]))
+        for region in REGION_KEYS
+    ]
+
     try:
-        nparr = np.frombuffer(image_bytes, np.uint8)
-        image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-        if image is None:
-            raise ValueError("Failed to decode image")
-        
-        loop = asyncio.get_event_loop()
-        future = loop.run_in_executor(executor, process_card, image, region)
-        result = await asyncio.wait_for(future, timeout=PROCESS_TIMEOUT)
-        return result
-            
-    except TimeoutError:
+        region_results = await asyncio.wait_for(asyncio.gather(*tasks), timeout=PROCESS_TIMEOUT)
+    except asyncio.TimeoutError:
         raise HTTPException(status_code=408, detail=f"Processing timeout exceeded ({PROCESS_TIMEOUT} seconds)")
-    except Exception as e:
-        error_msg = str(e)
-        
+    except Exception as exc:
+        error_msg = str(exc)
         if "terminated abruptly" in error_msg.lower():
             force_restart(f"ProcessPool worker terminated abruptly: {error_msg}")
-            
         raise HTTPException(status_code=400, detail=f"Image processing error: {error_msg}")
 
-def resolve_region(request: Request, image_data: ImageRequest) -> str:
-    header_region = request.headers.get("x-ocr-region")
-    if header_region and header_region.strip():
-        return header_region.strip()
+    recognized_at = time.perf_counter()
 
-    if image_data.region and image_data.region.strip():
-        return image_data.region.strip()
+    analysis: dict[str, Any] = {}
+    progress: dict[str, str] = {}
+    region_timings: dict[str, float] = {}
+    region_errors: dict[str, str] = {}
 
-    legacy_type = (image_data.type or "").strip()
-    if legacy_type.startswith("import-"):
-        return legacy_type.replace("import-", "", 1).strip()
-    if legacy_type.startswith("char-"):
-        raise HTTPException(
-            status_code=400,
-            detail="Legacy char-* mode was removed. Send X-OCR-Region for split-card OCR regions.",
-        )
-    if legacy_type and "-" not in legacy_type:
-        return legacy_type
+    for result in region_results:
+        region = result["region"]
+        region_timings[region] = round(float(result["elapsedMs"]), 2)
+        if result["success"] and result["analysis"] is not None:
+            analysis[region] = result["analysis"]
+            progress[region] = "done"
+        else:
+            progress[region] = "error"
+            if result.get("error"):
+                region_errors[region] = str(result["error"])
 
-    raise HTTPException(
-        status_code=400,
-        detail="Missing OCR region. Send X-OCR-Region (for example: character, weapon, watermark, forte, sequences, echo1..echo5).",
-    )
+    finished_at = time.perf_counter()
+    timings = {
+        "hashMs": round((hashed_at - hash_started) * 1000, 2),
+        "decodeMs": round((decoded_at - decode_started) * 1000, 2),
+        "cropMs": round((cropped_at - crop_started) * 1000, 2),
+        "recognitionWallMs": round((recognized_at - recognition_started) * 1000, 2),
+        "totalMs": round((finished_at - timing_start) * 1000, 2),
+        "regions": region_timings,
+    }
+
+    return {
+        "success": True,
+        "analysis": analysis,
+        "progress": progress,
+        "timings": timings,
+        "trainingImageKey": f"training-images/{image_hash}.jpg",
+        "regionErrors": region_errors,
+        "image": {
+            "width": int(image.shape[1]),
+            "height": int(image.shape[0]),
+            "bytes": len(image_bytes),
+        },
+    }
 
 @app.post("/api/ocr", response_model=OCRResponse)
-async def process_image_request(request: Request, image_data: ImageRequest):
+async def process_image_request(request: Request):
     global consecutive_500s
 
     request_start = time.perf_counter()
-    region = "unknown"
         
     try:
-        region = resolve_region(request, image_data)
-        print(f"{region}: Processing request", flush=True)
+        print("import: Processing full-image request", flush=True)
 
-        image_str = image_data.image
-        if ',' in image_str:
-            image_str = image_str.split(',')[1]
-        image_bytes = base64.b64decode(image_str)
-
-        result = await process_card_image(image_bytes, region)
+        body_read_started = time.perf_counter()
+        image_bytes = await read_upload_image_bytes(request)
+        body_read_ms = (time.perf_counter() - body_read_started) * 1000
+        result = await process_full_import_image(image_bytes)
+        if result.get("timings"):
+            result["timings"]["bodyReadMs"] = round(body_read_ms, 2)
+            result["timings"]["wallMs"] = round((time.perf_counter() - request_start) * 1000, 2)
             
-        print(f"{region}: Completed in {time.perf_counter() - request_start:.2f}s", flush=True)
+        timings = result.get("timings", {})
+        region_timings = timings.get("regions") if isinstance(timings, dict) else None
+        if isinstance(region_timings, dict):
+            slow_regions = ",".join(
+                f"{name}:{elapsed:.0f}"
+                for name, elapsed in sorted(region_timings.items(), key=lambda item: item[1], reverse=True)[:4]
+            )
+        else:
+            slow_regions = ""
+        print(
+            "import: Completed "
+            f"wall={timings.get('wallMs')}ms "
+            f"body={timings.get('bodyReadMs')}ms "
+            f"decode={timings.get('decodeMs')}ms "
+            f"crop={timings.get('cropMs')}ms "
+            f"recognition={timings.get('recognitionWallMs')}ms "
+            f"bytes={result.get('image', {}).get('bytes')} "
+            f"slow={slow_regions}",
+            flush=True,
+        )
         
         consecutive_500s = 0
         return result
@@ -241,7 +367,7 @@ async def process_image_request(request: Request, image_data: ImageRequest):
         )
         
     except Exception as e:
-        print(f"{region}: Failed - {str(e)}", flush=True)
+        print(f"import: Failed - {str(e)}", flush=True)
         
         consecutive_500s += 1
         if consecutive_500s > 1:
