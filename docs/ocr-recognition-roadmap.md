@@ -261,8 +261,8 @@ decode the backend needs anyway.
 
 | Region | Target method | Notes |
 |---|---|---|
-| character | SIFT vs `Data/Characters/<id>.webp` | Match the splash/portrait region, not the top-left name strip. The splash always renders, including for the newest characters. |
-| weapon | SIFT vs `Data/Weapons/<id>.webp` | Crop the square weapon icon. Returns no match when the weapon panel is blank (see "Missing weapon assets"); that empty result is correct, not a failure. |
+| character | SIFT vs `Data/Characters/<id>.webp` | Crop `tight` `(0.04, 0.14, 0.30, 0.52)`, downscale query+templates to max_side 150. ~185 ms (dev). Conf floor ~0.10 → OCR fallback. Splash always renders incl. newest characters; language-independent, so it beats OCR on non-English cards. See Phase 1 status for the 500-card validation. |
+| weapon | SIFT vs `Data/Weapons/<id>.webp` | Crop `icon` `(0.752, 0.400, 0.802, 0.530)`, downscale to max_side 120. ~143 ms (dev). Needs conf floor ~0.08 **and** margin floor ~0.03 (several icons look alike). Blank panel → conf ~0 → empty (see "Missing weapon assets"); empty is correct. |
 | watermark UID | Tesseract digits-only | Use `tessedit_char_whitelist=0123456789`. |
 | watermark username | Tesseract | Leave free-form and Unicode-capable for now. |
 | character level | Optional Tesseract digits/template | Detect the gold LV badge by HSV in the header. Parse only plausible 1-90 values; default/null is acceptable when unreadable. |
@@ -356,36 +356,68 @@ the newest characters, so SIFT recovers identity where the name OCR would not;
 the weapon panel can be genuinely blank (see "Missing weapon assets"), and that
 empty result is correct.
 
-Current runtime status:
+**Character and weapon now recognize via SIFT** in `card.py`
+(`recognize_character_asset` / `recognize_weapon_asset`, routed from
+`process_card`), each with an OCR fallback on abstain. The case below was
+validated on a 500-card `r2-backup` sample (`bench_char_crops.py`,
+`bench_weapon_crops.py`) with the OCR result as the comparison baseline. The
+local→Railway gap is part of the motivation: SIFT scales ~1x dev→Railway while
+RapidOCR/onnx scales ~2.5x (8-vCPU thread oversubscription), and character OCR
+was the previous import wall (~2 s on Railway). Crop+downscale overhead is ~1 ms,
+negligible. Note: a SIFT accept reports character/weapon **level 90** (not in the
+splash/icon); the abstain→OCR path still reads the true level for the rarer
+non-90 cards.
 
-- `Data/Characters/` (56 splash WebP) and `Data/Weapons/` (118 icon WebP) are
-  populated from Encore and committed with the backend so Railway can match
-  them at runtime.
-- `card.py` now recognizes character and weapon through SIFT over those assets.
-  Character crops use the splash/body region; weapon crops use the square icon.
-- Validation harness `eval_phase1_sift.py` ran on the reference cards: character
-  SIFT is **5/5** correct (Hiyuki, Zani, Lucilla, Lucy, Rebecca); weapon SIFT is
-  **2/2** on rendered panels (Frostburn, Blazing Justice) and correctly **empty
-  on all 3 blank panels**. The "broad" character box `(0.00, 0.00, 0.34, 0.60)`
-  won every time; weapon used a tight icon box around `(0.75, 0.39, 0.83, 0.55)`.
-- Measured separation: character real matches scored conf 0.10-0.22 with the
-  runner-up near zero (margin ~= conf), so accept on **margin**, not an absolute
-  floor like echoes. Weapon real matches scored 0.12-0.16 while blank panels
-  scored 0.016, so a weapon-conf floor around 0.05-0.06 cleanly flags a missing
-  weapon. These bars still need confirming on a larger `r2-backup` slice.
-- `optimize_crops.py` supports `character_sift` and `weapon_sift` tasks for
-  the crop sweep against gold labels.
-- `wuwabuilds/scripts/download_character_icons.py` and
-  `wuwabuilds/scripts/download_weapon_icons.py` already cover template
-  downloads, but weapon SIFT should prefer full `icon.icon` assets rather than
-  `iconMiddle`. Current frontend data has duplicate `iconMiddle` assets for
-  several weapon pairs, while full weapon icons are unique.
-- Character banner SIFT can collide for Rover variants that intentionally share
-  the same banner by gender. Treat Rover as a known disambiguation case that may
-  need an element/title fallback or a base-Rover result.
-- The standalone `eval_phase1.py`, `inspect_crops.py`, `save_debug_crops.py`,
-  and `docs/phase1-sift-recognition.md` artifacts referenced in earlier
-  drafts are no longer in the tree.
+Assets in tree: `Data/Characters/` (56 splash WebP) and `Data/Weapons/` (118 icon
+WebP), Encore-sourced, committed with the backend.
+
+### Character — validated, recommended
+
+- Crop **`tight` `(0.04, 0.14, 0.30, 0.52)`**, downscale query+templates to
+  **max_side 150**, SIFT vs `Data/Characters/<id>.webp`.
+- Speed: ~185 ms median match (dev). Downscale is the whole speed lever:
+  full-res ~1.9 s collapses to ~185 ms at 150px with **no accuracy loss**.
+  `tight@150` beats `@120/@100` because the Luuk Herssen (`1510`) splash is
+  correct at 150 but flips at the aggressive downscales (thin margin).
+- 500-card agreement with OCR: **96.4%**, but this *undercounts* SIFT. Every
+  consistent disagreement was reviewed: the 5 high-confidence ones are Japanese
+  cards where OCR misread the name and **SIFT was correct** — Phrolova
+  (フローヴァ) read by OCR as Jianxin, Denia (ダーニャ) as Hiyuki, Camellya
+  (ツバキ) as Encore, Lupa (ルパ) as Lumi, plus a Cartethyia case. SIFT is
+  language-independent, so it is **more accurate than the OCR baseline**.
+- The remaining disagreements are low-confidence (conf < 0.06): Rover variants
+  (shared banners by gender) and a non-card roster screenshot. A **confidence
+  floor ~0.10 with OCR fallback** turns these into clean abstentions, not errors.
+
+### Weapon — validated, needs a margin gate
+
+- Crop **`icon` `(0.752, 0.400, 0.802, 0.530)`**, downscale to **max_side 120**,
+  SIFT vs `Data/Weapons/<id>.webp`. ~143 ms median (dev).
+- Harder than character: weapon icons are small and several look alike, so real
+  matches score lower (~0.10-0.18) and a handful are genuinely ambiguous.
+- 500-card: 475 OCR-read + 25 OCR-empty. Of the 25 empty, ~11 are **true blank
+  panels** (SIFT conf 0.000 → correct empty), ~8 are **non-English rendered
+  panels** OCR missed but SIFT read at conf 0.10-0.18 (SIFT wins again, e.g.
+  Phrolova→Lethean Elegy, Lupa→Wildfire Mark), the rest low-conf ambiguous.
+- 6/475 confident-ish disagreements (Emerald Sentence→Originite Type IV ×3,
+  Red Spring→Hollow Mirage ×2, Commando of Conviction→Pistols#26) — but **all
+  have margin < 0.02** (top-2 nearly tied). Weapon therefore needs **both a conf
+  floor (~0.08) AND a margin floor (~0.03)** to abstain; conf alone is not
+  enough. The empty contract holds cleanly (true blanks at conf 0.000), and the
+  roster-screenshot false positive (conf 0.122) is caught by the margin gate
+  (margin 0.027).
+
+### To wire it in
+
+- Recognize character/weapon by SIFT with the crops/downscales above; on abstain
+  (below conf floor, or weapon below margin floor) fall back to the existing OCR
+  path, or return empty for weapon to preserve the signature-weapon fallback
+  contract (see "Missing weapon assets").
+- Load templates downscaled to the match max_side (scale-consistent matching is
+  what makes the speed win real).
+- Calibrate the floors on a larger slice before shipping; 500 cards points at
+  conf ~0.10 (character) and conf ~0.08 + margin ~0.03 (weapon). Rover variants
+  should abstain → OCR (or a base-Rover/element fallback) rather than guess.
 
 Phase 1 acceptance remains:
 

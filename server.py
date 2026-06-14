@@ -106,7 +106,7 @@ class APIStatus(BaseModel):
     }
 
 IMPORT_REGIONS: dict[str, dict[str, float]] = {
-    "character": {"x1": 0.0328, "x2": 0.3021, "y1": 0.0074, "y2": 0.0833},
+    "character": {"x1": 0.0000, "x2": 0.3200, "y1": 0.0000, "y2": 0.5500},
     "watermark": {"x1": 0.0073, "x2": 0.1304, "y1": 0.0741, "y2": 0.1370},
     "forte": {"x1": 0.4057, "x2": 0.7422, "y1": 0.0222, "y2": 0.5917},
     "sequences": {"x1": 0.0703, "x2": 0.3318, "y1": 0.4787, "y2": 0.5843},
@@ -183,7 +183,7 @@ def process_region_task(task: tuple[str, np.ndarray]) -> dict[str, Any]:
             "elapsedMs": (time.perf_counter() - started) * 1000,
         }
 
-def warm_worker() -> bool:
+def warm_worker(hold: float = 2.0) -> bool:
     """Force a worker to load its OCR engines and SIFT templates.
 
     Models load lazily on a worker's first real task; running a throwaway
@@ -191,14 +191,22 @@ def warm_worker() -> bool:
     noise (not black) so SIFT finds keypoints and the echo sweep + RapidOCR +
     Tesseract paths all execute. Errors are swallowed: the goal is to warm the
     process, not to produce a result.
+
+    The trailing sleep holds the worker busy so that when MAX_WORKERS of these
+    run concurrently the pool is forced to spawn *every* worker (each paying its
+    model load) instead of reusing one already-warm worker for all the warm
+    tasks. Without it the pool drains the quick tasks on one or two workers and
+    the rest stay cold, so the first real request still eats a ~3s cold load
+    (observed in prod as character:3064ms).
     """
     rng = np.random.default_rng(0)
     img = rng.integers(0, 255, (400, 360, 3), dtype=np.uint8)
-    for region in ("character", "echo1"):
+    for region in ("character", "weapon", "echo1"):
         try:
             process_card(img, region)
         except Exception:
             pass
+    time.sleep(hold)
     return True
 
 executor = ProcessPoolExecutor(

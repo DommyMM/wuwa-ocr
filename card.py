@@ -6,6 +6,7 @@ import numpy as np
 from rapidfuzz import fuzz, process
 from typing import Tuple
 from cv2 import SIFT_create, FlannBasedMatcher
+from pathlib import Path
 import io
 import sys
 
@@ -627,6 +628,123 @@ def clean_echo_substat_name_lines(lines: list[str]) -> list[str]:
 
     return cleaned_names
 
+# --- Character and weapon asset recognition (SIFT, OCR fallback on abstain) ---
+#
+# Server crops a bounding region per field (server.py IMPORT_REGIONS); these
+# sub-boxes locate the SIFT target and the OCR-fallback target WITHIN that region,
+# so they are coupled to those server boxes and must change together:
+#   character region = x[0.00, 0.32] y[0.00, 0.55]            (name strip + splash)
+#   weapon region    = x[0.7542, 0.9828] y[0.3843, 0.5843]    (full weapon panel)
+#
+# Validated on a 500-card r2-backup slice (docs/ocr-recognition-roadmap.md): SIFT
+# is more accurate than OCR (language-independent, reads non-English cards OCR
+# misses) and far cheaper than RapidOCR on Railway. It abstains via conf+margin
+# floors on Rover variants, look-alike weapon icons, and non-card screenshots,
+# falling back to the original OCR path so accuracy never regresses.
+DATA_DIR = Path(__file__).resolve().parent / "Data"
+
+CHAR_SPLASH_SUBBOX = (0.125, 0.2545, 0.9375, 0.9455)  # splash within character region
+CHAR_NAME_SUBBOX = (0.1025, 0.0135, 0.944, 0.1515)    # name strip within character region
+CHAR_SIFT_MAX_SIDE = 150
+CHAR_CONF_FLOOR = 0.10
+CHAR_MARGIN_FLOOR = 0.04
+
+WEAP_ICON_SUBBOX = (0.0, 0.0785, 0.209, 0.7285)       # square icon within weapon panel
+WEAP_SIFT_MAX_SIDE = 120
+WEAP_CONF_FLOOR = 0.08
+WEAP_MARGIN_FLOOR = 0.03
+
+CHARACTER_ID_NAME = {cid: name for name, cid in CHARACTER_ID_MAP.items()}
+WEAPON_ID_NAME = {wid: name for name, wid in WEAPON_ID_MAP.items()}
+
+_CHARACTER_FEATURES = None
+_WEAPON_FEATURES = None
+
+
+def _resize_max_side(img: np.ndarray, max_side: int) -> np.ndarray:
+    h, w = img.shape[:2]
+    if max(h, w) <= max_side:
+        return img
+    s = max_side / max(h, w)
+    return cv2.resize(img, (int(w * s), int(h * s)), interpolation=cv2.INTER_AREA)
+
+
+def _subcrop(img: np.ndarray, box: tuple) -> np.ndarray:
+    h, w = img.shape[:2]
+    x1, y1, x2, y2 = box
+    return np.ascontiguousarray(img[int(h * y1):int(h * y2), int(w * x1):int(w * x2)])
+
+
+def _load_asset_features(folder: str, max_side: int) -> dict:
+    sift = SIFT_create()
+    feats = {}
+    for path in sorted((DATA_DIR / folder).glob("*.webp")):
+        img = cv2.imdecode(np.fromfile(str(path), dtype=np.uint8), cv2.IMREAD_COLOR)
+        if img is None:
+            continue
+        kp, des = sift.detectAndCompute(_resize_max_side(img, max_side), None)
+        if des is not None:
+            feats[path.stem] = (kp, des)
+    return feats
+
+
+def _match_asset(region: np.ndarray, feats: dict) -> tuple:
+    """Top template by SIFT good-match ratio. Returns (id, confidence, margin)."""
+    sift = SIFT_create()
+    flann = FlannBasedMatcher(dict(algorithm=1, trees=5), dict(checks=50))
+    kp1, des1 = sift.detectAndCompute(region, None)
+    if des1 is None or len(kp1) < 2:
+        return None, 0.0, 0.0
+    scores = []
+    for name, (kp2, des2) in feats.items():
+        ml = flann.knnMatch(des1, des2, k=2)
+        good = [m for m, n in (pr for pr in ml if len(pr) == 2) if m.distance < 0.7 * n.distance]
+        conf = len(good) / max(len(kp1), len(kp2)) if kp1 and kp2 else 0
+        scores.append((name, conf))
+    scores.sort(key=lambda x: x[1], reverse=True)
+    best_id, best_conf = scores[0]
+    margin = best_conf - scores[1][1] if len(scores) > 1 else best_conf
+    return best_id, best_conf, margin
+
+
+def recognize_character_asset(region_img: np.ndarray) -> dict:
+    """SIFT the character splash; OCR the name strip on abstain (Rover, junk).
+
+    Level is not present in the splash, and cards are overwhelmingly Lv.90, so a
+    SIFT accept reports level 90. The abstain path runs the original OCR, which
+    still reads the true level for the rarer non-90 cards.
+    """
+    global _CHARACTER_FEATURES
+    if _CHARACTER_FEATURES is None:
+        _CHARACTER_FEATURES = _load_asset_features("Characters", CHAR_SIFT_MAX_SIDE)
+    splash = _resize_max_side(_subcrop(region_img, CHAR_SPLASH_SUBBOX), CHAR_SIFT_MAX_SIDE)
+    cid, conf, margin = _match_asset(splash, _CHARACTER_FEATURES)
+    if cid and conf >= CHAR_CONF_FLOOR and margin >= CHAR_MARGIN_FLOOR:
+        return {"name": CHARACTER_ID_NAME.get(cid, ""), "id": cid, "level": 90}
+    text = process_ocr("character", _subcrop(region_img, CHAR_NAME_SUBBOX))
+    cleaned = "\n".join(line.strip() for line in text.splitlines() if line.strip())
+    return parse_character_title(cleaned)
+
+
+def recognize_weapon_asset(region_img: np.ndarray) -> dict:
+    """SIFT the weapon icon; OCR the panel on abstain (look-alike icons).
+
+    A true blank weapon panel yields ~zero SIFT confidence and unreadable OCR, so
+    the result stays empty (name/id "") and the frontend signature-weapon fallback
+    applies. SIFT accept reports level 90 (see recognize_character_asset).
+    """
+    global _WEAPON_FEATURES
+    if _WEAPON_FEATURES is None:
+        _WEAPON_FEATURES = _load_asset_features("Weapons", WEAP_SIFT_MAX_SIDE)
+    icon = _resize_max_side(_subcrop(region_img, WEAP_ICON_SUBBOX), WEAP_SIFT_MAX_SIDE)
+    wid, conf, margin = _match_asset(icon, _WEAPON_FEATURES)
+    if wid and conf >= WEAP_CONF_FLOOR and margin >= WEAP_MARGIN_FLOOR:
+        return {"name": WEAPON_ID_NAME.get(wid, ""), "id": wid, "level": 90}
+    text = process_ocr("weapon", region_img)
+    cleaned = "\n".join(line.strip() for line in text.splitlines() if line.strip())
+    return parse_region_text("weapon", cleaned)
+
+
 def process_card(image, region: str):
     if image is None:
         return {"success": False, "error": "No image data provided"}
@@ -660,6 +778,10 @@ def process_card(image, region: str):
                 "success": True,
                 "analysis": forte_data
             }
+        elif region == "character":
+            return {"success": True, "analysis": recognize_character_asset(image)}
+        elif region == "weapon":
+            return {"success": True, "analysis": recognize_weapon_asset(image)}
         elif region.startswith("echo"):
             # Process main region
             main_img = image[ECHO_REGIONS["main"]["y1"]:ECHO_REGIONS["main"]["y2"], ECHO_REGIONS["main"]["x1"]:ECHO_REGIONS["main"]["x2"]]
