@@ -5,8 +5,9 @@ Only fetches files not already present locally (skips existing).
 Run this before benchmark to ensure r2-backup is up to date.
 
 Usage:
-  py sync_r2.py          # dry run — shows what would be downloaded
-  py sync_r2.py --run    # actually downloads
+  py sync_r2.py             # dry run — shows what would be downloaded
+  py sync_r2.py --run       # actually downloads and stamps file mtimes
+  py sync_r2.py --run --manifest  # also write compact r2-backup-manifest.json
 """
 import sys
 import os
@@ -18,6 +19,7 @@ BACKEND_DIR = Path(__file__).parent
 R2_BACKUP   = BACKEND_DIR.parent / "r2-backup"
 MANIFEST    = BACKEND_DIR.parent / "r2-backup-manifest.json"
 DRY_RUN     = "--run" not in sys.argv
+WRITE_MANIFEST = "--manifest" in sys.argv
 
 ENV_CANDIDATES = [
     BACKEND_DIR.parent / "wuwabuilds" / ".env",
@@ -94,8 +96,8 @@ def main():
     }
     by_key = {obj["Key"]: obj for obj in all_objects}
 
-    if not DRY_RUN:
-        MANIFEST.write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
+    if not DRY_RUN and WRITE_MANIFEST:
+        MANIFEST.write_text(json.dumps(manifest, separators=(",", ":"), sort_keys=True), encoding="utf-8")
         print(f"Wrote manifest: {MANIFEST}")
 
     existing_keys = local_keys()
