@@ -474,12 +474,29 @@ def _identify_icon_core(image: np.ndarray):
     icon_img = image[0:182, 0:188]
     sift = SIFT_create()
     kp1, des1 = sift.detectAndCompute(icon_img, None)
-    matches = []
     flann = FlannBasedMatcher(dict(algorithm=1, trees=5), dict(checks=50))
 
     detected_element = None  # Initialize to avoid duplicate element detection
 
-    for name, (kp2, des2) in TEMPLATE_FEATURES.items():
+    # Cost prefilter: the visible cost badge is cheap to read (template match)
+    # and partitions the ~163 echoes into cost 1/3/4 buckets, so the SIFT sweep
+    # only scores the ~44 templates of the detected cost instead of all of them
+    # (~3.6x fewer FLANN matches, the dominant per-echo cost). get_echo_cost
+    # returns 0 when unsure (match score < 0.2); an unknown cost falls back to
+    # the full sweep, so a missed cost can never drop the true echo. This
+    # replaces the old post-hoc cost tiebreaker: a cost-homogeneous sweep has
+    # nothing left for it to fix.
+    actual_cost = get_echo_cost(image)
+    if actual_cost in (1, 3, 4):
+        candidate_names = [n for n in TEMPLATE_FEATURES if ECHO_COSTS.get(n, 0) == actual_cost]
+        if not candidate_names:
+            candidate_names = list(TEMPLATE_FEATURES)
+    else:
+        candidate_names = list(TEMPLATE_FEATURES)
+
+    matches = []
+    for name in candidate_names:
+        kp2, des2 = TEMPLATE_FEATURES[name]
         matches_list = flann.knnMatch(des1, des2, k=2)
         good_matches = [m for m, n in matches_list if m.distance < 0.7 * n.distance]
         confidence = len(good_matches) / max(len(kp1), len(kp2)) if kp1 and kp2 else 0
@@ -487,8 +504,7 @@ def _identify_icon_core(image: np.ndarray):
 
     sorted_matches = sorted(matches, key=lambda x: x[1], reverse=True)
     best_match, best_conf = sorted_matches[0]
-    secondary_matches = [m for m in sorted_matches[1:5] if m[1] > 0.1]
-    
+
     # When the top SIFT candidates are near-tied, the badge element disambiguates
     # look-alikes across different bodies (e.g. Chirpuff vs Gulpuff). Same-body
     # base/Nightmare confusion is resolved later by validate_echo_family_by_element.
@@ -512,19 +528,6 @@ def _identify_icon_core(image: np.ndarray):
             if len(element_matches) == 1:
                 best_match, best_conf = element_matches[0]
                 print(f"-> badge {detected_element} -> '{best_match}'")
-
-    if secondary_matches and (best_conf - secondary_matches[0][1]) < 0.25:
-        actual_cost = get_echo_cost(image)
-        print(f"Close match detected, using cost disambiguation. Actual cost: {actual_cost}")
-        if actual_cost in [1, 3, 4]:
-            best_cost = ECHO_COSTS.get(best_match, 0)
-            if best_cost != actual_cost:
-                for name, conf in secondary_matches:
-                    if ECHO_COSTS.get(name, 0) == actual_cost:
-                        print(f"Cost-based selection: {name} (matches cost {actual_cost})")
-                        best_match = name
-                        best_conf = conf
-                        break
 
     element_region = get_element_region(image)
     return best_match, best_conf, detected_element, sorted_matches, element_region

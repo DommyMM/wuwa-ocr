@@ -29,7 +29,7 @@ USE_GPU = os.getenv("USE_GPU", "0" if IS_RAILWAY else "1") == "1"
 MAX_WORKERS = int(os.getenv("OCR_WORKERS", "8"))
 OPENCV_THREADS = int(os.getenv("OCR_OPENCV_THREADS", "1"))
 PROCESS_TIMEOUT = int(os.getenv("OCR_TIMEOUT", "60"))
-REQUESTS_PER_MINUTE = int(os.getenv("OCR_RATE_LIMIT", "60"))
+REQUESTS_PER_MINUTE = int(os.getenv("OCR_RATE_LIMIT", "10"))
 PORT = int(os.getenv("PORT", "5000"))
 INTERNAL_API_KEY = os.getenv("INTERNAL_API_KEY", "").strip()
 consecutive_500s = 0
@@ -123,7 +123,25 @@ REGION_KEYS = tuple(IMPORT_REGIONS.keys())
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     print(f"Server starting on port {PORT} | railway={IS_RAILWAY} gpu={USE_GPU} workers={MAX_WORKERS} opencv_threads={OPENCV_THREADS}", flush=True)
+    # Warm every worker in the background: each worker process loads RapidOCR and
+    # the SIFT templates on its first task (~3-7s cold). Doing it at boot moves
+    # that cost off the first user's request. Backgrounded (not awaited) so it
+    # never blocks the port bind / Railway healthcheck, and a failure is non-fatal.
+    loop = asyncio.get_running_loop()
+
+    async def _warm():
+        try:
+            started = time.perf_counter()
+            await asyncio.gather(*[
+                loop.run_in_executor(executor, warm_worker) for _ in range(MAX_WORKERS)
+            ])
+            print(f"import: warmed {MAX_WORKERS} workers in {(time.perf_counter()-started)*1000:.0f}ms", flush=True)
+        except Exception as exc:
+            print(f"import: warmup failed (non-fatal): {exc}", flush=True)
+
+    warm_task = asyncio.create_task(_warm())
     yield
+    warm_task.cancel()
     print("Server shutting down", flush=True)
     executor.shutdown(wait=True)
 
@@ -164,6 +182,24 @@ def process_region_task(task: tuple[str, np.ndarray]) -> dict[str, Any]:
             "error": str(exc),
             "elapsedMs": (time.perf_counter() - started) * 1000,
         }
+
+def warm_worker() -> bool:
+    """Force a worker to load its OCR engines and SIFT templates.
+
+    Models load lazily on a worker's first real task; running a throwaway
+    recognition here at boot pays that import cost off the user path. Random
+    noise (not black) so SIFT finds keypoints and the echo sweep + RapidOCR +
+    Tesseract paths all execute. Errors are swallowed: the goal is to warm the
+    process, not to produce a result.
+    """
+    rng = np.random.default_rng(0)
+    img = rng.integers(0, 255, (400, 360, 3), dtype=np.uint8)
+    for region in ("character", "echo1"):
+        try:
+            process_card(img, region)
+        except Exception:
+            pass
+    return True
 
 executor = ProcessPoolExecutor(
     max_workers=MAX_WORKERS,
