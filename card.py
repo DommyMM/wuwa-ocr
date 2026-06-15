@@ -642,6 +642,34 @@ def clean_echo_substat_name_lines(lines: list[str]) -> list[str]:
 
     return cleaned_names
 
+def merge_wrapped_substat_names(lines: list[str]) -> list[str]:
+    """clean_echo_substat_name_lines + absorb GARBAGE wrap tails for the two wrapping stats.
+
+    Only 'Resonance Liberation DMG Bonus' (wraps 'DMG Bonus') and 'Resonance Skill DMG Bonus'
+    (wraps 'Bonus') ever wrap to a second line. clean_echo_substat_name_lines merges CLEAN
+    continuations; when the 2nd line OCRs as garbage (e.g. 'NIAC Rie', 'Brite', 'Do') it does
+    not, leaving an extra name line that breaks name<->value count alignment. Anchor on the
+    incomplete known-wrapper prefix instead of the continuation's content: if a cleaned line is
+    just 'Resonance Liberation' or 'Resonance Skill[ DMG]', absorb the next line whatever it says.
+    """
+    cleaned = clean_echo_substat_name_lines(lines)
+    out: list[str] = []
+    skip = False
+    for i, name in enumerate(cleaned):
+        if skip:
+            skip = False
+            continue
+        fragment = _canonical_stat_fragment(name)
+        if fragment == "resonanceliberation" and i + 1 < len(cleaned):
+            out.append("Resonance Liberation DMG Bonus")
+            skip = True
+        elif fragment in ("resonanceskill", "resonanceskilldmg") and i + 1 < len(cleaned):
+            out.append("Resonance Skill DMG Bonus")
+            skip = True
+        else:
+            out.append(name)
+    return out
+
 # --- Character and weapon asset recognition (SIFT, OCR fallback on abstain) ---
 #
 # Server crops a bounding region per field (server.py IMPORT_REGIONS); these
@@ -803,31 +831,52 @@ def process_card(image, region: str):
             main_lines = [l.strip() for l in pytesseract.image_to_string(main_processed).splitlines() if l.strip()]
             main_text = f"{main_lines[0]} {main_lines[1]}" if len(main_lines) >= 2 else (main_lines[0] if main_lines else "")
             
-            # Process subs regions separately
+            # Process subs regions separately (Tesseract-only; no RapidOCR on the echo path)
             names_img = image[ECHO_REGIONS["subs_names"]["y1"]:ECHO_REGIONS["subs_names"]["y2"], ECHO_REGIONS["subs_names"]["x1"]:ECHO_REGIONS["subs_names"]["x2"]]
             values_img = image[ECHO_REGIONS["subs_values"]["y1"]:ECHO_REGIONS["subs_values"]["y2"], ECHO_REGIONS["subs_values"]["x1"]:ECHO_REGIONS["subs_values"]["x2"]]
-            
+
             names_processed = preprocess_region(names_img)
             values_processed = preprocess_region(values_img)
-            
-            # Get raw lines
-            names_lines = [l.strip() for l in pytesseract.image_to_string(names_processed).splitlines() if l.strip()]
-            tess_values = [l.strip() for l in pytesseract.image_to_string(values_processed).splitlines() if l.strip()]
-            
-            cleaned_names, values_lines, rapid_values = reconcile_echo_substat_rows(
-                names_img,
-                values_img,
-                names_lines,
-                tess_values,
+
+            # Names: wrap-merge handles the two wrapping stats, incl. garbage 2nd lines.
+            cleaned_names = merge_wrapped_substat_names(
+                [l.strip() for l in pytesseract.image_to_string(names_processed).splitlines() if l.strip()]
             )
+            # Values: --psm 6 recovers flat values that the default psm-3 drops (e.g. 430).
+            tess_values = [l.strip() for l in pytesseract.image_to_string(values_processed, config="--psm 6").splitlines() if l.strip()]
+
+            # A second, upscaled read repairs digit misreads (e.g. 330->390) and is paid ONLY
+            # when a psm-6 value is illegal -- a cheaper Tesseract pass replacing the old
+            # RapidOCR fallback; the closed legal-value set arbitrates (choose_substat_value).
+            pair_count = min(len(cleaned_names), len(tess_values))
+            needs_repair = any(
+                not is_legal_substat_value(
+                    tess_values[i], validate_substat_name(cleaned_names[i], tess_values[i])
+                )
+                for i in range(pair_count)
+            )
+            repair_values: list[str] = []
+            if needs_repair:
+                values_upscaled = cv2.resize(
+                    values_processed,
+                    (values_processed.shape[1] * 3, values_processed.shape[0] * 3),
+                    interpolation=cv2.INTER_CUBIC,
+                )
+                repair_values = [
+                    l.strip()
+                    for l in pytesseract.image_to_string(
+                        values_upscaled, config="--psm 6 -c tessedit_char_whitelist=0123456789.%"
+                    ).splitlines()
+                    if l.strip()
+                ]
 
             values = [
                 choose_substat_value(
                     name,
                     value,
-                    rapid_values[i] if i < len(rapid_values) else None,
+                    repair_values[i] if i < len(repair_values) else None,
                 )
-                for i, (name, value) in enumerate(zip(cleaned_names, values_lines[:5]))
+                for i, (name, value) in enumerate(zip(cleaned_names, tess_values[:5]))
             ]
             subs_text = "\n".join(f"{name} {value}" for name, value in zip(cleaned_names, values))
             cleaned_text = f"{main_text}\n{subs_text}"

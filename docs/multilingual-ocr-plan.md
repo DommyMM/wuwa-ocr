@@ -1,5 +1,14 @@
 # Multilingual OCR Intake Plan
 
+> **Status (2026-06): shelved, re-aligned.** This plan was never shipped (too slow); the
+> runtime is English-only. After SIFT made identity/element language-independent, the only
+> residual multilingual surface is the 5 echo substat *names*. The 2026-06 bake-off of this
+> plan's approach (A) against single-language OCR (C) and image-template matching (B) lives
+> in [multilingual-echo-investigation.md](multilingual-echo-investigation.md). Conclusion:
+> the full multilingual pass below (A) is the speed regression; **prefer C** (detect language
+> once, run the existing name pass in that one language). The sections below are retained as
+> the alias/contract reference for whoever implements C.
+
 ## Summary
 
 WuWaBuilds import payloads stay canonical: localized screenshots may contain
