@@ -1,10 +1,12 @@
 # Multilingual Echo Stat-Name Investigation (2026-06)
 
-Re-alignment of the shelved [multilingual-ocr-plan.md](multilingual-ocr-plan.md) now that
-the backend is otherwise done. The original plan reached good accuracy but was too slow, so
-it was never shipped: the live runtime is English-only (`image_to_string` with no `lang=`,
-`RapidOCR(lang='en')`), and `data.py` never loads `Stats.json`/`STAT_TRANSLATIONS`. Only
-the Dockerfile lang packs, the copied `Stats.json`, and the scout/validate scripts remain.
+The shelved multilingual OCR intake plan, re-aligned now that the backend is otherwise done,
+plus the bake-off it called for. This doc absorbs the former `multilingual-ocr-plan.md`; its
+alias / scout / contract reference now lives in the **Intake reference** section at the end.
+The original plan reached good accuracy but was too slow, so it was never shipped: the live
+runtime is English-only (`image_to_string` with no `lang=`, `RapidOCR(lang='en')`), and
+`data.py` never loads `Stats.json`/`STAT_TRANSLATIONS`. Only the Dockerfile lang packs, the
+copied `Stats.json`, and the scout/validate scripts remain.
 
 This is the documented bake-off the re-alignment called for: approaches A, B, C plus other
 ideas, measured on real localized cards.
@@ -135,3 +137,76 @@ load-bearing (and the Dockerfile already has them). The investigation harnesses
 (`investigate_multilingual*.py`) were removed at the end of the session; this doc's method is
 enough to recreate them. The scout/validate scripts (`find_non_english_cards.py`,
 `validate_non_english_cards.py`) remain in `backend/`.
+
+---
+
+# Intake reference (for implementing C)
+
+> Absorbed from the former `multilingual-ocr-plan.md`. This is the alias/contract/scout
+> reference for whoever implements approach **C** (detect language once, run the existing
+> name pass in that single language). The full multilingual pass (A) is the speed regression;
+> prefer C. The font work in
+> [echo-substat-tesseract-only.md](echo-substat-tesseract-only.md) supersedes C's stock lang
+> packs with per-language `tesstrain` traineddata.
+
+## Summary
+
+WuWaBuilds import payloads stay canonical: localized screenshots may contain French, Japanese,
+Simplified Chinese, or Traditional Chinese stat labels, but the backend still emits the English
+stat keys the frontend and leaderboard pipeline consume. The multilingual layer lives at the
+OCR parsing boundary:
+
+```text
+localized screenshot text -> translated stat alias -> canonical EchoStats key
+```
+
+`EchoStats.json` remains the source of truth for legal stat names and values. `Stats.json` is
+copied into `backend/Data` and used only as an alias dictionary.
+
+## Implementation contract
+
+- `wuwabuilds/scripts/sync_backend.py` copies `Stats.json` alongside `EchoStats.json`, keeping
+  the backend runtime self-contained.
+- `backend/data.py` loads `STAT_TRANSLATIONS` from `backend/Data/Stats.json` when present.
+- `backend/card.py` builds a normalized alias index from `Stats.json`, resolves localized stat
+  labels to canonical keys, then runs the existing legal-value validation and max-main-stat
+  override logic.
+- Numeric value OCR stays constrained to digits, decimal points, and `%`.
+- The API response shape does **not** change — the frontend localizes display labels from the
+  canonical stat keys:
+
+```json
+{
+  "main": { "name": "Crit DMG", "value": "44%" },
+  "substats": [{ "name": "Energy Regen", "value": "10.8%" }]
+}
+```
+
+## Non-English scout
+
+`backend/find_non_english_cards.py` scans local `r2-backup` images without calling the OCR API.
+It OCRs the high-signal stat-name strips inside the five echo panels and classifies likely
+non-English cards by Unicode script plus fuzzy matches against non-English stat translations.
+Triage fields per row: `alias_backed`, `hit_count`, `line_count`, and `build_card_signal`
+(conservative validation-set signal, currently `hit_count >= 5`). Build parser validation sets
+from `build_card_signal=true` rows first.
+
+```powershell
+$env:PYTHONPATH='C:\Users\domin\AppData\Roaming\Python\Python313\site-packages'
+python -u find_non_english_cards.py ..\r2-backup --workers 8 --progress-every 25
+```
+
+Generated forensic outputs (`backend/forensics/non_english_ocr_scan/`) are git-ignored.
+
+## Validation
+
+- Run `py wuwabuilds\scripts\sync_backend.py --skip-element-icons` so `backend/Data/Stats.json`
+  exists, then run the scout across `r2-backup` and confirm known localized samples flag:
+  `f32421ba8b1f3dc0.jpg` (Japanese), `cce1a0f29186891b.jpg` (French), `5e17036118784d4b.jpg`
+  (CJK).
+- Run `backend/validate_non_english_cards.py` against the strong-candidate set for repeatable
+  parser results. Latest local run: 123 strong candidates, 615 echoes, 615 passed the parser
+  heuristic (FR 4/4, JA 93/93, ZH 26/26).
+- Run `backend/test_frontend_split.py` on representative English and localized cards; echo
+  outputs must stay schema-compatible with canonical English stat names, and legal value
+  snapping must still come from `EchoStats.json`.

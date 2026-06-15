@@ -1,16 +1,24 @@
 # Echo Substat OCR: Deleting RapidOCR (Tesseract-only) — Investigation + Plan (2026-06)
 
-Goal: **cut the OCR bill and the latency tail without losing accuracy.** The lever is
-deleting RapidOCR from the echo substat path and running 100% Tesseract.
+Goal: **trim the latency tail and stop paying for RapidOCR's RAM footprint, without losing
+accuracy.** The lever is deleting RapidOCR from the echo substat path and running 100%
+Tesseract.
 
-## Why this is the right target (cost reframe)
+> **Framing (2026-06):** the absolute Railway cost (~$7/mo) is *acceptable* — this is not a
+> cost-pressure exercise. The motivation is efficiency: RapidOCR is loaded in every worker and
+> pins ~92% of RAM, yet the fallback that justifies it fires on only ~25% of echoes and a
+> Tesseract-only path matches it within <1%. We're paying a large fixed RAM cost (and a latency
+> tail) for very little. Removing it is worthwhile *if* accuracy holds — optimize-if-possible,
+> not optimize-because-we-must.
+
+## Why this is the right target (efficiency reframe)
 
 The Railway bill for the OCR service is **~92% RAM** (`$6.35` RAM vs `$0.53` CPU of `$6.89`).
 RapidOCR (onnxruntime) is loaded at import in **every** worker (`data.py` `Rapid = RapidOCR(...)`),
 so it is the RAM driver whether or not it is called. Therefore:
 
-- Calling rapid *less* barely helps the bill; the base load + inference spikes stay.
-- **Deleting RapidOCR entirely** is what removes the cost — which requires a Tesseract-only
+- Calling rapid *less* barely helps; the base load + inference spikes stay.
+- **Deleting RapidOCR entirely** is what frees the RAM — which requires a Tesseract-only
   path that matches accuracy.
 
 Latency corroborates: prod recognition wall ≈ the slowest of the 5 parallel echoes, and the
@@ -142,6 +150,9 @@ session; the methodology here is enough to recreate them if needed:
 - `font_match.py` — quantitative font identification (the Lagu finding).
 
 Note: regression to date is the 400/500/800-card samples (~97.1-97.6% identical, <1% delta,
-0 rapid). A full 11.7k run was started but is ~2.5h with real RapidOCR as ground truth; not
-needed for the decision. The change is committed on branch `ocr-echo-tesseract-only`, **not
-deployed**.
+0 rapid). A full ~12k (`r2-backup`) run has **not** been completed — it is ~2.5h with real
+RapidOCR as ground truth — so this is validated **locally only**. The tess-only substat work
+is committed to `main` (`64625dc`, unpushed) but **not deployed**, and RapidOCR has **not**
+been removed yet: `data.py` still loads it and `card.py` still calls it (character level,
+weapon, and substat-value fallback). Removing RapidOCR (step 1's payoff) is gated on the full
+regression.

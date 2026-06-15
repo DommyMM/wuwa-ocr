@@ -4,11 +4,23 @@ This backend should be treated as a fixed-layout recognition service, not a
 general OCR service. The import image format is constrained, the crop geometry
 is stable, and most labels come from small finite game-data vocabularies.
 
-## Attempted but not adopted — Tesseract-only echo substat OCR
+## Attempted but not adopted — Tesseract-only echo substat OCR (first attempt)
+
+> **Superseded (2026-06).** This documents the *first* Tesseract-only attempt,
+> which was rolled back because of two flat-ATK regressions (see "Why we didn't
+> adopt it"). A second, improved attempt in
+> [echo-substat-tesseract-only.md](echo-substat-tesseract-only.md) addresses exactly
+> that dealbreaker — it fixes the `%`-suffix deterministically by stat type and
+> arbitrates digit reads against the closed legal-value set instead of inferring the
+> name from the value, so the flat-ATK failure mode below cannot occur — and validated
+> at 97.6% identical / <1% delta on up to 800 cards. That doc is the current direction.
+> Note the motivation also shifted: cost (~$7/mo) is acceptable; the point is that
+> RapidOCR pins ~92% of RAM (and a latency tail) for a fallback that fires on ~25% of
+> echoes. The analysis below is kept for the failure modes it documents.
 
 A full Tesseract-only replacement for the echo substat OCR path was prototyped
 end-to-end and benchmarked, then **rolled back** rather than adopted. The
-production runtime is unchanged. This section documents what was tried, the
+production runtime was unchanged at the time. This section documents what was tried, the
 exact result, and why it didn't ship, so a future attempt can either pick up
 where this left off or know to skip the path entirely.
 
@@ -75,7 +87,11 @@ The path back to "consider adopting" would require:
   for wrong stat").
 - Zero regressions on flat ATK / HP / DEF rows specifically.
 
-Until then, the existing RapidOCR + block-OCR pipeline stays.
+The second attempt ([echo-substat-tesseract-only.md](echo-substat-tesseract-only.md)) takes
+that third requirement seriously: it never *infers* the flat-ATK name from the value, so the
+regression mode above cannot recur. As of 2026-06 that path is committed but **not deployed**
+— RapidOCR is still loaded and called as a fallback in `data.py` / `card.py` — and a full
+~12k regression is still pending before RapidOCR is actually removed.
 
 ### Other findings worth keeping
 
@@ -407,7 +423,12 @@ WebP), Encore-sourced, committed with the backend.
   roster-screenshot false positive (conf 0.122) is caught by the margin gate
   (margin 0.027).
 
-### To wire it in
+### Wiring — shipped (2026-06)
+
+Character and weapon SIFT (`recognize_character_asset` / `recognize_weapon_asset`)
+are wired into `card.py` with an OCR fallback on abstain, as of the 3.4 import work
+(`r2-backup` validation against the OCR baseline). The bullets below record the
+design and the floors used; the calibration note remains the tuning lever.
 
 - Recognize character/weapon by SIFT with the crops/downscales above; on abstain
   (below conf floor, or weapon below margin floor) fall back to the existing OCR
