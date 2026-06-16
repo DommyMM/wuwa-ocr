@@ -273,7 +273,7 @@ def determine_element(image, filter_elements):
     scores.sort(key=lambda x: x[1], reverse=True)
     best, second = scores[0], scores[1] if len(scores) > 1 else None
 
-    # If top two are in the same hue cluster, HSV can't distinguish — use SIFT
+    # If top two are in the same hue cluster, HSV can't distinguish, use SIFT
     if second is not None and _same_cluster([best[0], second[0]]):
         sift = SIFT_create()
         flann = FlannBasedMatcher(dict(algorithm=1, trees=5), dict(checks=50))
@@ -281,7 +281,10 @@ def determine_element(image, filter_elements):
         if des1 is not None:
             sift_scores = []
             for name, (kp2, des2) in ELEMENT_FEATURES.items():
-                if name not in possible_elements:
+                # Only arbitrate among the same-cluster candidates that caused the
+                # tie. Cross-cluster candidates that HSV already rejected by a wide
+                # margin (e.g. green Sound vs gold Rite) must not be reachable here
+                if name not in possible_elements or not _same_cluster([best[0], name]):
                     continue
                 ml = flann.knnMatch(des1, des2, k=2)
                 good = [m for m, n in ml if m.distance < 0.7 * n.distance]
