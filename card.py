@@ -831,52 +831,36 @@ def process_card(image, region: str):
             main_lines = [l.strip() for l in pytesseract.image_to_string(main_processed).splitlines() if l.strip()]
             main_text = f"{main_lines[0]} {main_lines[1]}" if len(main_lines) >= 2 else (main_lines[0] if main_lines else "")
             
-            # Process subs regions separately (Tesseract-only; no RapidOCR on the echo path)
+            # Process subs regions separately.
+            # NOTE: this is the proven RapidOCR-fallback path (origin de011fe), put back
+            # in effect for prod. The tess-only echo path (merge_wrapped_substat_names +
+            # --psm 6 + upscaled repair) is still DEFINED in this file but intentionally
+            # NOT wired in here: it must pass a full r2-backup regression before being
+            # promoted again. See docs/echo-substat-tesseract-only.md.
             names_img = image[ECHO_REGIONS["subs_names"]["y1"]:ECHO_REGIONS["subs_names"]["y2"], ECHO_REGIONS["subs_names"]["x1"]:ECHO_REGIONS["subs_names"]["x2"]]
             values_img = image[ECHO_REGIONS["subs_values"]["y1"]:ECHO_REGIONS["subs_values"]["y2"], ECHO_REGIONS["subs_values"]["x1"]:ECHO_REGIONS["subs_values"]["x2"]]
 
             names_processed = preprocess_region(names_img)
             values_processed = preprocess_region(values_img)
 
-            # Names: wrap-merge handles the two wrapping stats, incl. garbage 2nd lines.
-            cleaned_names = merge_wrapped_substat_names(
-                [l.strip() for l in pytesseract.image_to_string(names_processed).splitlines() if l.strip()]
-            )
-            # Values: --psm 6 recovers flat values that the default psm-3 drops (e.g. 430).
-            tess_values = [l.strip() for l in pytesseract.image_to_string(values_processed, config="--psm 6").splitlines() if l.strip()]
+            # Get raw lines
+            names_lines = [l.strip() for l in pytesseract.image_to_string(names_processed).splitlines() if l.strip()]
+            tess_values = [l.strip() for l in pytesseract.image_to_string(values_processed).splitlines() if l.strip()]
 
-            # A second, upscaled read repairs digit misreads (e.g. 330->390) and is paid ONLY
-            # when a psm-6 value is illegal -- a cheaper Tesseract pass replacing the old
-            # RapidOCR fallback; the closed legal-value set arbitrates (choose_substat_value).
-            pair_count = min(len(cleaned_names), len(tess_values))
-            needs_repair = any(
-                not is_legal_substat_value(
-                    tess_values[i], validate_substat_name(cleaned_names[i], tess_values[i])
-                )
-                for i in range(pair_count)
+            cleaned_names, values_lines, rapid_values = reconcile_echo_substat_rows(
+                names_img,
+                values_img,
+                names_lines,
+                tess_values,
             )
-            repair_values: list[str] = []
-            if needs_repair:
-                values_upscaled = cv2.resize(
-                    values_processed,
-                    (values_processed.shape[1] * 3, values_processed.shape[0] * 3),
-                    interpolation=cv2.INTER_CUBIC,
-                )
-                repair_values = [
-                    l.strip()
-                    for l in pytesseract.image_to_string(
-                        values_upscaled, config="--psm 6 -c tessedit_char_whitelist=0123456789.%"
-                    ).splitlines()
-                    if l.strip()
-                ]
 
             values = [
                 choose_substat_value(
                     name,
                     value,
-                    repair_values[i] if i < len(repair_values) else None,
+                    rapid_values[i] if i < len(rapid_values) else None,
                 )
-                for i, (name, value) in enumerate(zip(cleaned_names, tess_values[:5]))
+                for i, (name, value) in enumerate(zip(cleaned_names, values_lines[:5]))
             ]
             subs_text = "\n".join(f"{name} {value}" for name, value in zip(cleaned_names, values))
             cleaned_text = f"{main_text}\n{subs_text}"
