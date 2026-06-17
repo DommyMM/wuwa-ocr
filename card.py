@@ -787,6 +787,25 @@ def recognize_weapon_asset(region_img: np.ndarray) -> dict:
     return parse_region_text("weapon", cleaned)
 
 
+# --- Non-English card detection -------------------------------------------------
+# On a localized (CN/JP/KR) card the substat VALUES still OCR fine (digits) but the
+# NAMES are unreadable by the English engine and fuzzy-match the English vocabulary
+# poorly. Paired with a "values really are present" gate -- so a wrong screenshot or a
+# non-standard layout is not mislabeled as non-English -- a low name-match rate flags a
+# non-English card. server.py aggregates this per-echo signal across the 5 echoes.
+_SUBSTAT_VOCAB = list(SUB_STATS.keys())
+_NUMERIC_VALUE_RE = re.compile(r"^\d{1,4}(\.\d)?%?$")
+
+def echo_language_signal(cleaned_names: list[str], values: list[str]) -> dict:
+    """Per-echo English-confidence: matched/total substat names + count of real values."""
+    names = [n for n in cleaned_names if len(n) >= 2]
+    name_good = sum(
+        1 for n in names
+        if (process.extractOne(n, _SUBSTAT_VOCAB, scorer=fuzz.WRatio) or (None, 0))[1] >= 80
+    )
+    num_values = sum(1 for v in values if _NUMERIC_VALUE_RE.match(v.strip()))
+    return {"nameGood": name_good, "nameTotal": len(names), "numValues": num_values}
+
 def process_card(image, region: str):
     if image is None:
         return {"success": False, "error": "No image data provided"}
@@ -862,6 +881,7 @@ def process_card(image, region: str):
                 )
                 for i, (name, value) in enumerate(zip(cleaned_names, values_lines[:5]))
             ]
+            lang_signal = echo_language_signal(cleaned_names, values)
             subs_text = "\n".join(f"{name} {value}" for name, value in zip(cleaned_names, values))
             cleaned_text = f"{main_text}\n{subs_text}"
 
@@ -890,7 +910,8 @@ def process_card(image, region: str):
                     "name": {"name": ECHO_NAME_MAP.get(name, name), "id": name, "confidence": float(confidence)},
                     "main": echo_data.get("main", {}),
                     "substats": echo_data.get("substats", []),
-                    "element": element_data
+                    "element": element_data,
+                    "langSignal": lang_signal,
                 }
             }
         else:

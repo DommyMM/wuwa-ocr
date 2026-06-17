@@ -35,6 +35,12 @@ INTERNAL_API_KEY = os.getenv("INTERNAL_API_KEY", "").strip()
 consecutive_500s = 0
 MAX_CONSECUTIVE_500S = 3
 
+# Non-English detection thresholds (see card.echo_language_signal). A card is flagged
+# non-English when its echo panels carry real values (so it IS a build card, not a wrong
+# screenshot/odd layout) yet too few substat names match the English vocabulary.
+NONENGLISH_NAME_MATCH_FLOOR = float(os.getenv("OCR_NONENGLISH_NAME_FLOOR", "0.35"))
+NONENGLISH_MIN_VALUES = int(os.getenv("OCR_NONENGLISH_MIN_VALUES", "15"))
+
 # Ensure output is flushed for Railway
 if hasattr(sys.stdout, "reconfigure"):
     cast(Any, sys.stdout).reconfigure(line_buffering=True)
@@ -267,6 +273,25 @@ def slow_region_summary(timings: dict[str, Any]) -> str:
         for name, elapsed in sorted(region_timings.items(), key=lambda item: item[1], reverse=True)[:4]
     )
 
+def detect_unsupported_language(analysis: dict[str, Any]) -> bool:
+    """Aggregate card.py's per-echo langSignal into a card-level non-English verdict.
+
+    Non-English = a real build card (>= NONENGLISH_MIN_VALUES readable values across the
+    echoes) whose substat NAMES match the English vocabulary below NONENGLISH_NAME_MATCH_FLOOR.
+    The value gate keeps wrong screenshots and non-standard layouts from being mislabeled.
+    """
+    good = total = values = 0
+    for region in ("echo1", "echo2", "echo3", "echo4", "echo5"):
+        entry = analysis.get(region)
+        sig = entry.get("langSignal") if isinstance(entry, dict) else None
+        if isinstance(sig, dict):
+            good += int(sig.get("nameGood", 0))
+            total += int(sig.get("nameTotal", 0))
+            values += int(sig.get("numValues", 0))
+    if total == 0 or values < NONENGLISH_MIN_VALUES:
+        return False
+    return (good / total) < NONENGLISH_NAME_MATCH_FLOOR
+
 def log_import_completed(result: dict[str, Any]) -> None:
     timings = result.get("timings", {})
     print(
@@ -277,6 +302,7 @@ def log_import_completed(result: dict[str, Any]) -> None:
         f"crop={timings.get('cropMs')}ms "
         f"recognition={timings.get('recognitionWallMs')}ms "
         f"bytes={result.get('image', {}).get('bytes')} "
+        f"lang={'non-english' if result.get('unsupportedLanguage') else 'en'} "
         f"slow={slow_region_summary(timings)}",
         flush=True,
     )
@@ -402,6 +428,7 @@ async def stream_full_import_image(
         "trainingImageKey": f"training-images/{image_hash}.jpg",
         "regionErrors": region_errors,
         "image": image_meta,
+        "unsupportedLanguage": detect_unsupported_language(analysis),
     }
     log_import_completed(result)
     consecutive_500s = 0
