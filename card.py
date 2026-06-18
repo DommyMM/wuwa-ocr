@@ -167,6 +167,23 @@ def rapid_text_lines(image) -> list[str]:
     result, _ = Rapid(image)
     return [text for _, text, _ in result] if result else []
 
+def substat_pair_score(names: list[str], values: list[str]) -> tuple[int, int]:
+    """Score paired OCR rows by valid rows first, then unique stat types."""
+    legal = 0
+    unique: set[str] = set()
+    for name, value in zip(names[:5], values[:5]):
+        stat_name = validate_substat_name(name, value)
+        if is_legal_substat_value(value, stat_name):
+            legal += 1
+            unique.add(stat_name)
+    return legal, len(unique)
+
+def has_invalid_substat_pair(names: list[str], values: list[str]) -> bool:
+    return any(
+        not is_legal_substat_value(value, validate_substat_name(name, value))
+        for name, value in zip(names, values)
+    )
+
 def reconcile_echo_substat_rows(
     names_img,
     values_img,
@@ -174,26 +191,14 @@ def reconcile_echo_substat_rows(
     tess_values: list[str],
 ) -> tuple[list[str], list[str], list[str]]:
     """Align substat name/value rows without assuming maxed echoes have 5 rows."""
-    names = clean_echo_substat_name_lines(names_lines)
+    names = merge_wrapped_substat_names(names_lines)
     values = tess_values
-    rapid_names: list[str] | None = None
-    rapid_values: list[str] | None = None
-
-    def get_rapid_names() -> list[str]:
-        nonlocal rapid_names
-        if rapid_names is None:
-            rapid_names = clean_echo_substat_name_lines(rapid_text_lines(names_img))
-        return rapid_names
-
-    def get_rapid_values() -> list[str]:
-        nonlocal rapid_values
-        if rapid_values is None:
-            rapid_values = rapid_text_lines(values_img)
-        return rapid_values
+    rapid_values: list[str] = []
 
     if len(names) != len(values):
-        candidate_names = get_rapid_names()
-        candidate_values = get_rapid_values()
+        candidate_names = merge_wrapped_substat_names(rapid_text_lines(names_img))
+        candidate_values = rapid_text_lines(values_img)
+        rapid_values = candidate_values
         target_count = max(len(names), len(values))
 
         if len(candidate_names) > len(names) and len(candidate_names) >= target_count:
@@ -201,17 +206,19 @@ def reconcile_echo_substat_rows(
         if len(candidate_values) > len(values) and len(candidate_values) >= len(names):
             values = candidate_values
 
-    has_invalid_value = any(
-        not is_legal_substat_value(
-            value,
-            validate_substat_name(name, value),
-        )
-        for name, value in zip(names, values)
-    )
-    if has_invalid_value:
-        get_rapid_values()
+        # When Tesseract drops a numeric row and invents a wrapped-name tail,
+        # the count guard above rejects the better Rapid pair because there are
+        # "too many" Tesseract names. Prefer the pair with more legal substat
+        # rows (and then more unique stat types) so flat HP/ATK/DEF rows do not
+        # shift following percent values onto duplicate names.
+        if substat_pair_score(candidate_names, candidate_values) > substat_pair_score(names, values):
+            names = candidate_names
+            values = candidate_values
 
-    return names, values, rapid_values or []
+    if not rapid_values and has_invalid_substat_pair(names, values):
+        rapid_values = rapid_text_lines(values_img)
+
+    return names, values, rapid_values
 
 def format_stat_value(value) -> str:
     try:
@@ -652,6 +659,10 @@ def merge_wrapped_substat_names(lines: list[str]) -> list[str]:
     incomplete known-wrapper prefix instead of the continuation's content: if a cleaned line is
     just 'Resonance Liberation' or 'Resonance Skill[ DMG]', absorb the next line whatever it says.
     """
+    def is_known_substat_name(name: str) -> bool:
+        match = process.extractOne(name, _SUBSTAT_VOCAB, scorer=fuzz.WRatio)
+        return bool(match and match[1] >= 80)
+
     cleaned = clean_echo_substat_name_lines(lines)
     out: list[str] = []
     skip = False
@@ -665,6 +676,9 @@ def merge_wrapped_substat_names(lines: list[str]) -> list[str]:
             skip = True
         elif fragment in ("resonanceskill", "resonanceskilldmg") and i + 1 < len(cleaned):
             out.append("Resonance Skill DMG Bonus")
+            skip = True
+        elif fragment in ("resonanceliberationdmgbonus", "resonanceskilldmgbonus") and i + 1 < len(cleaned) and not is_known_substat_name(cleaned[i + 1]):
+            out.append(name)
             skip = True
         else:
             out.append(name)
