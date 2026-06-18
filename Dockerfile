@@ -20,10 +20,6 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends \
     tesseract-ocr \
     tesseract-ocr-eng \
-    tesseract-ocr-fra \
-    tesseract-ocr-jpn \
-    tesseract-ocr-chi-sim \
-    tesseract-ocr-chi-tra \
     libglib2.0-0 \
     libgomp1 \
     libgl1 \
@@ -43,6 +39,10 @@ ENV PYTHONPATH=/app
 
 # OpenCV headless mode
 ENV OPENCV_HEADLESS=1
+
+# The service runs multiple OCR workers in parallel; keep each Tesseract call
+# single-threaded to avoid OpenMP oversubscription.
+ENV OMP_THREAD_LIMIT=1
 
 EXPOSE 5000
 

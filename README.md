@@ -5,7 +5,7 @@ Hosted at `https://ocr.wuwabuilds.moe`.
 
 ## Runtime Model
 
-- Single OCR mode: full-card import processing. The API receives the original
+- Single OCR mode: English full-card import processing. The API receives the original
   screenshot, decodes it once, crops fixed regions server-side, then fans out
   region recognition through `card.py`.
 - Legacy full-screen mode (`char.py` / `echo.py`) has been removed
@@ -66,6 +66,7 @@ uses the same stream parser and only consumes the final `done` event.
 | `OCR_RATE_LIMIT` | `60` | Requests per minute per IP. Set to `10000` locally to disable effective limiting during batch import. |
 | `OCR_TIMEOUT` | `60` | Seconds before a single OCR request times out. |
 | `OCR_OPENCV_THREADS` | `1` | Per-worker `cv2.setNumThreads` value. |
+| `OMP_THREAD_LIMIT` | `1` in Dockerfile | Keeps each Tesseract subprocess single-threaded while the service parallelizes across regions/workers. |
 | `USE_GPU` | `1` locally, `0` on Railway | Enables RapidOCR CUDA providers in `data.py` when `onnxruntime-gpu` is available. |
 | `RAILWAY_ENVIRONMENT_NAME` | — | Auto-set on Railway; toggles GPU default and is used to log environment context. |
 
