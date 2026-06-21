@@ -8,6 +8,7 @@ from typing import Tuple
 from cv2 import SIFT_create, FlannBasedMatcher
 from pathlib import Path
 import io
+import os
 import sys
 import threading
 
@@ -42,6 +43,11 @@ class _ThreadLocalStdout:
 
 _STDOUT = _ThreadLocalStdout(sys.stdout)
 sys.stdout = _STDOUT
+
+# Per-call Tesseract timeout (seconds). A normal call is <100ms; this is a hang-breaker so a
+# stuck tesseract subprocess can't pin a pool thread forever (threads can't be force-killed the
+# way a ProcessPool worker can). Generous enough never to fire on a valid card.
+TESS_TIMEOUT = int(os.getenv("OCR_TESS_TIMEOUT", "30"))
 
 # Minimum fuzz.ratio score for a weapon-name OCR read to be trusted. Real reads
 # (even with OCR noise) score ~92-100; unreadable/garbled text stays under ~40.
@@ -93,7 +99,7 @@ def process_ocr(name: str, image: np.ndarray) -> str:
 
         def run_tesseract():
             processed_image = preprocess_region(image)
-            return pytesseract.image_to_string(processed_image, config='--psm 7 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz ')
+            return pytesseract.image_to_string(processed_image, config='--psm 7 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz ', timeout=TESS_TIMEOUT)
 
         def run_rapid():
             result, _ = Rapid(image)
@@ -115,7 +121,7 @@ def process_ocr(name: str, image: np.ndarray) -> str:
     else:
         # Default tesseract with preprocessing for other regions
         image = preprocess_region(image)
-        return pytesseract.image_to_string(image)
+        return pytesseract.image_to_string(image, timeout=TESS_TIMEOUT)
 
 def preprocess_region(image):
     """Lighter preprocessing to preserve text clarity"""
@@ -889,7 +895,7 @@ def _process_card_inner(image, region: str):
 
         for i, (name, coords) in enumerate(FORTE_REGIONS.items()):
             region_img = processed[coords["y1"]:coords["y2"], coords["x1"]:coords["x2"]]
-            text = pytesseract.image_to_string(region_img).strip()
+            text = pytesseract.image_to_string(region_img, timeout=TESS_TIMEOUT).strip()
             match = re.search(r'(?i)lv\.(\d+)(?:/10)?', text)
             if match:
                 forte_data["levels"][i] = int(match.group(1))
@@ -906,7 +912,7 @@ def _process_card_inner(image, region: str):
         # Process main region
         main_img = image[ECHO_REGIONS["main"]["y1"]:ECHO_REGIONS["main"]["y2"], ECHO_REGIONS["main"]["x1"]:ECHO_REGIONS["main"]["x2"]]
         main_processed = preprocess_region(main_img)
-        main_lines = [l.strip() for l in pytesseract.image_to_string(main_processed).splitlines() if l.strip()]
+        main_lines = [l.strip() for l in pytesseract.image_to_string(main_processed, timeout=TESS_TIMEOUT).splitlines() if l.strip()]
         main_text = f"{main_lines[0]} {main_lines[1]}" if len(main_lines) >= 2 else (main_lines[0] if main_lines else "")
 
         # Process subs regions separately.
@@ -921,8 +927,8 @@ def _process_card_inner(image, region: str):
         values_processed = preprocess_region(values_img)
 
         # Get raw lines
-        names_lines = [l.strip() for l in pytesseract.image_to_string(names_processed).splitlines() if l.strip()]
-        tess_values = [l.strip() for l in pytesseract.image_to_string(values_processed).splitlines() if l.strip()]
+        names_lines = [l.strip() for l in pytesseract.image_to_string(names_processed, timeout=TESS_TIMEOUT).splitlines() if l.strip()]
+        tess_values = [l.strip() for l in pytesseract.image_to_string(values_processed, timeout=TESS_TIMEOUT).splitlines() if l.strip()]
 
         cleaned_names, values_lines, rapid_values = reconcile_echo_substat_rows(
             names_img,
