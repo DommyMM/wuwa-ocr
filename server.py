@@ -6,7 +6,7 @@ import cv2
 import numpy as np
 import hashlib
 import json
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ProcessPoolExecutor
 from typing import Any, Optional, cast
 from card import process_card
 import time
@@ -132,17 +132,19 @@ LOG_ORDER = ("character", "watermark", "weapon", "forte", "sequences", "echo1", 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     print(f"Server starting on port {PORT} | railway={IS_RAILWAY} gpu={USE_GPU} workers={MAX_WORKERS} opencv_threads={OPENCV_THREADS}", flush=True)
-    # Warm the model set in the background: RapidOCR + echo templates load at import, and the
-    # character/weapon SIFT features load lazily on first use (~3-7s cold total). With the
-    # ThreadPool all threads share one process, so a single warm pass loads everything once
-    # (no per-worker duplication). Backgrounded (not awaited) so it never blocks the port bind or health
+    # Warm every worker in the background: each worker process loads RapidOCR and
+    # the SIFT templates on its first task (~3-7s cold). Doing it at boot moves
+    # that cost off the first user's request. Backgrounded (not awaited) so it
+    # never blocks the port bind / Railway healthcheck, and a failure is non-fatal.
     loop = asyncio.get_running_loop()
 
     async def _warm():
         try:
             started = time.perf_counter()
-            await loop.run_in_executor(executor, warm_worker)
-            print(f"import: warmed model set in {(time.perf_counter()-started)*1000:.0f}ms", flush=True)
+            await asyncio.gather(*[
+                loop.run_in_executor(executor, warm_worker) for _ in range(MAX_WORKERS)
+            ])
+            print(f"import: warmed {MAX_WORKERS} workers in {(time.perf_counter()-started)*1000:.0f}ms", flush=True)
         except Exception as exc:
             print(f"import: warmup failed (non-fatal): {exc}", flush=True)
 
@@ -192,16 +194,21 @@ def process_region_task(task: tuple[str, np.ndarray]) -> dict[str, Any]:
             "elapsedMs": (time.perf_counter() - started) * 1000,
         }
 
-def warm_worker() -> bool:
-    """Load the OCR engines + SIFT features once, off the first user's request path.
+def warm_worker(hold: float = 2.0) -> bool:
+    """Force a worker to load its OCR engines and SIFT templates.
 
-    Models load lazily on first use; running a throwaway recognition here at boot pays that
-    import cost up front. With the ThreadPool every thread shares one process, so this single
-    pass loads the whole model set (RapidOCR, echo/element templates, character + weapon SIFT
-    features) once -- no per-worker duplication, and no need to force-spawn each worker like the
-    old ProcessPool warm did. Random noise (not black) so SIFT finds keypoints and the echo /
-    RapidOCR / Tesseract paths all execute. Errors are swallowed: the goal is to warm, not to
-    produce a result.
+    Models load lazily on a worker's first real task; running a throwaway
+    recognition here at boot pays that import cost off the user path. Random
+    noise (not black) so SIFT finds keypoints and the echo sweep + RapidOCR +
+    Tesseract paths all execute. Errors are swallowed: the goal is to warm the
+    process, not to produce a result.
+
+    The trailing sleep holds the worker busy so that when MAX_WORKERS of these
+    run concurrently the pool is forced to spawn *every* worker (each paying its
+    model load) instead of reusing one already-warm worker for all the warm
+    tasks. Without it the pool drains the quick tasks on one or two workers and
+    the rest stay cold, so the first real request still eats a ~3s cold load
+    (observed in prod as character:3064ms).
     """
     rng = np.random.default_rng(0)
     img = rng.integers(0, 255, (400, 360, 3), dtype=np.uint8)
@@ -210,16 +217,10 @@ def warm_worker() -> bool:
             process_card(img, region)
         except Exception:
             pass
+    time.sleep(hold)
     return True
 
-# ThreadPool, not ProcessPool: the heavy work (Tesseract subprocess, RapidOCR/onnxruntime,
-# OpenCV/SIFT) all releases the GIL, so threads run it truly in parallel while sharing ONE
-# model set instead of N per-process copies. That keeps resident RAM ~flat under concurrency
-# (the ProcessPool balloon was the Railway cost driver) and drops per-crop pickling. Trade-off:
-# a C-extension segfault takes the whole process down (Railway ON_FAILURE restart covers it),
-# and a hung call can't be force-killed -- bounded by the per-call TESS_TIMEOUT in card.py plus
-# the request-level as_completed timeout.
-executor = ThreadPoolExecutor(
+executor = ProcessPoolExecutor(
     max_workers=MAX_WORKERS,
     initializer=worker_init
 )
@@ -411,11 +412,10 @@ async def stream_full_import_image(
         })
         return
     except Exception as exc:
-        # A region's own exception is already caught in process_region_task and returned as an
-        # error result, so this only fires on an unexpected coordinator/await error. (There's no
-        # ProcessPool-style "terminated abruptly" to handle: under the ThreadPool a C-extension
-        # segfault takes the whole process down -> Railway ON_FAILURE restart, uncatchable here.)
-        yield ndjson_event({"type": "error", "success": False, "error": f"Image processing error: {exc}"})
+        error_msg = str(exc)
+        if "terminated abruptly" in error_msg.lower():
+            force_restart(f"ProcessPool worker terminated abruptly: {error_msg}")
+        yield ndjson_event({"type": "error", "success": False, "error": f"Image processing error: {error_msg}"})
         return
 
     recognized_at = time.perf_counter()
