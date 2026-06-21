@@ -9,6 +9,39 @@ from cv2 import SIFT_create, FlannBasedMatcher
 from pathlib import Path
 import io
 import sys
+import threading
+
+
+class _ThreadLocalStdout:
+    """Process-wide stdout shim that routes writes to a per-thread buffer when one is active, otherwise to the real stream.
+    """
+
+    def __init__(self, real):
+        self._real = real
+        self._local = threading.local()
+
+    def push(self) -> None:
+        self._local.buffer = io.StringIO()
+
+    def pop(self) -> str:
+        buf = getattr(self._local, "buffer", None)
+        self._local.buffer = None
+        return buf.getvalue() if buf is not None else ""
+
+    def write(self, s):
+        buf = getattr(self._local, "buffer", None)
+        return buf.write(s) if buf is not None else self._real.write(s)
+
+    def flush(self) -> None:
+        self._real.flush()
+
+    def __getattr__(self, name):
+        # Delegate everything else (reconfigure, encoding, isatty, ...) to the real stream.
+        return getattr(self._real, name)
+
+
+_STDOUT = _ThreadLocalStdout(sys.stdout)
+sys.stdout = _STDOUT
 
 # Minimum fuzz.ratio score for a weapon-name OCR read to be trusted. Real reads
 # (even with OCR noise) score ~92-100; unreadable/garbled text stays under ~40.
@@ -821,132 +854,124 @@ def echo_language_signal(cleaned_names: list[str], values: list[str]) -> dict:
     return {"nameGood": name_good, "nameTotal": len(names), "numValues": num_values}
 
 def process_card(image, region: str):
+    """Recognize one region and return its result plus the lines it logged.
+
+    All stdout produced during the call (top-level and nested) is captured into a
+    per-thread buffer via _STDOUT and returned under "logs"; server.py emits those
+    in a fixed region order. Capture is thread-safe, so regions can run on a thread
+    pool (one shared process) instead of separate worker processes.
+    """
     if image is None:
-        return {"success": False, "error": "No image data provided"}
-    
-    # Create a buffer for this specific process's logs
-    log_buffer = io.StringIO()
-    original_stdout = sys.stdout
-    
+        return {"success": False, "error": "No image data provided", "logs": []}
+
+    _STDOUT.push()
     try:
-        # Redirect stdout to buffer for all regions
-        sys.stdout = log_buffer
-        
-        if region == "sequences":
-            sequence = parse_sequence_region(image)
-            return {
-                "success": True,
-                "analysis": {"sequence": sequence}
-            }
-        elif region == "forte":
-            forte_data = {"levels": [0] * 5}
-            processed = preprocess_region(image)
-            
-            for i, (name, coords) in enumerate(FORTE_REGIONS.items()):
-                region_img = processed[coords["y1"]:coords["y2"], coords["x1"]:coords["x2"]]
-                text = pytesseract.image_to_string(region_img).strip()
-                match = re.search(r'(?i)lv\.(\d+)(?:/10)?', text)
-                if match:
-                    forte_data["levels"][i] = int(match.group(1))
-                    
-            return {
-                "success": True,
-                "analysis": forte_data
-            }
-        elif region == "character":
-            return {"success": True, "analysis": recognize_character_asset(image)}
-        elif region == "weapon":
-            return {"success": True, "analysis": recognize_weapon_asset(image)}
-        elif region.startswith("echo"):
-            # Process main region
-            main_img = image[ECHO_REGIONS["main"]["y1"]:ECHO_REGIONS["main"]["y2"], ECHO_REGIONS["main"]["x1"]:ECHO_REGIONS["main"]["x2"]]
-            main_processed = preprocess_region(main_img)
-            main_lines = [l.strip() for l in pytesseract.image_to_string(main_processed).splitlines() if l.strip()]
-            main_text = f"{main_lines[0]} {main_lines[1]}" if len(main_lines) >= 2 else (main_lines[0] if main_lines else "")
-            
-            # Process subs regions separately.
-            # NOTE: this is the proven RapidOCR-fallback path (origin de011fe), put back
-            # in effect for prod. The tess-only echo path (merge_wrapped_substat_names +
-            # --psm 6 + upscaled repair) is still DEFINED in this file but intentionally
-            # NOT wired in here: it must pass a full r2-backup regression before being
-            # promoted again. See docs/echo-substat-tesseract-only.md.
-            names_img = image[ECHO_REGIONS["subs_names"]["y1"]:ECHO_REGIONS["subs_names"]["y2"], ECHO_REGIONS["subs_names"]["x1"]:ECHO_REGIONS["subs_names"]["x2"]]
-            values_img = image[ECHO_REGIONS["subs_values"]["y1"]:ECHO_REGIONS["subs_values"]["y2"], ECHO_REGIONS["subs_values"]["x1"]:ECHO_REGIONS["subs_values"]["x2"]]
-
-            names_processed = preprocess_region(names_img)
-            values_processed = preprocess_region(values_img)
-
-            # Get raw lines
-            names_lines = [l.strip() for l in pytesseract.image_to_string(names_processed).splitlines() if l.strip()]
-            tess_values = [l.strip() for l in pytesseract.image_to_string(values_processed).splitlines() if l.strip()]
-
-            cleaned_names, values_lines, rapid_values = reconcile_echo_substat_rows(
-                names_img,
-                values_img,
-                names_lines,
-                tess_values,
-            )
-
-            values = [
-                choose_substat_value(
-                    name,
-                    value,
-                    rapid_values[i] if i < len(rapid_values) else None,
-                )
-                for i, (name, value) in enumerate(zip(cleaned_names, values_lines[:5]))
-            ]
-            lang_signal = echo_language_signal(cleaned_names, values)
-            subs_text = "\n".join(f"{name} {value}" for name, value in zip(cleaned_names, values))
-            cleaned_text = f"{main_text}\n{subs_text}"
-
-            name, confidence, element_data = match_icon(image)
-            print(f"Echo identified: {name} (confidence: {confidence:.2%})")
-            echo_data = parse_region_text(region, cleaned_text)
-            main = echo_data.get("main", {}) if isinstance(echo_data, dict) else {}
-            if main:
-                cost = ECHO_COSTS.get(name, 0)
-                max_value = max_main_stat_value(cost, main.get("name", ""))
-                if max_value:
-                    old_value = main.get("value")
-                    main["value"] = max_value
-                    print(f"Main stat value override: {main.get('name')} {old_value!r} -> {max_value!r} (cost {cost}, assumed Lv.25)")
-            print(f"Echo '{name}' -> Element: {element_data}")
-            
-            # Restore stdout and flush all buffered logs at once
-            sys.stdout = original_stdout
-            logs = log_buffer.getvalue()
-            if logs:
-                print(logs.rstrip(), flush=True)
-            
-            return {
-                "success": True,
-                "analysis": {
-                    "name": {"name": ECHO_NAME_MAP.get(name, name), "id": name, "confidence": float(confidence)},
-                    "main": echo_data.get("main", {}),
-                    "substats": echo_data.get("substats", []),
-                    "element": element_data,
-                    "langSignal": lang_signal,
-                }
-            }
-        else:
-            text = process_ocr(region, image)
-            cleaned_text = "\n".join(line.strip() for line in text.splitlines() if line.strip())
-            result = parse_region_text(region, cleaned_text)
-            
-            return {
-                "success": True,
-                "analysis": result
-            }
+        result = _process_card_inner(image, region)
     except Exception as e:
-        # Always restore stdout on error
-        sys.stdout = original_stdout
-        logs = log_buffer.getvalue()
-        if logs:
-            print(logs.rstrip(), flush=True)
-        return {
-            "success": False,
-            "error": str(e)
-        }
+        result = {"success": False, "error": str(e)}
     finally:
-        # Ensure stdout is always restored
-        sys.stdout = original_stdout
+        captured = _STDOUT.pop()
+
+    result["logs"] = [s for s in (line.rstrip() for line in captured.splitlines()) if s]
+    return result
+
+
+def _process_card_inner(image, region: str):
+    if region == "sequences":
+        sequence = parse_sequence_region(image)
+        return {
+            "success": True,
+            "analysis": {"sequence": sequence}
+        }
+    elif region == "forte":
+        forte_data = {"levels": [0] * 5}
+        processed = preprocess_region(image)
+
+        for i, (name, coords) in enumerate(FORTE_REGIONS.items()):
+            region_img = processed[coords["y1"]:coords["y2"], coords["x1"]:coords["x2"]]
+            text = pytesseract.image_to_string(region_img).strip()
+            match = re.search(r'(?i)lv\.(\d+)(?:/10)?', text)
+            if match:
+                forte_data["levels"][i] = int(match.group(1))
+
+        return {
+            "success": True,
+            "analysis": forte_data
+        }
+    elif region == "character":
+        return {"success": True, "analysis": recognize_character_asset(image)}
+    elif region == "weapon":
+        return {"success": True, "analysis": recognize_weapon_asset(image)}
+    elif region.startswith("echo"):
+        # Process main region
+        main_img = image[ECHO_REGIONS["main"]["y1"]:ECHO_REGIONS["main"]["y2"], ECHO_REGIONS["main"]["x1"]:ECHO_REGIONS["main"]["x2"]]
+        main_processed = preprocess_region(main_img)
+        main_lines = [l.strip() for l in pytesseract.image_to_string(main_processed).splitlines() if l.strip()]
+        main_text = f"{main_lines[0]} {main_lines[1]}" if len(main_lines) >= 2 else (main_lines[0] if main_lines else "")
+
+        # Process subs regions separately.
+        # NOTE: this is the proven RapidOCR-fallback path (origin de011fe), put back
+        # in effect for prod. The tess-only echo path (merge_wrapped_substat_names +
+        # --psm 6 + upscaled repair) is defined but drops too many in the specific ATK and DEF cases
+        # which isn't reliable enough to promote. See docs/echo-substat-tesseract-only.md.
+        names_img = image[ECHO_REGIONS["subs_names"]["y1"]:ECHO_REGIONS["subs_names"]["y2"], ECHO_REGIONS["subs_names"]["x1"]:ECHO_REGIONS["subs_names"]["x2"]]
+        values_img = image[ECHO_REGIONS["subs_values"]["y1"]:ECHO_REGIONS["subs_values"]["y2"], ECHO_REGIONS["subs_values"]["x1"]:ECHO_REGIONS["subs_values"]["x2"]]
+
+        names_processed = preprocess_region(names_img)
+        values_processed = preprocess_region(values_img)
+
+        # Get raw lines
+        names_lines = [l.strip() for l in pytesseract.image_to_string(names_processed).splitlines() if l.strip()]
+        tess_values = [l.strip() for l in pytesseract.image_to_string(values_processed).splitlines() if l.strip()]
+
+        cleaned_names, values_lines, rapid_values = reconcile_echo_substat_rows(
+            names_img,
+            values_img,
+            names_lines,
+            tess_values,
+        )
+
+        values = [
+            choose_substat_value(
+                name,
+                value,
+                rapid_values[i] if i < len(rapid_values) else None,
+            )
+            for i, (name, value) in enumerate(zip(cleaned_names, values_lines[:5]))
+        ]
+        lang_signal = echo_language_signal(cleaned_names, values)
+        subs_text = "\n".join(f"{name} {value}" for name, value in zip(cleaned_names, values))
+        cleaned_text = f"{main_text}\n{subs_text}"
+
+        name, confidence, element_data = match_icon(image)
+        print(f"Echo identified: {name} (confidence: {confidence:.2%})")
+        echo_data = parse_region_text(region, cleaned_text)
+        main = echo_data.get("main", {}) if isinstance(echo_data, dict) else {}
+        if main:
+            cost = ECHO_COSTS.get(name, 0)
+            max_value = max_main_stat_value(cost, main.get("name", ""))
+            if max_value:
+                old_value = main.get("value")
+                main["value"] = max_value
+                print(f"Main stat value override: {main.get('name')} {old_value!r} -> {max_value!r} (cost {cost}, assumed Lv.25)")
+        print(f"Echo '{name}' -> Element: {element_data}")
+
+        return {
+            "success": True,
+            "analysis": {
+                "name": {"name": ECHO_NAME_MAP.get(name, name), "id": name, "confidence": float(confidence)},
+                "main": echo_data.get("main", {}),
+                "substats": echo_data.get("substats", []),
+                "element": element_data,
+                "langSignal": lang_signal,
+            }
+        }
+    else:
+        text = process_ocr(region, image)
+        cleaned_text = "\n".join(line.strip() for line in text.splitlines() if line.strip())
+        result = parse_region_text(region, cleaned_text)
+
+        return {
+            "success": True,
+            "analysis": result
+        }

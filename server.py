@@ -126,6 +126,9 @@ IMPORT_REGIONS: dict[str, dict[str, float]] = {
 
 REGION_KEYS = tuple(IMPORT_REGIONS.keys())
 
+# Order for the consolidated per-request server-side log block. Region events stil stream to the client in completion order 
+LOG_ORDER = ("character", "watermark", "weapon", "forte", "sequences", "echo1", "echo2", "echo3", "echo4", "echo5")
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     print(f"Server starting on port {PORT} | railway={IS_RAILWAY} gpu={USE_GPU} workers={MAX_WORKERS} opencv_threads={OPENCV_THREADS}", flush=True)
@@ -178,6 +181,7 @@ def process_region_task(task: tuple[str, np.ndarray]) -> dict[str, Any]:
             "success": bool(result.get("success")),
             "analysis": result.get("analysis"),
             "error": result.get("error"),
+            "logs": result.get("logs", []),
             "elapsedMs": (time.perf_counter() - started) * 1000,
         }
     except Exception as exc:
@@ -186,6 +190,7 @@ def process_region_task(task: tuple[str, np.ndarray]) -> dict[str, Any]:
             "success": False,
             "analysis": None,
             "error": str(exc),
+            "logs": [],
             "elapsedMs": (time.perf_counter() - started) * 1000,
         }
 
@@ -292,9 +297,16 @@ def detect_unsupported_language(analysis: dict[str, Any]) -> bool:
         return False
     return (good / total) < NONENGLISH_NAME_MATCH_FLOOR
 
-def log_import_completed(result: dict[str, Any]) -> None:
+def log_import_completed(result: dict[str, Any], region_logs: dict[str, list]) -> None:
+    """Emit the per-region recognition logs (in LOG_ORDER) followed by the summary.
+    """
     timings = result.get("timings", {})
-    print(
+    lines = [
+        f"  {region}: {entry}"
+        for region in LOG_ORDER
+        for entry in region_logs.get(region, [])
+    ]
+    summary = (
         "import: Completed "
         f"wall={timings.get('wallMs')}ms "
         f"body={timings.get('bodyReadMs')}ms "
@@ -303,9 +315,10 @@ def log_import_completed(result: dict[str, Any]) -> None:
         f"recognition={timings.get('recognitionWallMs')}ms "
         f"bytes={result.get('image', {}).get('bytes')} "
         f"lang={'non-english' if result.get('unsupportedLanguage') else 'en'} "
-        f"slow={slow_region_summary(timings)}",
-        flush=True,
+        f"slow={slow_region_summary(timings)}"
     )
+    block = "import: regions\n" + "\n".join(lines) + "\n" + summary if lines else summary
+    print(block, flush=True)
 
 async def stream_full_import_image(
     image_bytes: bytes,
@@ -358,6 +371,7 @@ async def stream_full_import_image(
     progress: dict[str, str] = {}
     region_timings: dict[str, float] = {}
     region_errors: dict[str, str] = {}
+    region_logs: dict[str, list] = {}
 
     try:
         for completed in asyncio.as_completed(tasks, timeout=PROCESS_TIMEOUT):
@@ -365,6 +379,7 @@ async def stream_full_import_image(
             region = result["region"]
             elapsed_ms = round(float(result["elapsedMs"]), 2)
             region_timings[region] = elapsed_ms
+            region_logs[region] = result.get("logs") or []
 
             if result["success"] and result["analysis"] is not None:
                 analysis[region] = result["analysis"]
@@ -430,7 +445,7 @@ async def stream_full_import_image(
         "image": image_meta,
         "unsupportedLanguage": detect_unsupported_language(analysis),
     }
-    log_import_completed(result)
+    log_import_completed(result, region_logs)
     consecutive_500s = 0
     yield ndjson_event({"type": "done", **result})
 
