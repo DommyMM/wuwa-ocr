@@ -1,7 +1,7 @@
 # Wuthering Waves OCR Backend
 
 FastAPI OCR service for WuWaBuilds import scans.  
-Hosted at `https://ocr.wuwabuilds.moe`.
+Hosted at `https://ocr.wuwa.build`.
 
 ## Runtime Model
 
@@ -79,6 +79,12 @@ uses the same stream parser and only consumes the final `done` event.
   - `408` processing timeout
   - `429` rate limit exceeded
   - `500` internal server error
+
+## Railway Operations
+
+Production runs in Railway project `wuwa-backend` as service `WuWa OCR`.
+Operational commands, latency/cost snapshots, and log
+query examples live in [`docs/railway-observability.md`](docs/railway-observability.md).
 
 ## Data Sync Expectations
 

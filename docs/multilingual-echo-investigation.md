@@ -192,7 +192,7 @@ Triage fields per row: `alias_backed`, `hit_count`, `line_count`, and `build_car
 from `build_card_signal=true` rows first.
 
 ```powershell
-$env:PYTHONPATH='C:\Users\domin\AppData\Roaming\Python\Python313\site-packages'
+$env:PYTHONPATH='<python-site-packages-path>'
 python -u find_non_english_cards.py ..\r2-backup --workers 8 --progress-every 25
 ```
 

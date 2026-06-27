@@ -297,12 +297,9 @@ Some cards render a blank weapon panel: no weapon icon and no weapon name, only
 the `LV.xx` level text and the ascension stars. This is reproducible on the
 current new-character cards Lucilla (`1109`), Lucy (`1511`), and Rebecca
 (`1308`), whose weapon art is absent from the export while their character
-splash renders normally. Verified against the local reference images
-`9054bd4df1f83173715af7b8e9f2f25659089d03.jpeg` (Lucilla),
-`72d21df3ccac4bdb1f39bda63bac6091afb4be8c.jpeg` (Lucy), and
-`15ea0b17db1bc6698226a1eb7d9a2ec33cd33266.jpeg` (Rebecca); Zani (`1507`,
-`7a962dccc5056e841a7c11bf94092de5e912f0e4.jpeg`) is the control with a fully
-rendered Blazing Justice panel.
+splash renders normally. Verified against local reference images for those
+three characters; Zani (`1507`) is the control with a fully rendered Blazing
+Justice panel. Do not commit raw local/R2 image keys for these fixtures.
 
 No recognizer can read a weapon that is not drawn. Weapon SIFT must return an
 empty/no-match result for these, exactly as the OCR path now does (the weapon
@@ -315,7 +312,7 @@ and must preserve the empty-weapon contract it keys on.
 
 ### Echo element fallback note
 
-The Luuk Herssen report `4099f333-2e9c-4938-84fa-df08138f9f45` exposed a
+One player report exposed a
 sonata-element edge case on echo5 (`Flora Drone`). Echo identity was correct,
 but the `Rite` element crop had too few SIFT keypoints. The old fallback
 accepted an all-zero SIFT result and returned an arbitrary candidate by
@@ -491,10 +488,10 @@ Suggested label shape:
 {
   "images": [
     {
-      "file": "C:/Users/domin/Downloads/347056b9395d3315667093a2532b153a13d9160d.jpeg",
+      "file": "fixtures/hiyuki-frostburn-card.jpeg",
       "character": { "id": "1108", "name": "Hiyuki" },
       "weapon": { "id": "21020086", "name": "Frostburn" },
-      "watermark": { "uid": "500006092", "username": "Dommy" },
+      "watermark": { "uid": "<sample-uid>", "username": "<sample-user>" },
       "forte": [10, 10, 10, 10, 10],
       "echoes": {
         "echo1": {
@@ -524,7 +521,7 @@ For the attached Hiyuki/Frostburn card:
 
 - Character: `1108` / Hiyuki
 - Weapon: `21020086` / Frostburn
-- Watermark UID: `500006092`
+- Watermark UID: sample UID from the fixture metadata
 - Echo 1: `60001995`, QuietSnow, ATK%, 33%
 - Echo 2: `60001875`, QuietSnow, Glacio DMG, 30%
 - Echo 3: `60001839`, QuietSnow, ATK%, 30%
@@ -537,15 +534,15 @@ good seed labels, but they should not be the only validation data.
 ### Missing-weapon reference cards
 
 These reproduce the blank weapon panel and are the gold set for the empty-weapon
-contract (all share UID `500006092`):
+contract. Keep the raw fixture keys and player UID out of committed docs:
 
-- Lucilla `9054bd4df1f83173715af7b8e9f2f25659089d03.jpeg`: character `1109`,
+- Lucilla missing-weapon card: character `1109`,
   weapon empty, signature `Freeze Frame` `21050086`.
-- Lucy `72d21df3ccac4bdb1f39bda63bac6091afb4be8c.jpeg`: character `1511`,
+- Lucy missing-weapon card: character `1511`,
   weapon empty, signature `Spectral Trigger` `21030056`.
-- Rebecca `15ea0b17db1bc6698226a1eb7d9a2ec33cd33266.jpeg`: character `1308`,
+- Rebecca missing-weapon card: character `1308`,
   weapon empty, signature `Skull Thrasher` `21030066`.
-- Zani `7a962dccc5056e841a7c11bf94092de5e912f0e4.jpeg` (control, panel renders):
+- Zani control card, panel renders:
   character `1507`, weapon `Blazing Justice` `21040036`.
 
 ## Crop sweep tool
