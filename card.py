@@ -1,7 +1,7 @@
 import cv2
 import pytesseract
 import re
-from data import CHARACTER_NAMES, CHARACTER_ID_MAP, WEAPON_NAMES, WEAPON_ID_MAP, MAIN_STAT_NAMES, MAIN_STATS, DEFAULT_MAIN_STATS, SUB_STATS, ECHO_ELEMENTS, ECHO_COSTS, ECHO_NAME_MAP, TEMPLATE_FEATURES, COST_TEMPLATES, Rapid, determine_element
+from data import CHARACTER_NAMES, CHARACTER_ID_MAP, WEAPON_NAMES, WEAPON_ID_MAP, MAIN_STAT_NAMES, MAIN_STATS, SUB_STATS, ECHO_ELEMENTS, ECHO_COSTS, ECHO_NAME_MAP, TEMPLATE_FEATURES, COST_TEMPLATES, Rapid, determine_element
 import numpy as np
 from rapidfuzz import fuzz, process
 from typing import Tuple
@@ -262,18 +262,125 @@ def format_stat_value(value) -> str:
         return str(int(numeric))
     return f"{numeric:g}"
 
-def max_main_stat_value(cost: int, stat_name: str) -> str | None:
-    """Return the level-25 main-stat value for an echo cost/stat pair."""
-    cost_key = f"{cost}cost"
-    cost_stats = MAIN_STATS.get(cost_key, {})
-    if stat_name in cost_stats and len(cost_stats[stat_name]) >= 2:
-        return f"{format_stat_value(cost_stats[stat_name][1])}%"
+def _crop_region(image: np.ndarray, box: dict) -> np.ndarray:
+    return image[box["y1"]:box["y2"], box["x1"]:box["x2"]]
 
-    default_stat = DEFAULT_MAIN_STATS.get(cost_key)
-    if default_stat and len(default_stat) >= 3 and default_stat[0] == stat_name:
-        return format_stat_value(default_stat[2])
 
+def _tess_lines(image: np.ndarray) -> list[str]:
+    return [l.strip() for l in pytesseract.image_to_string(image).splitlines() if l.strip()]
+
+
+def _rapid_main_line(main_img: np.ndarray) -> str:
+    """Rapid OCR of the echo main strip, collapsed to one 'Name Value' line."""
+    lines = rapid_text_lines(main_img)
+    return " ".join(lines[:2]) if len(lines) >= 2 else (lines[0] if lines else "")
+
+
+def _legal_main_values(cost: int) -> dict[str, str]:
+    """name -> canonical Lv.25 value ('22.8%') for an echo cost's variable main stats.
+
+    The variable main stat (what shows in ECHO_REGIONS['main']) is always a percent
+    stat from MAIN_STATS; the flat innate HP/ATK (DEFAULT_MAIN_STATS) lives in the
+    substat block, not here.
+    """
+    return {n: f"{format_stat_value(v[-1])}%" for n, v in MAIN_STATS.get(f"{cost}cost", {}).items()}
+
+
+def _parse_main_line(line: str) -> tuple[str, str]:
+    """Split an echo main OCR line 'Crit DMG 44%' into ('Crit DMG', '44%')."""
+    parts = line.rsplit(' ', 1)
+    if len(parts) == 2 and re.search(r'\d', parts[1]):
+        return parts[0], parts[1]
+    return line, ""
+
+
+def _clean_main_name(raw_name: str, raw_value: str) -> str:
+    name = clean_stat_name(raw_name, raw_value)
+    return f"{name}%" if name in ("HP", "ATK", "DEF") else name
+
+
+def _tiebreak_main_name(candidates: list[str], *reads: str | None) -> str | None:
+    """Pick the candidate that best matches any OCR read (Rapid first, then Tesseract)."""
+    for read in reads:
+        if not read:
+            continue
+        probe = _clean_main_name(*_parse_main_line(read))
+        match = process.extractOne(probe, candidates, scorer=fuzz.WRatio, score_cutoff=60)
+        if match:
+            return match[0]
     return None
+
+
+def resolve_echo_main(cost: int, raw_name: str, raw_value: str, rapid_main=None) -> dict:
+    """Resolve an echo's main stat against what its cost actually allows.
+
+    The name is read by bare Tesseract off a small, often-soft strip, so on
+    re-encoded/low-detail uploads it fuzzy-matches to a stat that's illegal for the
+    cost (e.g. Crit DMG on a 1-cost, whose only legal mains are HP%/ATK%/DEF%) and
+    the card gets rejected. Every cost has a fixed legal set with known Lv.25 values:
+      - a legal-for-cost name is trusted, its value snapped to the +25 canonical;
+      - an illegal name is a confirmed misread, recovered from the *value* (the
+        reliable anchor), with the Rapid main read only breaking value ties (e.g. the
+        3-cost 30.0% cluster where the value alone can't separate the mains).
+    `rapid_main` is an optional zero-arg callable returning the Rapid main line; it is
+    invoked lazily, only when a tie actually needs breaking.
+    """
+    legal = _legal_main_values(cost)
+    if not legal:
+        # Unidentified echo (cost 0): keep the cost-blind validation so identified
+        # echoes improve without regressing the unknown-cost path.
+        validated = validate_stat(clean_stat_name(raw_name, raw_value), MAIN_STAT_NAMES)
+        if validated in ("HP", "ATK", "DEF"):
+            validated = f"{validated}%"
+        return {"name": validated, "value": raw_value}
+
+    name = _clean_main_name(raw_name, raw_value)
+    match = process.extractOne(name, list(legal), scorer=fuzz.WRatio, score_cutoff=82)
+    if match:
+        chosen = match[0]
+        if legal[chosen] != raw_value:
+            print(f"Main stat snapped: {raw_name!r} {raw_value!r} -> {chosen} {legal[chosen]} (cost {cost})")
+        return {"name": chosen, "value": legal[chosen]}
+
+    # Illegal-for-cost name => confirmed misread. Recover from the value.
+    target = None
+    if m := re.search(r'\d+(?:\.\d+)?', raw_value or ""):
+        target = float(m.group())
+
+    rapid_line = rapid_main() if callable(rapid_main) else rapid_main
+    if target is not None:
+        dist = lambda n: abs(float(legal[n].rstrip('%')) - target)
+        ranked = sorted(legal, key=dist)
+        near = [n for n in ranked if dist(n) <= 1.0]
+        if len(near) == 1:
+            chosen = near[0]
+        elif near:                       # value ambiguous (tie cluster): name breaks it
+            chosen = _tiebreak_main_name(near, rapid_line, raw_name) or near[0]
+        else:                            # value matches nothing well: defer to the name read
+            chosen = _tiebreak_main_name(ranked, rapid_line, raw_name) or ranked[0]
+    else:
+        chosen = _tiebreak_main_name(list(legal), rapid_line, raw_name) or next(iter(legal))
+
+    print(f"Main stat recovered: {raw_name!r} {raw_value!r} -> {chosen} {legal[chosen]} (cost {cost}, illegal-for-cost name)")
+    return {"name": chosen, "value": legal[chosen]}
+
+
+def parse_echo_substats(lines: list[str]) -> list[dict]:
+    """Validate paired 'Name Value' substat lines into legal {name, value} dicts."""
+    substats = []
+    for i, line in enumerate(lines, 1):
+        print(f"Substat {i}: '{line}'")
+        parts = line.rsplit(' ', 1)
+        if len(parts) != 2:
+            continue
+        stat_name, stat_value = parts
+        name = validate_substat_name(stat_name, stat_value)
+        value = validate_value(stat_value, name)
+        if not is_legal_substat_value(value, name):
+            print(f"Skipping illegal substat value: '{line}' -> {name} {value}")
+            continue
+        substats.append({"name": name, "value": value})
+    return substats
 
 def validate_character_name(raw_name: str) -> str:
     if not CHARACTER_NAMES:
@@ -368,44 +475,6 @@ def parse_region_text(name, text):
                 "id": WEAPON_ID_MAP.get(weapon_name, "") if weapon_name else "",
                 "level": level
             }
-        case _ if name.startswith("echo"):
-            lines = [l.strip() for l in text.split('\n') if l.strip()]
-            if not lines:
-                return []
-            
-            main_parts = lines[0].rsplit(' ', 1)
-            if len(main_parts) == 2 and re.search(r'\d', main_parts[1]):
-                main_name, main_value = main_parts
-            else:
-                main_name, main_value = lines[0], ""
-            main_name = clean_stat_name(main_name, main_value)
-            main_name = validate_stat(main_name, MAIN_STAT_NAMES)
-            if main_name in ["HP", "ATK", "DEF"]:
-                main_name = f"{main_name}%"
-            main_value = main_value.replace('422', '22')
-            
-            substats = []
-            for i, line in enumerate(lines[1:], 1):
-                print(f"Substat {i}: '{line}'")
-                parts = line.rsplit(' ', 1)
-                if len(parts) != 2:
-                    continue
-                    
-                stat_name, stat_value = parts
-                name = validate_substat_name(stat_name, stat_value)
-                value = validate_value(stat_value, name)
-                if not is_legal_substat_value(value, name):
-                    print(f"Skipping illegal substat value: '{line}' -> {name} {value}")
-                    continue
-                substats.append({"name": name, "value": value})
-            
-            result = {
-                "main": {"name": main_name, "value": main_value},
-                "substats": substats
-            }
-            print(f"Final echo result: {result}")
-            return result
-            
         case _:
             return text
 
@@ -559,6 +628,7 @@ def _identify_icon_core(image: np.ndarray):
 
     sorted_matches = sorted(matches, key=lambda x: x[1], reverse=True)
     best_match, best_conf = sorted_matches[0]
+    element_region = get_element_region(image)
 
     # When the top SIFT candidates are near-tied, the badge element disambiguates
     # look-alikes across different bodies (e.g. Chirpuff vs Gulpuff). Same-body
@@ -568,7 +638,6 @@ def _identify_icon_core(image: np.ndarray):
         if len(close_matches) >= 2:
             print(f"Close matches detected: {[(n, f'{c:.4f}') for n, c in close_matches]}")
 
-            element_region = get_element_region(image)
             candidate_elements = set()
             for name, _ in close_matches:
                 candidate_elements.update(ECHO_ELEMENTS.get(name, []))
@@ -584,7 +653,6 @@ def _identify_icon_core(image: np.ndarray):
                 best_match, best_conf = element_matches[0]
                 print(f"-> badge {detected_element} -> '{best_match}'")
 
-    element_region = get_element_region(image)
     return best_match, best_conf, detected_element, sorted_matches, element_region
 
 def match_icon(image: np.ndarray) -> Tuple[str, float, str]:
@@ -903,65 +971,46 @@ def _process_card_inner(image, region: str):
     elif region == "weapon":
         return {"success": True, "analysis": recognize_weapon_asset(image)}
     elif region.startswith("echo"):
-        # Process main region
-        main_img = image[ECHO_REGIONS["main"]["y1"]:ECHO_REGIONS["main"]["y2"], ECHO_REGIONS["main"]["x1"]:ECHO_REGIONS["main"]["x2"]]
-        main_processed = preprocess_region(main_img)
-        main_lines = [l.strip() for l in pytesseract.image_to_string(main_processed).splitlines() if l.strip()]
-        main_text = f"{main_lines[0]} {main_lines[1]}" if len(main_lines) >= 2 else (main_lines[0] if main_lines else "")
+        # --- main stat: raw Tesseract read, resolved against the echo cost below ---
+        main_img = _crop_region(image, ECHO_REGIONS["main"])
+        main_lines = _tess_lines(preprocess_region(main_img))
+        main_line = " ".join(main_lines[:2]) if len(main_lines) >= 2 else (main_lines[0] if main_lines else "")
+        raw_main_name, raw_main_value = _parse_main_line(main_line)
 
-        # Process subs regions separately.
-        # NOTE: this is the proven RapidOCR-fallback path (origin de011fe), put back
-        # in effect for prod. The tess-only echo path (merge_wrapped_substat_names +
-        # --psm 6 + upscaled repair) is defined but drops too many in the specific ATK and DEF cases
-        # which isn't reliable enough to promote. See docs/echo-substat-tesseract-only.md.
-        names_img = image[ECHO_REGIONS["subs_names"]["y1"]:ECHO_REGIONS["subs_names"]["y2"], ECHO_REGIONS["subs_names"]["x1"]:ECHO_REGIONS["subs_names"]["x2"]]
-        values_img = image[ECHO_REGIONS["subs_values"]["y1"]:ECHO_REGIONS["subs_values"]["y2"], ECHO_REGIONS["subs_values"]["x1"]:ECHO_REGIONS["subs_values"]["x2"]]
-
-        names_processed = preprocess_region(names_img)
-        values_processed = preprocess_region(values_img)
-
-        # Get raw lines
-        names_lines = [l.strip() for l in pytesseract.image_to_string(names_processed).splitlines() if l.strip()]
-        tess_values = [l.strip() for l in pytesseract.image_to_string(values_processed).splitlines() if l.strip()]
-
+        # --- substats: Tesseract with RapidOCR reconcile/fallback (proven path,
+        # origin de011fe). The tess-only echo path (merge_wrapped_substat_names +
+        # --psm 6 + upscaled repair) drops too many ATK/DEF rows to promote; see
+        # docs/echo-substat-tesseract-only.md. ---
+        names_img = _crop_region(image, ECHO_REGIONS["subs_names"])
+        values_img = _crop_region(image, ECHO_REGIONS["subs_values"])
+        names_lines = _tess_lines(preprocess_region(names_img))
+        tess_values = _tess_lines(preprocess_region(values_img))
         cleaned_names, values_lines, rapid_values = reconcile_echo_substat_rows(
-            names_img,
-            values_img,
-            names_lines,
-            tess_values,
+            names_img, values_img, names_lines, tess_values,
         )
-
         values = [
-            choose_substat_value(
-                name,
-                value,
-                rapid_values[i] if i < len(rapid_values) else None,
-            )
+            choose_substat_value(name, value, rapid_values[i] if i < len(rapid_values) else None)
             for i, (name, value) in enumerate(zip(cleaned_names, values_lines[:5]))
         ]
+        substats = parse_echo_substats([f"{name} {value}" for name, value in zip(cleaned_names, values)])
         lang_signal = echo_language_signal(cleaned_names, values)
-        subs_text = "\n".join(f"{name} {value}" for name, value in zip(cleaned_names, values))
-        cleaned_text = f"{main_text}\n{subs_text}"
 
-        name, confidence, element_data = match_icon(image)
-        print(f"Echo identified: {name} (confidence: {confidence:.2%})")
-        echo_data = parse_region_text(region, cleaned_text)
-        main = echo_data.get("main", {}) if isinstance(echo_data, dict) else {}
-        if main:
-            cost = ECHO_COSTS.get(name, 0)
-            max_value = max_main_stat_value(cost, main.get("name", ""))
-            if max_value:
-                old_value = main.get("value")
-                main["value"] = max_value
-                print(f"Main stat value override: {main.get('name')} {old_value!r} -> {max_value!r} (cost {cost}, assumed Lv.25)")
-        print(f"Echo '{name}' -> Element: {element_data}")
+        # --- identity (SIFT) + cost-aware main resolution ---
+        echo_id, confidence, element_data = match_icon(image)
+        print(f"Echo identified: {echo_id} (confidence: {confidence:.2%})")
+        main = resolve_echo_main(
+            ECHO_COSTS.get(echo_id, 0), raw_main_name, raw_main_value,
+            rapid_main=lambda: _rapid_main_line(main_img),
+        )
+        print(f"Echo '{echo_id}' -> Element: {element_data}")
+        print(f"Final echo result: main={main}, substats={substats}")
 
         return {
             "success": True,
             "analysis": {
-                "name": {"name": ECHO_NAME_MAP.get(name, name), "id": name, "confidence": float(confidence)},
-                "main": echo_data.get("main", {}),
-                "substats": echo_data.get("substats", []),
+                "name": {"name": ECHO_NAME_MAP.get(echo_id, echo_id), "id": echo_id, "confidence": float(confidence)},
+                "main": main,
+                "substats": substats,
                 "element": element_data,
                 "langSignal": lang_signal,
             }
