@@ -299,15 +299,26 @@ def _clean_main_name(raw_name: str, raw_value: str) -> str:
     return f"{name}%" if name in ("HP", "ATK", "DEF") else name
 
 
-def _tiebreak_main_name(candidates: list[str], *reads: str | None) -> str | None:
-    """Pick the candidate that best matches any OCR read (Rapid first, then Tesseract)."""
-    for read in reads:
-        if not read:
-            continue
-        probe = _clean_main_name(*_parse_main_line(read))
-        match = process.extractOne(probe, candidates, scorer=fuzz.WRatio, score_cutoff=60)
-        if match:
-            return match[0]
+def _name_in(candidates: list[str], read: str | None) -> str | None:
+    if not read:
+        return None
+    probe = _clean_main_name(*_parse_main_line(read))
+    match = process.extractOne(probe, candidates, scorer=fuzz.WRatio, score_cutoff=60)
+    return match[0] if match else None
+
+
+def _tiebreak_main_name(candidates: list[str], tess_name: str | None, rapid_provider=None) -> str | None:
+    """Break a main-stat tie by name: cheap Tesseract read first, then a lazy Rapid read.
+
+    Rapid is the expensive engine, so it is only invoked when the Tesseract name
+    can't resolve the tie (and only when a provider is passed at all).
+    """
+    if chosen := _name_in(candidates, tess_name):
+        return chosen
+    if rapid_provider is not None:
+        rapid_line = rapid_provider() if callable(rapid_provider) else rapid_provider
+        if chosen := _name_in(candidates, rapid_line):
+            return chosen
     return None
 
 
@@ -347,19 +358,18 @@ def resolve_echo_main(cost: int, raw_name: str, raw_value: str, rapid_main=None)
     if m := re.search(r'\d+(?:\.\d+)?', raw_value or ""):
         target = float(m.group())
 
-    rapid_line = rapid_main() if callable(rapid_main) else rapid_main
     if target is not None:
         dist = lambda n: abs(float(legal[n].rstrip('%')) - target)
         ranked = sorted(legal, key=dist)
         near = [n for n in ranked if dist(n) <= 1.0]
         if len(near) == 1:
-            chosen = near[0]
-        elif near:                       # value ambiguous (tie cluster): name breaks it
-            chosen = _tiebreak_main_name(near, rapid_line, raw_name) or near[0]
-        else:                            # value matches nothing well: defer to the name read
-            chosen = _tiebreak_main_name(ranked, rapid_line, raw_name) or ranked[0]
-    else:
-        chosen = _tiebreak_main_name(list(legal), rapid_line, raw_name) or next(iter(legal))
+            chosen = near[0]                                          # value alone resolves it (no Rapid)
+        elif near:                                                   # genuine tie among present mains
+            chosen = _tiebreak_main_name(near, raw_name, rapid_main) or near[0]
+        else:                                                        # value matches nothing: trust the name, no Rapid
+            chosen = _tiebreak_main_name(ranked, raw_name) or ranked[0]
+    else:                                                            # unreadable strip: default to primary main, no Rapid
+        chosen = _tiebreak_main_name(list(legal), raw_name) or next(iter(legal))
 
     print(f"Main stat recovered: {raw_name!r} {raw_value!r} -> {chosen} {legal[chosen]} (cost {cost}, illegal-for-cost name)")
     return {"name": chosen, "value": legal[chosen]}
