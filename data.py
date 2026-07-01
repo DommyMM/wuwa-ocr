@@ -48,7 +48,8 @@ DEFAULT_MAIN_STATS: Dict = {}
 SUB_STATS: Dict = {}
 SUB_STAT_NAMES: Set[str] = set()
 ECHO_NAMES: List[str] = []       # ordered list of English names (for logging/rapidfuzz)
-ECHO_ELEMENTS: Dict = {}          # CDN id str → list of element/sonata-set names
+ECHO_SET_IDS: Dict[str, List[int]] = {}  # CDN id str → legal fetter set ids (authoritative)
+ECHO_ELEMENTS: Dict = {}          # CDN id str → set names, derived from ids (logs/back-compat)
 ECHO_COSTS: Dict[str, int] = {}   # CDN id str → cost (1 | 3 | 4)
 ECHO_NAME_MAP: Dict[str, str] = {} # CDN id str → English name (for display in response)
 ICON_TEMPLATES: Dict[str, np.ndarray] = {}
@@ -57,10 +58,24 @@ ELEMENT_TEMPLATES: Dict[str, np.ndarray] = {}
 ELEMENT_FEATURES = {}
 COST_TEMPLATES: Dict[int, np.ndarray] = {}
 
-# Echoes whose CDN element list is incomplete. Hecate's in-game resonance box
-# allows the 6 base elemental sonata sets on top of its default Empyrean
-ECHO_ELEMENT_OVERRIDES: Dict[str, List[str]] = {
-    '60000855': ['Empyrean', 'Glacio', 'Fusion', 'Electro', 'Aero', 'Spectro', 'Havoc'],
+# Hecate's in-game resonance box allows the 6 base elemental sonata sets on top
+# of its default Empyrean (set 13). Keyed by echo id → legal fetter set ids.
+ECHO_SET_ID_OVERRIDES: Dict[str, List[int]] = {
+    '60000855': [13, 1, 2, 3, 4, 5, 6],
+}
+
+# id → sonata-set name, for human-readable logs/response only. Detection and
+# storage are id-native; this is the single inverse of the frontend FETTER_MAP
+# (wuwabuilds/lib/echo.ts) — copy new sets from there when they ship.
+SET_NAME_BY_ID: Dict[int, str] = {
+    1: 'Glacio', 2: 'Fusion', 3: 'Electro', 4: 'Aero',
+    5: 'Spectro', 6: 'Havoc', 7: 'Healing', 8: 'ER',
+    9: 'Attack', 10: 'Frosty', 11: 'Radiance', 12: 'Midnight',
+    13: 'Empyrean', 14: 'Tidebreaking', 16: 'Gust', 17: 'Windward',
+    18: 'Flaming', 19: 'Dream', 20: 'Crown', 21: 'Law',
+    22: 'Flamewing', 23: 'Thread', 24: 'Pact', 25: 'Halo',
+    26: 'Rite', 27: 'Trailblazing', 28: 'Chromatic', 29: 'Sound',
+    30: 'QuietSnow', 31: 'Memories', 32: 'Adam',
 }
 
 # Paths
@@ -69,7 +84,7 @@ DATA_DIR = Path(__file__).parent / 'Data'
 
 def _load_from_local():
     """Load Characters, Weapons, Echoes from local Data/ files (legacy format)."""
-    global CHARACTER_NAMES, CHARACTER_ID_MAP, WEAPON_NAMES, WEAPON_DATA, WEAPON_ID_MAP, ECHO_NAMES, ECHO_ELEMENTS, ECHO_COSTS, ECHO_NAME_MAP
+    global CHARACTER_NAMES, CHARACTER_ID_MAP, WEAPON_NAMES, WEAPON_DATA, WEAPON_ID_MAP, ECHO_NAMES, ECHO_ELEMENTS, ECHO_SET_IDS, ECHO_COSTS, ECHO_NAME_MAP
 
     with open(DATA_DIR / 'Characters.json', 'r', encoding='utf-8') as f:
         characters = json.load(f)
@@ -94,21 +109,24 @@ def _load_from_local():
                 if name and wid:
                     WEAPON_ID_MAP.setdefault(name, wid)
 
-    ECHO_NAMES.clear(); ECHO_ELEMENTS.clear(); ECHO_COSTS.clear(); ECHO_NAME_MAP.clear()
+    ECHO_NAMES.clear(); ECHO_ELEMENTS.clear(); ECHO_SET_IDS.clear(); ECHO_COSTS.clear(); ECHO_NAME_MAP.clear()
     with open(DATA_DIR / 'Echoes.json', 'r', encoding='utf-8') as f:
         for e in json.load(f):
             eid  = str(e['id'])
             name = e['name']
             ECHO_NAMES.append(name)
             ECHO_COSTS[eid]    = e['cost']
-            ECHO_ELEMENTS[eid] = e['elements']
+            set_ids = e.get('setIds') or []
+            ECHO_SET_IDS[eid] = set_ids
+            ECHO_ELEMENTS[eid] = [SET_NAME_BY_ID.get(s, str(s)) for s in set_ids]
             ECHO_NAME_MAP[eid] = name
 
     # Mirrors echoExtraFetterIDs in lb/internal/calc/validate.go: Hecate's in-game
     # resonance box allows the 6 base elemental sets on top of its default Empyrean.
-    for eid, elements in ECHO_ELEMENT_OVERRIDES.items():
-        if eid in ECHO_ELEMENTS:
-            ECHO_ELEMENTS[eid] = elements
+    for eid, set_ids in ECHO_SET_ID_OVERRIDES.items():
+        if eid in ECHO_SET_IDS:
+            ECHO_SET_IDS[eid] = set_ids
+            ECHO_ELEMENTS[eid] = [SET_NAME_BY_ID.get(s, str(s)) for s in set_ids]
 
     print(f"Loaded local data: {len(CHARACTER_NAMES)} characters, {len(WEAPON_NAMES)} weapons, {len(ECHO_NAMES)} echoes")
 
@@ -120,8 +138,8 @@ def _read_template_image(path: Path):
     return cv2.imdecode(data, cv2.IMREAD_COLOR)
 
 
-def load_templates(folder: str, templates: dict, features: dict, target_size: tuple = None) -> int:
-    loaded_names: set[str] = set()
+def load_templates(folder: str, templates: dict, features: dict, target_size: tuple = None, key_fn=None) -> int:
+    loaded_names: set = set()
     sift = SIFT_create()
 
     template_paths = sorted(
@@ -142,12 +160,13 @@ def load_templates(folder: str, templates: dict, features: dict, target_size: tu
 
             if target_size:
                 img = cv2.resize(img, target_size)
-            templates[icon_path.stem] = img
+            key = key_fn(icon_path.stem) if key_fn else icon_path.stem
+            templates[key] = img
 
             kp, des = sift.detectAndCompute(img, None)
             if des is not None:
-                features[icon_path.stem] = (kp, des)
-                loaded_names.add(icon_path.stem)
+                features[key] = (kp, des)
+                loaded_names.add(key)
             else:
                 print(f"No features detected for: {icon_path}")
 
@@ -192,7 +211,7 @@ try:
         SUB_STAT_NAMES = set(SUB_STATS.keys())
 
     echo_count = load_templates('Echoes', ICON_TEMPLATES, TEMPLATE_FEATURES, (188, 188))
-    element_count = load_templates('Elements', ELEMENT_TEMPLATES, ELEMENT_FEATURES)
+    element_count = load_templates('Elements', ELEMENT_TEMPLATES, ELEMENT_FEATURES, key_fn=int)
     cost_count = load_cost_templates()
     print(f"Loaded {echo_count} echo templates, {element_count} element templates, and {cost_count} cost templates")
 
@@ -204,15 +223,16 @@ except Exception as e:
 # Elements that share a hue cluster — HSV alone can't separate these pairs.
 # Within a cluster, fall back to SIFT. Across clusters, HSV is decisive.
 # Electro (H≈135) is distinct from all clusters; no entry needed.
+# Fetter set ids that share a hue cluster (names in comments, see SET_NAME_BY_ID).
 _HUE_CLUSTERS = [
-    {'ER', 'Tidebreaking'},                                               # grayscale
-    {'Trailblazing', 'Chromatic', 'Fusion', 'Flamewing', 'Flaming', 'Attack', 'Crown'},  # H≈7
-    {'Pact', 'Rite', 'Spectro', 'Radiance'},                             # H≈26
-    {'Halo', 'Healing'},                                                  # H≈41
-    {'Sound', 'Aero', 'Gust', 'Windward'},                               # H≈77
-    {'Glacio', 'Frosty', 'QuietSnow'},                                    # H≈102
-    {'Law', 'Empyrean', 'Memories'},                                      # H≈109
-    {'Midnight', 'Dream', 'Thread', 'Havoc'},                            # H≈161
+    {8, 14},                        # ER, Tidebreaking (grayscale)
+    {27, 28, 2, 22, 18, 9, 20},     # Trailblazing, Chromatic, Fusion, Flamewing, Flaming, Attack, Crown (H≈7)
+    {24, 26, 5, 11},                # Pact, Rite, Spectro, Radiance (H≈26)
+    {25, 7},                        # Halo, Healing (H≈41)
+    {29, 4, 16, 17},                # Sound, Aero, Gust, Windward (H≈77)
+    {1, 10, 30},                    # Glacio, Frosty, QuietSnow (H≈102)
+    {21, 13, 31},                   # Law, Empyrean, Memories (H≈109)
+    {12, 19, 23, 6},                # Midnight, Dream, Thread, Havoc (H≈161)
 ]
 
 def _same_cluster(candidates: list) -> bool:
@@ -229,16 +249,22 @@ def _template_color_score(image, template) -> float:
     ]
     return float(np.mean(channel_scores))
 
-def determine_element(image, filter_elements):
-    """Match element: HSV histogram first, SIFT fallback only within same hue cluster."""
-    if isinstance(filter_elements, str):
-        base_name = filter_elements.replace("Phantom ", "") if filter_elements.startswith("Phantom ") else filter_elements
-        possible_elements = ECHO_ELEMENTS.get(base_name, ["Unknown"])
-    else:
-        possible_elements = filter_elements if filter_elements else ["Unknown"]
+def determine_element(image, filter_ids):
+    """Match sonata set by badge: HSV histogram first, SIFT fallback only within a
+    hue cluster. Id-native — returns an int fetter set id, or None if undecidable.
 
-    if len(possible_elements) == 1:
-        return possible_elements[0]
+    `filter_ids` is either an echo id (str, candidates looked up via ECHO_SET_IDS)
+    or an explicit list of candidate set ids.
+    """
+    if isinstance(filter_ids, str):
+        possible = ECHO_SET_IDS.get(filter_ids, [])
+    else:
+        possible = list(filter_ids) if filter_ids else []
+
+    if not possible:
+        return None
+    if len(possible) == 1:
+        return possible[0]
 
     # HSV histogram match
     hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
@@ -249,10 +275,10 @@ def determine_element(image, filter_elements):
     image_colored = cv2.countNonZero(mask)
 
     scores = []
-    for name in possible_elements:
-        if name not in ELEMENT_TEMPLATES:
+    for sid in possible:
+        if sid not in ELEMENT_TEMPLATES:
             continue
-        tmpl = ELEMENT_TEMPLATES[name]
+        tmpl = ELEMENT_TEMPLATES[sid]
         t_hsv = cv2.cvtColor(tmpl, cv2.COLOR_BGR2HSV)
         t_mask = cv2.inRange(t_hsv, np.array([0, 40, 40]), np.array([180, 255, 255]))
         if cv2.countNonZero(t_mask) == 0:
@@ -265,10 +291,10 @@ def determine_element(image, filter_elements):
             t_hist = cv2.calcHist([t_hsv], [0], t_mask, [36], [0, 180])
             cv2.normalize(t_hist, t_hist)
             score = cv2.compareHist(hist, t_hist, cv2.HISTCMP_CORREL)
-        scores.append((name, score))
+        scores.append((sid, score))
 
     if not scores:
-        return "Unknown"
+        return None
 
     scores.sort(key=lambda x: x[1], reverse=True)
     best, second = scores[0], scores[1] if len(scores) > 1 else None
@@ -280,15 +306,15 @@ def determine_element(image, filter_elements):
         kp1, des1 = sift.detectAndCompute(image, None)
         if des1 is not None:
             sift_scores = []
-            for name, (kp2, des2) in ELEMENT_FEATURES.items():
+            for sid, (kp2, des2) in ELEMENT_FEATURES.items():
                 # Only arbitrate among the same-cluster candidates that caused the
                 # tie. Cross-cluster candidates that HSV already rejected by a wide
                 # margin (e.g. green Sound vs gold Rite) must not be reachable here
-                if name not in possible_elements or not _same_cluster([best[0], name]):
+                if sid not in possible or not _same_cluster([best[0], sid]):
                     continue
                 ml = flann.knnMatch(des1, des2, k=2)
                 good = [m for m, n in ml if m.distance < 0.7 * n.distance]
-                sift_scores.append((name, len(good) / max(len(kp1), len(kp2)) if kp1 and kp2 else 0))
+                sift_scores.append((sid, len(good) / max(len(kp1), len(kp2)) if kp1 and kp2 else 0))
             if sift_scores:
                 best_sift = max(sift_scores, key=lambda x: x[1])
                 if best_sift[1] > 0:
@@ -298,14 +324,14 @@ def determine_element(image, filter_elements):
         # case, do not let an arbitrary zero-score candidate override HSV.
         best_score = best[1]
         same_hue_candidates = [
-            name
-            for name, score in scores
-            if _same_cluster([best[0], name]) and (best_score - score) < 0.02
+            sid
+            for sid, score in scores
+            if _same_cluster([best[0], sid]) and (best_score - score) < 0.02
         ]
         color_scores = [
-            (name, _template_color_score(image, ELEMENT_TEMPLATES[name]))
-            for name in same_hue_candidates
-            if name in ELEMENT_TEMPLATES
+            (sid, _template_color_score(image, ELEMENT_TEMPLATES[sid]))
+            for sid in same_hue_candidates
+            if sid in ELEMENT_TEMPLATES
         ]
         if color_scores:
             return max(color_scores, key=lambda x: x[1])[0]

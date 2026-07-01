@@ -1,7 +1,7 @@
 import cv2
 import pytesseract
 import re
-from data import CHARACTER_NAMES, CHARACTER_ID_MAP, WEAPON_NAMES, WEAPON_ID_MAP, MAIN_STAT_NAMES, MAIN_STATS, SUB_STATS, ECHO_ELEMENTS, ECHO_COSTS, ECHO_NAME_MAP, TEMPLATE_FEATURES, COST_TEMPLATES, Rapid, determine_element
+from data import CHARACTER_NAMES, CHARACTER_ID_MAP, WEAPON_NAMES, WEAPON_ID_MAP, MAIN_STAT_NAMES, MAIN_STATS, SUB_STATS, ECHO_SET_IDS, SET_NAME_BY_ID, ECHO_COSTS, ECHO_NAME_MAP, TEMPLATE_FEATURES, COST_TEMPLATES, Rapid, determine_element
 import numpy as np
 from rapidfuzz import fuzz, process
 from typing import Tuple
@@ -549,27 +549,27 @@ def validate_echo_family_by_element(
     best_conf: float,
     sorted_matches: list[tuple[str, float]],
     element_region: np.ndarray,
-    detected_element: str | None,
-) -> tuple[str, float, str | None]:
+    detected_element: int | None,
+) -> tuple[str, float, int | None]:
     """Resolve same-body variant confusion using the visible set badge."""
     variants = _echo_family_index().get(echo_family_key(best_match), [])
     if len(variants) < 2:
         return best_match, best_conf, detected_element
 
-    family_elements = sorted({
-        element for variant in variants for element in ECHO_ELEMENTS.get(variant, [])
+    family_set_ids = sorted({
+        sid for variant in variants for sid in ECHO_SET_IDS.get(variant, [])
     })
-    if len(family_elements) < 2:
+    if len(family_set_ids) < 2:
         return best_match, best_conf, detected_element
 
     # The badge across the family's combined sets is used only to *select the
     # variant*. The element shown is recomputed by the caller from the chosen
     # variant's own legal sets, so a non-flip echo behaves exactly as before.
-    badge = determine_element(element_region, family_elements)
+    badge = determine_element(element_region, family_set_ids)
     candidates = [
         variant
         for variant in variants
-        if badge in ECHO_ELEMENTS.get(variant, [])
+        if badge in ECHO_SET_IDS.get(variant, [])
     ]
     if not candidates:
         # determine_element only returns a member of family_elements, so every
@@ -594,7 +594,7 @@ def validate_echo_family_by_element(
     if promoting_to_nightmare and best_conf < NIGHTMARE_PROMOTE_FLOOR:
         return best_match, best_conf, detected_element
 
-    print(f"Family badge validation: {best_match} -> {chosen} (badge {badge})")
+    print(f"Family badge validation: {best_match} -> {chosen} (badge {SET_NAME_BY_ID.get(badge, badge)})")
     # Reset element so the caller recomputes it from the new identity's own sets.
     return chosen, conf_of.get(chosen, best_conf), None
 
@@ -648,24 +648,24 @@ def _identify_icon_core(image: np.ndarray):
         if len(close_matches) >= 2:
             print(f"Close matches detected: {[(n, f'{c:.4f}') for n, c in close_matches]}")
 
-            candidate_elements = set()
+            candidate_set_ids = set()
             for name, _ in close_matches:
-                candidate_elements.update(ECHO_ELEMENTS.get(name, []))
-            detected_element = determine_element(element_region, list(candidate_elements))
+                candidate_set_ids.update(ECHO_SET_IDS.get(name, []))
+            detected_element = determine_element(element_region, list(candidate_set_ids))
 
             element_matches = [
                 (name, conf)
                 for name, conf in close_matches
-                if detected_element in ECHO_ELEMENTS.get(name, ["Unknown"])
+                if detected_element in ECHO_SET_IDS.get(name, [])
             ]
             # Only override SIFT when the badge points to exactly one candidate.
             if len(element_matches) == 1:
                 best_match, best_conf = element_matches[0]
-                print(f"-> badge {detected_element} -> '{best_match}'")
+                print(f"-> badge {SET_NAME_BY_ID.get(detected_element, detected_element)} -> '{best_match}'")
 
     return best_match, best_conf, detected_element, sorted_matches, element_region
 
-def match_icon(image: np.ndarray) -> Tuple[str, float, str]:
+def match_icon(image: np.ndarray) -> Tuple[str, float, int | None]:
     """SIFT-based icon matching - returns best match with confidence check and element.
 
     The visible set badge arbitrates same-body variants such as base vs Nightmare
@@ -1006,13 +1006,16 @@ def _process_card_inner(image, region: str):
         lang_signal = echo_language_signal(cleaned_names, values)
 
         # --- identity (SIFT) + cost-aware main resolution ---
-        echo_id, confidence, element_data = match_icon(image)
+        echo_id, confidence, set_id = match_icon(image)
+        if set_id is not None and set_id not in ECHO_SET_IDS.get(echo_id, []):
+            set_id = None
+        element_name = SET_NAME_BY_ID.get(set_id) if set_id is not None else None
         print(f"Echo identified: {echo_id} (confidence: {confidence:.2%})")
         main = resolve_echo_main(
             ECHO_COSTS.get(echo_id, 0), raw_main_name, raw_main_value,
             rapid_main=lambda: _rapid_main_line(main_img),
         )
-        print(f"Echo '{echo_id}' -> Element: {element_data}")
+        print(f"Echo '{echo_id}' -> Set: {element_name} (id {set_id})")
         print(f"Final echo result: main={main}, substats={substats}")
 
         return {
@@ -1021,7 +1024,8 @@ def _process_card_inner(image, region: str):
                 "name": {"name": ECHO_NAME_MAP.get(echo_id, echo_id), "id": echo_id, "confidence": float(confidence)},
                 "main": main,
                 "substats": substats,
-                "element": element_data,
+                "element": element_name,
+                "setId": set_id,
                 "langSignal": lang_signal,
             }
         }

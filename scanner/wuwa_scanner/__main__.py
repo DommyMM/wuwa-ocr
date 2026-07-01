@@ -76,7 +76,10 @@ def scan_panel(image_path: str) -> dict:
     else:
         canonical_id, canonical_name, id_source = None, name_read.name, "none"
 
-    element = classify_element(element_crop, canonical_id) if canonical_id else "Unknown"
+    set_id = classify_element(element_crop, canonical_id) if canonical_id else None
+    if canonical_id and set_id is not None and set_id not in data.ECHO_SET_IDS.get(canonical_id, []):
+        set_id = None
+    element = data.SET_NAME_BY_ID.get(set_id) if set_id is not None else None
 
     parsed_stats = parse_stats(stats_crop)
     main_stat = parsed_stats[0] if parsed_stats else None
@@ -91,6 +94,7 @@ def scan_panel(image_path: str) -> dict:
         "cost": name_read.cost,
         "level": name_read.level,
         "element": element,
+        "setId": set_id,
         "main_stat": main_stat,
         "sub_stats": sub_stats,
         "confidence": {

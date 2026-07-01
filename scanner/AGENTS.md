@@ -13,7 +13,7 @@ A dev-only tool that reads a player's Echo bag from the game UI and emits canoni
 
 | Owns | Reuses from `backend/` | Doesn't touch |
 |---|---|---|
-| `wuwa_scanner/` package (layout, identify, extract, output) | `data.py` lookups (`ECHO_NAME_MAP`, `ECHO_COSTS`, `ECHO_ELEMENTS`, `SUB_STATS`, `MAIN_STATS`, `TEMPLATE_FEATURES`, `COST_TEMPLATES`, `determine_element`) | `server.py`, `card.py`, `batch_ocr.py` — those are the export-card pipeline |
+| `wuwa_scanner/` package (layout, identify, extract, output) | `data.py` lookups (`ECHO_NAME_MAP`, `ECHO_COSTS`, `ECHO_SET_IDS`, `SET_NAME_BY_ID`, `SUB_STATS`, `MAIN_STATS`, `TEMPLATE_FEATURES`, `COST_TEMPLATES`, `determine_element`) | `server.py`, `card.py`, `batch_ocr.py` — those are the export-card pipeline |
 | `bench_ocr.py`, `extract_regions.py` debug tools | `Data/Echoes/*.{png,webp}`, `Data/Costs/*.jpg`, `Data/Elements/*.webp` template assets | `Dockerfile`, `requirements.txt` (API service deps; scanner can add its own deps later) |
 | `samples/`, `crops/`, `bench_results.txt` | | |
 

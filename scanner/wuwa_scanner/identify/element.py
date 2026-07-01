@@ -15,19 +15,19 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[3]))  # backend/
 import data  # noqa: E402
 
 
-def classify_element(element_crop_bgr: np.ndarray, echo_id: str | None) -> str:
-    """Classify the sonata set/element shown on the 60x60 badge.
+def classify_element(element_crop_bgr: np.ndarray, echo_id: str | None) -> int | None:
+    """Classify the sonata set shown on the 60x60 badge.
 
     Args:
         element_crop_bgr: BGR crop of the element badge.
         echo_id: canonical echo id (string). Used to look up the candidate
-            element list via data.ECHO_ELEMENTS. If None, all elements are
+            set-id list via data.ECHO_SET_IDS. If None, all sets are
             candidates (slower, less reliable).
 
-    Returns the element name (e.g. "Empyrean", "Havoc", "Dream").
+    Returns the fetter set id (e.g. 13, 6, 19), or None if undecidable.
     """
-    if echo_id and echo_id in data.ECHO_ELEMENTS:
-        candidates = data.ECHO_ELEMENTS[echo_id]
+    if echo_id and echo_id in data.ECHO_SET_IDS:
+        candidates = data.ECHO_SET_IDS[echo_id]
     else:
-        candidates = sorted({e for elements in data.ECHO_ELEMENTS.values() for e in elements})
+        candidates = sorted({s for ids in data.ECHO_SET_IDS.values() for s in ids})
     return data.determine_element(element_crop_bgr, candidates)
