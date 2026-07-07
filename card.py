@@ -1,7 +1,7 @@
 import cv2
 import pytesseract
 import re
-from data import CHARACTER_NAMES, CHARACTER_ID_MAP, WEAPON_NAMES, WEAPON_ID_MAP, MAIN_STAT_NAMES, MAIN_STATS, SUB_STATS, ECHO_SET_IDS, SET_NAME_BY_ID, ECHO_COSTS, ECHO_NAME_MAP, TEMPLATE_FEATURES, COST_TEMPLATES, Rapid, determine_element
+from data import CHARACTER_NAMES, CHARACTER_ID_MAP, WEAPON_NAMES, WEAPON_ID_MAP, MAIN_STAT_NAMES, MAIN_STATS, SUB_STATS, ECHO_SET_IDS, SET_NAME_BY_ID, ECHO_COSTS, ECHO_NAME_MAP, ROVER_GENDER_BY_ID, ROVER_ELEMENT_BY_ID, TEMPLATE_FEATURES, COST_TEMPLATES, Rapid, determine_element
 import numpy as np
 from rapidfuzz import fuzz, process
 from typing import Tuple
@@ -48,11 +48,34 @@ sys.stdout = _STDOUT
 # Below this, the weapon is reported as missing rather than guessed.
 WEAPON_NAME_MIN_SCORE = 75
 
-ROVER_ELEMENTS = ("Aero", "Spectro", "Havoc")
+# OCR-noise spellings per element; extend when a new Rover element ships.
 ROVER_ELEMENT_ALIASES = {
     "Aero": ("aero", "acro"),
     "Spectro": ("spectro", "speetro"),
     "Havoc": ("havoc", "lavoc"),
+}
+# Everything below derives from Characters.json + the hand-kept gender ids in
+# data.py — a new Rover element only needs its two ids added to
+# ROVER_GENDER_BY_ID (plus alias/hue entries above/below if wanted).
+ROVER_IDS_BY_GENDER_ELEMENT = {
+    (gender, ROVER_ELEMENT_BY_ID[cid]): cid
+    for cid, gender in ROVER_GENDER_BY_ID.items()
+    if cid in ROVER_ELEMENT_BY_ID
+}
+ROVER_KNOWN_ELEMENTS = {element for _gender, element in ROVER_IDS_BY_GENDER_ELEMENT}
+# The base elemental sonata sets are named exactly by element, so inverting
+# SET_NAME_BY_ID over the known Rover elements yields the badge set ids (4/5/6).
+ROVER_SET_ID_TO_ELEMENT = {
+    set_id: name
+    for set_id, name in SET_NAME_BY_ID.items()
+    if name in ROVER_KNOWN_ELEMENTS
+}
+ROVER_BADGE_SET_IDS = list(ROVER_SET_ID_TO_ELEMENT)
+# Empirical badge-crop hue medians for the color fallback when badge SIFT abstains.
+ROVER_BADGE_HUE_ANCHORS = {
+    "Spectro": 26,
+    "Aero": 77,
+    "Havoc": 161,
 }
 
 
@@ -812,6 +835,7 @@ DATA_DIR = Path(__file__).resolve().parent / "Data"
 
 CHAR_SPLASH_SUBBOX = (0.125, 0.2545, 0.9375, 0.9455)  # splash within character region
 CHAR_NAME_SUBBOX = (0.1025, 0.0135, 0.944, 0.1515)    # name strip within character region
+CHAR_ELEMENT_SUBBOX = (0.018, 0.025, 0.105, 0.14)      # element badge left of name strip
 CHAR_SIFT_MAX_SIDE = 150
 CHAR_CONF_FLOOR = 0.10
 CHAR_MARGIN_FLOOR = 0.04
@@ -874,6 +898,48 @@ def _match_asset(region: np.ndarray, feats: dict) -> tuple:
     return best_id, best_conf, margin
 
 
+def _detect_rover_badge_element(region_img: np.ndarray) -> str | None:
+    badge = _subcrop(region_img, CHAR_ELEMENT_SUBBOX)
+    set_id = determine_element(badge, ROVER_BADGE_SET_IDS)
+    if set_id in ROVER_SET_ID_TO_ELEMENT:
+        return ROVER_SET_ID_TO_ELEMENT[set_id]
+
+    hsv = cv2.cvtColor(badge, cv2.COLOR_BGR2HSV)
+    mask = cv2.inRange(hsv, np.array([0, 50, 50]), np.array([180, 255, 255]))
+    hues = hsv[:, :, 0][mask > 0]
+    if hues.size < 10:
+        return None
+    median_hue = float(np.median(hues))
+
+    def hue_distance(anchor: int) -> float:
+        delta = abs(median_hue - anchor)
+        return min(delta, 180 - delta)
+
+    anchors = {
+        element: anchor
+        for element, anchor in ROVER_BADGE_HUE_ANCHORS.items()
+        if element in ROVER_KNOWN_ELEMENTS
+    }
+    element, distance = min(
+        ((element, hue_distance(anchor)) for element, anchor in anchors.items()),
+        key=lambda item: item[1],
+    )
+    return element if distance <= 18 else None
+
+
+def _rover_analysis(cid: str | None, element: str | None, level: int = 90) -> dict | None:
+    if not cid:
+        return None
+    gender = ROVER_GENDER_BY_ID.get(cid)
+    if not gender or not element:
+        return None
+    resolved_id = ROVER_IDS_BY_GENDER_ELEMENT.get((gender, element))
+    if not resolved_id:
+        return None
+    name = f"Rover: {element}"
+    return {"name": name, "id": resolved_id, "level": level, "element": element}
+
+
 def recognize_character_asset(region_img: np.ndarray) -> dict:
     """SIFT the character splash; OCR the name strip on abstain (Rover, junk).
 
@@ -886,11 +952,20 @@ def recognize_character_asset(region_img: np.ndarray) -> dict:
         _CHARACTER_FEATURES = _load_asset_features("Characters", CHAR_SIFT_MAX_SIDE)
     splash = _resize_max_side(_subcrop(region_img, CHAR_SPLASH_SUBBOX), CHAR_SIFT_MAX_SIDE)
     cid, conf, margin = _match_asset(splash, _CHARACTER_FEATURES)
+    if cid in ROVER_GENDER_BY_ID and conf >= CHAR_CONF_FLOOR:
+        rover = _rover_analysis(cid, _detect_rover_badge_element(region_img))
+        if rover is not None:
+            return rover
     if cid and conf >= CHAR_CONF_FLOOR and margin >= CHAR_MARGIN_FLOOR:
         return {"name": CHARACTER_ID_NAME.get(cid, ""), "id": cid, "level": 90}
     text = process_ocr("character", _subcrop(region_img, CHAR_NAME_SUBBOX))
     cleaned = "\n".join(line.strip() for line in text.splitlines() if line.strip())
-    return parse_character_title(cleaned)
+    parsed = parse_character_title(cleaned)
+    if "rover" in re.sub(r'[^a-z]', '', parsed.get("name", "").lower()):
+        rover = _rover_analysis(cid, parsed.get("element") or _detect_rover_badge_element(region_img), parsed.get("level", 90))
+        if rover is not None:
+            return rover
+    return parsed
 
 
 def recognize_weapon_asset(region_img: np.ndarray) -> dict:

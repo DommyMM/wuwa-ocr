@@ -78,6 +78,15 @@ SET_NAME_BY_ID: Dict[int, str] = {
     30: 'QuietSnow', 31: 'Memories', 32: 'Adam',
 }
 
+# Rover gender is not a field anywhere in the synced data, when a new Rover element
+# ships, add its two ids here and the element pairing derives from
+# Characters.json at load (ROVER_ELEMENT_BY_ID).
+ROVER_GENDER_BY_ID: Dict[str, str] = {
+    '1406': 'M', '1501': 'M', '1605': 'M',
+    '1408': 'F', '1502': 'F', '1604': 'F',
+}
+ROVER_ELEMENT_BY_ID: Dict[str, str] = {}  # id → element, from Characters.json
+
 # Paths
 DATA_DIR = Path(__file__).parent / 'Data'
 
@@ -90,12 +99,15 @@ def _load_from_local():
         characters = json.load(f)
         CHARACTER_NAMES = [c['name'] for c in characters]
         CHARACTER_ID_MAP.clear()
+        ROVER_ELEMENT_BY_ID.clear()
         for c in characters:
             name = c.get('name', '')
             cid = str(c.get('id', '')).strip()
             if name and cid:
                 # Preserve first seen ID for duplicated names (Rover variants are handled in frontend fallback).
                 CHARACTER_ID_MAP.setdefault(name, cid)
+            if cid in ROVER_GENDER_BY_ID:
+                ROVER_ELEMENT_BY_ID[cid] = c.get('element', '')
 
     WEAPON_NAMES.clear(); WEAPON_DATA.clear(); WEAPON_ID_MAP.clear()
     with open(DATA_DIR / 'Weapons.json', 'r', encoding='utf-8') as f:
