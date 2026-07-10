@@ -76,14 +76,15 @@ SET_NAME_BY_ID: Dict[int, str] = {
     22: 'Flamewing', 23: 'Thread', 24: 'Pact', 25: 'Halo',
     26: 'Rite', 27: 'Trailblazing', 28: 'Chromatic', 29: 'Sound',
     30: 'QuietSnow', 31: 'Memories', 32: 'Adam',
+    33: 'Feathered', 34: 'EvilPurge', 35: 'Nether',
 }
 
 # Rover gender is not a field anywhere in the synced data, when a new Rover element
 # ships, add its two ids here and the element pairing derives from
 # Characters.json at load (ROVER_ELEMENT_BY_ID).
 ROVER_GENDER_BY_ID: Dict[str, str] = {
-    '1406': 'M', '1501': 'M', '1605': 'M',
-    '1408': 'F', '1502': 'F', '1604': 'F',
+    '1406': 'M', '1501': 'M', '1605': 'M', '1309': 'M',
+    '1408': 'F', '1502': 'F', '1604': 'F', '1310': 'F',
 }
 ROVER_ELEMENT_BY_ID: Dict[str, str] = {}  # id → element, from Characters.json
 
@@ -237,11 +238,11 @@ except Exception as e:
 # Electro (H≈135) is distinct from all clusters; no entry needed.
 # Fetter set ids that share a hue cluster (names in comments, see SET_NAME_BY_ID).
 _HUE_CLUSTERS = [
-    {8, 14},                        # ER, Tidebreaking (grayscale)
-    {27, 28, 2, 22, 18, 9, 20},     # Trailblazing, Chromatic, Fusion, Flamewing, Flaming, Attack, Crown (H≈7)
+    {8, 14, 33},                    # ER, Tidebreaking, Feathered (grayscale)
+    {27, 28, 2, 22, 18, 9, 20, 35}, # Trailblazing, Chromatic, Fusion, Flamewing, Flaming, Attack, Crown, Nether (H≈7)
     {24, 26, 5, 11},                # Pact, Rite, Spectro, Radiance (H≈26)
     {25, 7},                        # Halo, Healing (H≈41)
-    {29, 4, 16, 17},                # Sound, Aero, Gust, Windward (H≈77)
+    {29, 4, 16, 17, 34},            # Sound, Aero, Gust, Windward, EvilPurge (H≈77)
     {1, 10, 30},                    # Glacio, Frosty, QuietSnow (H≈102)
     {21, 13, 31},                   # Law, Empyrean, Memories (H≈109)
     {12, 19, 23, 6},                # Midnight, Dream, Thread, Havoc (H≈161)
