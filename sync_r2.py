@@ -11,6 +11,7 @@ Usage:
 """
 import sys
 import os
+import re
 import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
@@ -19,11 +20,16 @@ from pathlib import Path
 BACKEND_DIR = Path(__file__).parent
 R2_BACKUP   = BACKEND_DIR.parent / "r2-backup"
 MANIFEST    = BACKEND_DIR.parent / "r2-backup-manifest.json"
-SOURCE_IMAGE_MIGRATION_MANIFEST = (
-    BACKEND_DIR.parent / "lb" / "source-image-key-manifest.json"
-)
 DRY_RUN     = "--run" not in sys.argv
 WRITE_MANIFEST = "--manifest" in sys.argv
+WORKERS     = 32
+
+# R2 can't have its own LastModified overridden, but the source-image migration
+# stamps this custom metadata field on every canonical object it creates so the
+# original screenshot time survives the copy. Reading it straight off the
+# object (instead of the migration manifest file) means local mtime accuracy
+# doesn't depend on that file still existing on disk.
+CANONICAL_KEY_RE = re.compile(r"^[a-f0-9]{64}\.(?:jpg|png)$")
 
 ENV_CANDIDATES = [
     BACKEND_DIR.parent / "wuwabuilds" / ".env",
@@ -58,28 +64,35 @@ def local_keys() -> set[str]:
     }
 
 
-def load_migration_mtimes() -> dict[str, float]:
-    """Map canonical migration keys to their original legacy upload time."""
-
-    if not SOURCE_IMAGE_MIGRATION_MANIFEST.exists():
+def fetch_legacy_mtimes(s3, bucket: str, keys: list[str]) -> dict[str, float]:
+    """Read each canonical-keyed object's own `legacy-last-modified` metadata
+    via HeadObject. Legacy 16-hex-named objects were never given this field
+    (they're untouched originals, their own LastModified is already correct),
+    so only canonical-shaped keys are worth checking.
+    """
+    canonical_keys = [k for k in keys if CANONICAL_KEY_RE.match(k)]
+    if not canonical_keys:
         return {}
-    payload = json.loads(
-        SOURCE_IMAGE_MIGRATION_MANIFEST.read_text(encoding="utf-8")
-    )
-    result: dict[str, float] = {}
-    for entry in payload.get("entries", {}).values():
-        if not isinstance(entry, dict) or entry.get("status") != "verified":
-            continue
-        key = entry.get("newKey")
-        raw_timestamp = entry.get("sourceLastModified")
-        if not isinstance(key, str) or not isinstance(raw_timestamp, str):
-            continue
+
+    def head(key: str):
         try:
-            result[key] = datetime.fromisoformat(
-                raw_timestamp.replace("Z", "+00:00")
-            ).timestamp()
-        except ValueError:
-            continue
+            resp = s3.head_object(Bucket=bucket, Key=key)
+            raw = resp.get("Metadata", {}).get("legacy-last-modified")
+            if not raw:
+                return key, None
+            return key, datetime.fromisoformat(raw.replace("Z", "+00:00")).timestamp()
+        except Exception:
+            return key, None
+
+    print(f"Checking {len(canonical_keys)} canonical objects for original timestamps ...")
+    result: dict[str, float] = {}
+    with ThreadPoolExecutor(max_workers=WORKERS) as pool:
+        for key, ts in pool.map(head, canonical_keys):
+            if ts is not None:
+                result[key] = ts
+
+    if result:
+        print(f"Recovered original timestamps for {len(result)} migrated images")
     return result
 
 
@@ -124,19 +137,6 @@ def main():
         for obj in all_objects
     }
     by_key = {obj["Key"]: obj for obj in all_objects}
-    migration_mtimes = load_migration_mtimes()
-    if migration_mtimes:
-        print(
-            "Preserving original timestamps for "
-            f"{len(migration_mtimes)} migrated canonical images"
-        )
-
-    def effective_mtime(key: str) -> float:
-        return migration_mtimes.get(key, by_key[key]["LastModified"].timestamp())
-
-    if not DRY_RUN and WRITE_MANIFEST:
-        MANIFEST.write_text(json.dumps(manifest, separators=(",", ":"), sort_keys=True), encoding="utf-8")
-        print(f"Wrote manifest: {MANIFEST}")
 
     existing_keys = local_keys()
     to_download = [k for k in all_keys if k not in existing_keys]
@@ -152,31 +152,30 @@ def main():
             print(f"  ... and {len(to_download) - 20} more")
         return
 
-    # Keep local mtimes aligned to R2 upload time so date-based backfills can
+    if WRITE_MANIFEST:
+        MANIFEST.write_text(json.dumps(manifest, separators=(",", ":"), sort_keys=True), encoding="utf-8")
+        print(f"Wrote manifest: {MANIFEST}")
+
+    migration_mtimes = fetch_legacy_mtimes(s3, bucket, all_keys)
+
+    def effective_mtime(key: str) -> float:
+        return migration_mtimes.get(key, by_key[key]["LastModified"].timestamp())
+
+    # Keep local mtimes aligned to true original time so date-based backfills can
     # select screenshots by patch window without relisting R2.
     touched_existing = 0
     for key in existing_keys:
-        meta = manifest.get(key)
-        if not meta:
+        if key not in by_key:
             continue
-        path = R2_BACKUP / key
-        last_modified = by_key[key]["LastModified"].timestamp()
-        os.utime(path, (last_modified, last_modified))
+        mtime = effective_mtime(key)
+        os.utime(R2_BACKUP / key, (mtime, mtime))
         touched_existing += 1
-    # Apply preserved migration times last. Canonical and legacy local names
-    # may be hard links to one inode, so ordering this pass makes the original
-    # historical timestamp deterministic for both names.
-    for key, last_modified in migration_mtimes.items():
-        path = R2_BACKUP / key
-        if key in existing_keys and path.exists():
-            os.utime(path, (last_modified, last_modified))
-    print(f"Updated mtimes for {touched_existing} existing files from R2 metadata")
+    print(f"Updated mtimes for {touched_existing} existing files")
 
     if not to_download:
         print("Already in sync.")
         return
 
-    WORKERS = 32
     print(f"\nDownloading with {WORKERS} parallel workers ...\n")
 
     downloaded = 0
