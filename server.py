@@ -4,18 +4,20 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 import cv2
 import numpy as np
-import hashlib
 import json
 from concurrent.futures import ProcessPoolExecutor
 from typing import Any, Optional, cast
 from card import process_card
+from r2_storage import ImageIdentity, R2ImageStore, R2Settings, StorageResult, UnsupportedImageType, identify_image
 import time
 from collections import defaultdict
 import os
 import asyncio
 from contextlib import asynccontextmanager
 import ipaddress
+import inspect
 import sys
+import uuid
 from pathlib import Path
 try:
     from dotenv import load_dotenv
@@ -31,7 +33,11 @@ OPENCV_THREADS = int(os.getenv("OCR_OPENCV_THREADS", "1"))
 PROCESS_TIMEOUT = int(os.getenv("OCR_TIMEOUT", "60"))
 REQUESTS_PER_MINUTE = int(os.getenv("OCR_RATE_LIMIT", "10"))
 PORT = int(os.getenv("PORT", "5000"))
+MAX_IMAGE_BYTES = 5 * 1024 * 1024
 INTERNAL_API_KEY = os.getenv("INTERNAL_API_KEY", "").strip()
+R2_SETTINGS = R2Settings.from_env()
+r2_image_store = R2ImageStore.disabled(R2_SETTINGS.timeout_seconds)
+active_storage_tasks: set[asyncio.Task[StorageResult]] = set()
 consecutive_500s = 0
 MAX_CONSECUTIVE_500S = 3
 
@@ -131,7 +137,15 @@ LOG_ORDER = ("character", "watermark", "weapon", "forte", "sequences", "echo1", 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    print(f"Server starting on port {PORT} | railway={IS_RAILWAY} gpu={USE_GPU} workers={MAX_WORKERS} opencv_threads={OPENCV_THREADS}", flush=True)
+    global r2_image_store
+
+    r2_image_store = R2ImageStore(R2_SETTINGS)
+    print(
+        f"Server starting on port {PORT} | railway={IS_RAILWAY} gpu={USE_GPU} "
+        f"workers={MAX_WORKERS} opencv_threads={OPENCV_THREADS} "
+        f"r2_upload={R2_SETTINGS.enabled} r2_timeout={R2_SETTINGS.timeout_seconds}s",
+        flush=True,
+    )
     # Warm every worker in the background: each worker process loads RapidOCR and
     # the SIFT templates on its first task (~3-7s cold). Doing it at boot moves
     # that cost off the first user's request. Backgrounded (not awaited) so it
@@ -149,10 +163,15 @@ async def lifespan(app: FastAPI):
             print(f"import: warmup failed (non-fatal): {exc}", flush=True)
 
     warm_task = asyncio.create_task(_warm())
-    yield
-    warm_task.cancel()
-    print("Server shutting down", flush=True)
-    executor.shutdown(wait=True)
+    try:
+        yield
+    finally:
+        warm_task.cancel()
+        if active_storage_tasks:
+            await asyncio.gather(*active_storage_tasks, return_exceptions=True)
+        r2_image_store.close()
+        print("Server shutting down", flush=True)
+        executor.shutdown(wait=True)
 
 app = FastAPI(lifespan=lifespan)
 def worker_init():
@@ -257,17 +276,51 @@ async def read_upload_image_bytes(request: Request) -> bytes:
         value = form.get("image")
         if not isinstance(value, UploadFile) and not hasattr(value, "read"):
             raise HTTPException(status_code=400, detail="Missing multipart file field 'image'.")
-        image_bytes = await value.read()
+        try:
+            image_bytes = await value.read()
+        finally:
+            close = getattr(value, "close", None)
+            if callable(close):
+                close_result = close()
+                if inspect.isawaitable(close_result):
+                    await close_result
     else:
         image_bytes = await request.body()
 
     if not image_bytes:
         raise HTTPException(status_code=400, detail="Missing image bytes.")
+    if len(image_bytes) > MAX_IMAGE_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail="Image exceeds the 5 MiB limit.",
+        )
 
     return image_bytes
 
 def ndjson_event(payload: dict[str, Any]) -> str:
     return json.dumps(payload, separators=(",", ":"), ensure_ascii=False) + "\n"
+
+
+def new_scan_id() -> str:
+    """Return the one canonical cross-service correlation identifier format."""
+
+    return str(uuid.uuid4())
+
+
+def start_storage_task(
+    image_bytes: bytes,
+    image_identity: ImageIdentity,
+    scan_id: str,
+) -> asyncio.Task[StorageResult]:
+    """Start and retain storage even if recognition returns an early error."""
+
+    task = asyncio.create_task(
+        r2_image_store.store(image_bytes, image_identity),
+        name=f"r2-store-{scan_id}",
+    )
+    active_storage_tasks.add(task)
+    task.add_done_callback(active_storage_tasks.discard)
+    return task
 
 def slow_region_summary(timings: dict[str, Any]) -> str:
     region_timings = timings.get("regions") if isinstance(timings, dict) else None
@@ -297,40 +350,84 @@ def detect_unsupported_language(analysis: dict[str, Any]) -> bool:
         return False
     return (good / total) < NONENGLISH_NAME_MATCH_FLOOR
 
-def log_import_completed(result: dict[str, Any], region_logs: dict[str, list]) -> None:
-    """Emit the per-region recognition logs (in LOG_ORDER) followed by the summary.
-    """
+def log_import_completed(
+    result: dict[str, Any],
+    region_logs: dict[str, list],
+    hash_prefix: str,
+    storage_result: StorageResult,
+) -> None:
+    """Emit ordered recognition diagnostics and one structured completion event."""
+
     timings = result.get("timings", {})
     lines = [
         f"  {region}: {entry}"
         for region in LOG_ORDER
         for entry in region_logs.get(region, [])
     ]
-    summary = (
-        "import: Completed "
-        f"wall={timings.get('wallMs')}ms "
-        f"body={timings.get('bodyReadMs')}ms "
-        f"decode={timings.get('decodeMs')}ms "
-        f"crop={timings.get('cropMs')}ms "
-        f"recognition={timings.get('recognitionWallMs')}ms "
-        f"bytes={result.get('image', {}).get('bytes')} "
-        f"lang={'non-english' if result.get('unsupportedLanguage') else 'en'} "
-        f"slow={slow_region_summary(timings)}"
+    scan_id = result.get("scanId")
+    if lines:
+        print(
+            f"import: regions scan_id={scan_id}\n" + "\n".join(lines),
+            flush=True,
+        )
+
+    completion = {
+        "event": "ocr_import_completed",
+        "level": (
+            "warning"
+            if storage_result.result in {"failed", "timed_out"}
+            else "info"
+        ),
+        "scan_id": scan_id,
+        "bytes": result.get("image", {}).get("bytes"),
+        "media_type": result.get("image", {}).get("mediaType"),
+        "hash_prefix": hash_prefix,
+        "r2_result": storage_result.result,
+        "r2_ms": timings.get("r2Ms"),
+        "r2_error_code": storage_result.error_code,
+        "storage_wait_ms": timings.get("storageWaitMs"),
+        "hash_ms": timings.get("hashMs"),
+        "ocr_wall_ms": timings.get("recognitionWallMs"),
+        "wall_ms": timings.get("wallMs"),
+        "unsupported_language": bool(result.get("unsupportedLanguage")),
+        "slow_regions": slow_region_summary(timings),
+    }
+    print(
+        json.dumps(completion, separators=(",", ":"), ensure_ascii=False),
+        flush=True,
     )
-    block = "import: regions\n" + "\n".join(lines) + "\n" + summary if lines else summary
-    print(block, flush=True)
 
 async def stream_full_import_image(
     image_bytes: bytes,
     body_read_ms: float,
     request_start: float,
+    scan_id: str,
 ):
     global consecutive_500s
 
     timing_start = time.perf_counter()
 
     hash_started = time.perf_counter()
-    image_hash = hashlib.sha256(image_bytes).hexdigest()[:16]
+    try:
+        image_identity = identify_image(image_bytes)
+    except UnsupportedImageType as exc:
+        print(
+            json.dumps({
+                "event": "ocr_import_rejected",
+                "level": "info",
+                "scan_id": scan_id,
+                "reason": "unsupported_image_type",
+                "bytes": len(image_bytes),
+            }, separators=(",", ":")),
+            flush=True,
+        )
+        yield ndjson_event({
+            "type": "error",
+            "success": False,
+            "scanId": scan_id,
+            "error": str(exc),
+        })
+        return
     hashed_at = time.perf_counter()
 
     decode_started = time.perf_counter()
@@ -339,7 +436,12 @@ async def stream_full_import_image(
     decoded_at = time.perf_counter()
 
     if image is None:
-        yield ndjson_event({"type": "error", "success": False, "error": "Failed to decode image."})
+        yield ndjson_event({
+            "type": "error",
+            "success": False,
+            "scanId": scan_id,
+            "error": "Failed to decode image.",
+        })
         return
 
     crop_started = time.perf_counter()
@@ -353,12 +455,8 @@ async def stream_full_import_image(
         "width": int(image.shape[1]),
         "height": int(image.shape[0]),
         "bytes": len(image_bytes),
+        "mediaType": image_identity.content_type,
     }
-    yield ndjson_event({
-        "type": "meta",
-        "image": image_meta,
-        "trainingImageKey": f"training-images/{image_hash}.jpg",
-    })
 
     loop = asyncio.get_running_loop()
     recognition_started = time.perf_counter()
@@ -366,7 +464,13 @@ async def stream_full_import_image(
     async def run_region(region: str) -> dict[str, Any]:
         return await loop.run_in_executor(executor, process_region_task, (region, crops[region]))
 
+    storage_task = start_storage_task(image_bytes, image_identity, scan_id)
     tasks = [asyncio.create_task(run_region(region)) for region in REGION_KEYS]
+    yield ndjson_event({
+        "type": "meta",
+        "scanId": scan_id,
+        "image": image_meta,
+    })
     analysis: dict[str, Any] = {}
     progress: dict[str, str] = {}
     region_timings: dict[str, float] = {}
@@ -386,6 +490,7 @@ async def stream_full_import_image(
                 progress[region] = "done"
                 yield ndjson_event({
                     "type": "region",
+                    "scanId": scan_id,
                     "region": region,
                     "status": "done",
                     "analysis": result["analysis"],
@@ -397,6 +502,7 @@ async def stream_full_import_image(
                 region_errors[region] = error
                 yield ndjson_event({
                     "type": "region",
+                    "scanId": scan_id,
                     "region": region,
                     "status": "error",
                     "error": error,
@@ -408,6 +514,7 @@ async def stream_full_import_image(
         yield ndjson_event({
             "type": "error",
             "success": False,
+            "scanId": scan_id,
             "error": f"Processing timeout exceeded ({PROCESS_TIMEOUT} seconds)",
         })
         return
@@ -415,7 +522,12 @@ async def stream_full_import_image(
         error_msg = str(exc)
         if "terminated abruptly" in error_msg.lower():
             force_restart(f"ProcessPool worker terminated abruptly: {error_msg}")
-        yield ndjson_event({"type": "error", "success": False, "error": f"Image processing error: {error_msg}"})
+        yield ndjson_event({
+            "type": "error",
+            "success": False,
+            "scanId": scan_id,
+            "error": f"Image processing error: {error_msg}",
+        })
         return
 
     recognized_at = time.perf_counter()
@@ -424,12 +536,17 @@ async def stream_full_import_image(
             progress[region] = "error"
             region_errors[region] = "Region recognition did not complete"
 
+    storage_wait_started = time.perf_counter()
+    storage_result = await storage_task
+    storage_waited_at = time.perf_counter()
     finished_at = time.perf_counter()
     timings = {
         "hashMs": round((hashed_at - hash_started) * 1000, 2),
         "decodeMs": round((decoded_at - decode_started) * 1000, 2),
         "cropMs": round((cropped_at - crop_started) * 1000, 2),
         "recognitionWallMs": round((recognized_at - recognition_started) * 1000, 2),
+        "r2Ms": round(storage_result.elapsed_ms, 2),
+        "storageWaitMs": round((storage_waited_at - storage_wait_started) * 1000, 2),
         "totalMs": round((finished_at - timing_start) * 1000, 2),
         "bodyReadMs": round(body_read_ms, 2),
         "wallMs": round((time.perf_counter() - request_start) * 1000, 2),
@@ -437,15 +554,22 @@ async def stream_full_import_image(
     }
     result = {
         "success": True,
+        "scanId": scan_id,
         "analysis": analysis,
         "progress": progress,
         "timings": timings,
-        "trainingImageKey": f"training-images/{image_hash}.jpg",
+        "trainingImageKey": storage_result.key,
+        "storage": storage_result.public_payload(),
         "regionErrors": region_errors,
         "image": image_meta,
         "unsupportedLanguage": detect_unsupported_language(analysis),
     }
-    log_import_completed(result, region_logs)
+    log_import_completed(
+        result,
+        region_logs,
+        image_identity.hash_prefix,
+        storage_result,
+    )
     consecutive_500s = 0
     yield ndjson_event({"type": "done", **result})
 
@@ -454,15 +578,28 @@ async def process_image_request(request: Request):
     global consecutive_500s
 
     request_start = time.perf_counter()
+    scan_id = new_scan_id()
         
     try:
-        print("import: Processing full-image request", flush=True)
+        print(
+            json.dumps({
+                "event": "ocr_import_started",
+                "level": "info",
+                "scan_id": scan_id,
+            }, separators=(",", ":")),
+            flush=True,
+        )
 
         body_read_started = time.perf_counter()
         image_bytes = await read_upload_image_bytes(request)
         body_read_ms = (time.perf_counter() - body_read_started) * 1000
         return StreamingResponse(
-            stream_full_import_image(image_bytes, body_read_ms, request_start),
+            stream_full_import_image(
+                image_bytes,
+                body_read_ms,
+                request_start,
+                scan_id,
+            ),
             media_type="application/x-ndjson",
             headers={"Cache-Control": "no-cache"},
         )
@@ -471,12 +608,21 @@ async def process_image_request(request: Request):
             status_code=e.status_code,
             content={
                 "success": False,
-                "error": e.detail
+                "scanId": scan_id,
+                "error": e.detail,
             }
         )
         
     except Exception as e:
-        print(f"import: Failed - {str(e)}", flush=True)
+        print(
+            json.dumps({
+                "event": "ocr_import_failed",
+                "level": "error",
+                "scan_id": scan_id,
+                "error_code": type(e).__name__,
+            }, separators=(",", ":")),
+            flush=True,
+        )
         
         consecutive_500s += 1
         if consecutive_500s > 1:
@@ -489,7 +635,8 @@ async def process_image_request(request: Request):
             status_code=500,
             content={
                 "success": False,
-                "error": str(e)
+                "scanId": scan_id,
+                "error": str(e),
             }
         )
 

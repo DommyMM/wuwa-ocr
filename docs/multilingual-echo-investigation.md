@@ -202,7 +202,9 @@ Generated forensic outputs (`backend/forensics/non_english_ocr_scan/`) are git-i
 
 - Run `py wuwabuilds\scripts\sync_backend.py --skip-element-icons` so `backend/Data/Stats.json`
   exists, then run the scout across `r2-backup` and confirm known localized samples flag:
-  `f32421ba8b1f3dc0.jpg` (Japanese), `cce1a0f29186891b.jpg` (French), `5e17036118784d4b.jpg`
+  `f32421ba8b1f3dc03de07f879703cc23da24c8abc192ecd271e441216559bcfb.jpg`
+  (Japanese), `cce1a0f29186891b20e00684e3bf5853d9ab527279b2b71ee5c83b5ef6a74ae9.jpg`
+  (French), `5e17036118784d4b9e4adb2c63fbbfc03522994c5dcd972536e35e6ea1addcde.jpg`
   (CJK).
 - Run `backend/validate_non_english_cards.py` against the strong-candidate set for repeatable
   parser results. Latest local run: 123 strong candidates, 615 echoes, 615 passed the parser

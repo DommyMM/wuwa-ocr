@@ -7,7 +7,7 @@ unusually large near-black rectangular runs. In the confirmed edited sample,
 this was the strongest low-false-positive signal.
 
 Usage:
-  py baseline_echo_row_darkness.py ../r2-backup --suspect ../r2-backup/5f71a462cdf52a0d.jpg
+  py baseline_echo_row_darkness.py ../r2-backup --suspect <image>.jpg
 """
 
 from __future__ import annotations

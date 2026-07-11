@@ -13,11 +13,15 @@ import sys
 import os
 import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
 from pathlib import Path
 
 BACKEND_DIR = Path(__file__).parent
 R2_BACKUP   = BACKEND_DIR.parent / "r2-backup"
 MANIFEST    = BACKEND_DIR.parent / "r2-backup-manifest.json"
+SOURCE_IMAGE_MIGRATION_MANIFEST = (
+    BACKEND_DIR.parent / "lb" / "source-image-key-manifest.json"
+)
 DRY_RUN     = "--run" not in sys.argv
 WRITE_MANIFEST = "--manifest" in sys.argv
 
@@ -52,6 +56,31 @@ def local_keys() -> set[str]:
         for path in R2_BACKUP.rglob("*")
         if path.is_file()
     }
+
+
+def load_migration_mtimes() -> dict[str, float]:
+    """Map canonical migration keys to their original legacy upload time."""
+
+    if not SOURCE_IMAGE_MIGRATION_MANIFEST.exists():
+        return {}
+    payload = json.loads(
+        SOURCE_IMAGE_MIGRATION_MANIFEST.read_text(encoding="utf-8")
+    )
+    result: dict[str, float] = {}
+    for entry in payload.get("entries", {}).values():
+        if not isinstance(entry, dict) or entry.get("status") != "verified":
+            continue
+        key = entry.get("newKey")
+        raw_timestamp = entry.get("sourceLastModified")
+        if not isinstance(key, str) or not isinstance(raw_timestamp, str):
+            continue
+        try:
+            result[key] = datetime.fromisoformat(
+                raw_timestamp.replace("Z", "+00:00")
+            ).timestamp()
+        except ValueError:
+            continue
+    return result
 
 
 def main():
@@ -95,6 +124,15 @@ def main():
         for obj in all_objects
     }
     by_key = {obj["Key"]: obj for obj in all_objects}
+    migration_mtimes = load_migration_mtimes()
+    if migration_mtimes:
+        print(
+            "Preserving original timestamps for "
+            f"{len(migration_mtimes)} migrated canonical images"
+        )
+
+    def effective_mtime(key: str) -> float:
+        return migration_mtimes.get(key, by_key[key]["LastModified"].timestamp())
 
     if not DRY_RUN and WRITE_MANIFEST:
         MANIFEST.write_text(json.dumps(manifest, separators=(",", ":"), sort_keys=True), encoding="utf-8")
@@ -125,6 +163,13 @@ def main():
         last_modified = by_key[key]["LastModified"].timestamp()
         os.utime(path, (last_modified, last_modified))
         touched_existing += 1
+    # Apply preserved migration times last. Canonical and legacy local names
+    # may be hard links to one inode, so ordering this pass makes the original
+    # historical timestamp deterministic for both names.
+    for key, last_modified in migration_mtimes.items():
+        path = R2_BACKUP / key
+        if key in existing_keys and path.exists():
+            os.utime(path, (last_modified, last_modified))
     print(f"Updated mtimes for {touched_existing} existing files from R2 metadata")
 
     if not to_download:
@@ -144,7 +189,7 @@ def main():
             destination = R2_BACKUP / key
             destination.parent.mkdir(parents=True, exist_ok=True)
             s3.download_file(bucket, key, str(destination))
-            last_modified = by_key[key]["LastModified"].timestamp()
+            last_modified = effective_mtime(key)
             os.utime(destination, (last_modified, last_modified))
             return idx, key, None
         except Exception as e:

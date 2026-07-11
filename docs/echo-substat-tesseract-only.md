@@ -36,7 +36,8 @@ P(≥1 of 5 echoes hits fallback) ≈ **71% of cards**, which is exactly the gap
 
 ## Root causes of the fallback (diagnosed, not guessed)
 
-Test card `d92aea7866c92d37.jpg` + `diagnose_values.py` made the three failure modes concrete:
+Test card `d92aea7866c92d37b33305491102660e428b501d5b6895dcaf80ebcd46d21a8b.jpg`
+together with `diagnose_values.py` made the three failure modes concrete:
 
 1. **Name wrapping with garbage tails.** Only `Resonance Liberation DMG Bonus` (wraps
    `DMG Bonus`) and `Resonance Skill DMG Bonus` (wraps `Bonus`) ever wrap. The existing

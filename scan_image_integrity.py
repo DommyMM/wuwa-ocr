@@ -10,7 +10,7 @@ It writes a CSV plus JSON review queue. It intentionally does not delete files.
 
 Usage:
   py scan_image_integrity.py ../r2-backup --out ../forensics/integrity_scan
-  py scan_image_integrity.py ../r2-backup/5f71a462cdf52a0d.jpg --out ../forensics/one_image
+  py scan_image_integrity.py <image> --out ../forensics/one_image
   py scan_image_integrity.py suspicious.jpg --baseline ../r2-backup
 """
 

@@ -2,6 +2,7 @@ fastapi
 uvicorn[standard]
 python-multipart
 slowapi
+boto3
 opencv-python-headless
 numpy
 Pillow

@@ -444,7 +444,7 @@ def main() -> int:
         "languages": dict(Counter(row["language"] for row in candidates)),
         "known_samples": {
             name: next((row for row in rows if row["file"].lower() == name.lower()), None)
-            for name in ("f32421ba8b1f3dc0.jpg", "cce1a0f29186891b.jpg", "5e17036118784d4b.jpg")
+            for name in ("")
         },
     }
 
