@@ -1,7 +1,7 @@
 import cv2
 import pytesseract
 import re
-from data import CHARACTER_NAMES, CHARACTER_ID_MAP, WEAPON_NAMES, WEAPON_ID_MAP, MAIN_STAT_NAMES, MAIN_STATS, SUB_STATS, ECHO_SET_IDS, SET_NAME_BY_ID, ECHO_COSTS, ECHO_NAME_MAP, ROVER_GENDER_BY_ID, ROVER_ELEMENT_BY_ID, TEMPLATE_FEATURES, COST_TEMPLATES, Rapid, determine_element
+from data import CHARACTER_NAMES, CHARACTER_ID_MAP, WEAPON_NAMES, WEAPON_ID_MAP, MAIN_STAT_NAMES, MAIN_STATS, SUB_STATS, ECHO_SET_IDS, SET_NAME_BY_ID, ECHO_COSTS, ECHO_NAME_MAP, ROVER_GENDER_BY_ID, ROVER_ELEMENT_BY_ID, ICON_TEMPLATES, TEMPLATE_FEATURES, COST_TEMPLATES, Rapid, determine_element
 import numpy as np
 from rapidfuzz import fuzz, process
 from typing import Tuple
@@ -622,6 +622,45 @@ def validate_echo_family_by_element(
     return chosen, conf_of.get(chosen, best_conf), None
 
 
+# Same-silhouette recolor families (e.g. the six Kernel Puppets) near-tie under
+# SIFT because its descriptors are grayscale gradients, and the badge can't pick
+# a winner when the recolors share a set. Body hue separates them decisively:
+# S>=80/V>=60 drops the shared washed-out silver/gold trim and dark background
+# that dilute the histogram. True recolors score 0.8+ against their own template
+# and <0.35 against siblings, so the floors below only fire on recolor-style
+# ties and leave different-body ties (e.g. Chirpuff vs Gulpuff) to SIFT.
+HUE_ARBITRATION_MIN_SCORE = 0.5
+HUE_ARBITRATION_MIN_MARGIN = 0.2
+
+def _icon_hue_hist(image: np.ndarray):
+    hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+    mask = cv2.inRange(hsv, np.array([0, 80, 60]), np.array([180, 255, 255]))
+    hist = cv2.calcHist([hsv], [0], mask, [36], [0, 180])
+    cv2.normalize(hist, hist)
+    return hist
+
+def arbitrate_by_icon_hue(icon_img: np.ndarray, candidates: list[tuple[str, float]]):
+    """Pick among near-tied SIFT candidates by icon hue-histogram similarity.
+
+    Returns (echo_name, sift_conf, hue_score) when hue is decisive, else None.
+    """
+    query = _icon_hue_hist(icon_img)
+    scored = []
+    for name, conf in candidates:
+        tmpl = ICON_TEMPLATES.get(name)
+        if tmpl is None:
+            continue
+        score = cv2.compareHist(query, _icon_hue_hist(tmpl), cv2.HISTCMP_CORREL)
+        scored.append((score, name, conf))
+    if len(scored) < 2:
+        return None
+    scored.sort(key=lambda x: x[0], reverse=True)
+    best, second = scored[0], scored[1]
+    if best[0] >= HUE_ARBITRATION_MIN_SCORE and (best[0] - second[0]) >= HUE_ARBITRATION_MIN_MARGIN:
+        return best[1], best[2], best[0]
+    return None
+
+
 def _identify_icon_core(image: np.ndarray):
     """SIFT match plus close-match/cost disambiguation before family validation.
 
@@ -667,7 +706,15 @@ def _identify_icon_core(image: np.ndarray):
     # look-alikes across different bodies (e.g. Chirpuff vs Gulpuff). Same-body
     # base/Nightmare confusion is resolved later by validate_echo_family_by_element.
     if len(sorted_matches) > 1 and (best_conf - sorted_matches[1][1]) < 0.1:
-        close_matches = [(name, conf) for name, conf in sorted_matches if conf > 0.1]
+        # Soft images (WebP re-encodes, heavy blur) deflate every confidence, so
+        # a fixed conf > 0.1 floor can leave the pool with a single entry and
+        # skip disambiguation exactly when SIFT is least trustworthy. Keep the
+        # historical floor for healthy images, but on a collapsed scale widen
+        # down to 30% of best: still "similar to best", while keeping noise-level
+        # junk out of the pool — a misread badge must never hand the win to a
+        # candidate SIFT scored at noise level.
+        close_floor = min(0.1, max(best_conf - 0.1, best_conf * 0.3))
+        close_matches = [(name, conf) for name, conf in sorted_matches if conf > close_floor]
         if len(close_matches) >= 2:
             print(f"Close matches detected: {[(n, f'{c:.4f}') for n, c in close_matches]}")
 
@@ -681,10 +728,18 @@ def _identify_icon_core(image: np.ndarray):
                 for name, conf in close_matches
                 if detected_element in ECHO_SET_IDS.get(name, [])
             ]
-            # Only override SIFT when the badge points to exactly one candidate.
+            # A badge pointing to exactly one candidate is decisive on its own.
+            # Otherwise arbitrate the survivors (or all close matches when the
+            # badge decided nothing) by icon hue — decisive for recolor ties.
             if len(element_matches) == 1:
                 best_match, best_conf = element_matches[0]
                 print(f"-> badge {SET_NAME_BY_ID.get(detected_element, detected_element)} -> '{best_match}'")
+            else:
+                pool = element_matches if len(element_matches) >= 2 else close_matches
+                arbitrated = arbitrate_by_icon_hue(icon_img, pool)
+                if arbitrated is not None:
+                    best_match, best_conf, hue_score = arbitrated
+                    print(f"-> icon hue {hue_score:.3f} -> '{best_match}'")
 
     return best_match, best_conf, detected_element, sorted_matches, element_region
 
