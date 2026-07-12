@@ -20,6 +20,11 @@ from pathlib import Path
 BACKEND_DIR = Path(__file__).parent
 R2_BACKUP   = BACKEND_DIR.parent / "r2-backup"
 MANIFEST    = BACKEND_DIR.parent / "r2-backup-manifest.json"
+# Owned entirely by this script (unlike the old migration manifest): canonical
+# objects are content-addressed and never rewritten after creation, so once a
+# key's been checked its result never goes stale. Losing this file just means
+# a full re-sweep next run, never a wrong answer.
+LEGACY_MTIME_CACHE = BACKEND_DIR.parent / "r2-legacy-mtime-cache.json"
 DRY_RUN     = "--run" not in sys.argv
 WRITE_MANIFEST = "--manifest" in sys.argv
 WORKERS     = 32
@@ -64,32 +69,68 @@ def local_keys() -> set[str]:
     }
 
 
+def load_legacy_mtime_cache() -> dict[str, str | None]:
+    if not LEGACY_MTIME_CACHE.exists():
+        return {}
+    try:
+        return json.loads(LEGACY_MTIME_CACHE.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def save_legacy_mtime_cache(cache: dict[str, str | None]) -> None:
+    LEGACY_MTIME_CACHE.write_text(
+        json.dumps(cache, separators=(",", ":"), sort_keys=True), encoding="utf-8"
+    )
+
+
 def fetch_legacy_mtimes(s3, bucket: str, keys: list[str]) -> dict[str, float]:
     """Read each canonical-keyed object's own `legacy-last-modified` metadata
     via HeadObject. Legacy 16-hex-named objects were never given this field
     (they're untouched originals, their own LastModified is already correct),
     so only canonical-shaped keys are worth checking.
+
+    Results are cached locally by key (`None` means confirmed-absent, a real
+    marker not just a missing entry) since the answer can never change once
+    checked. Repeat runs only sweep newly-appeared canonical keys instead of
+    the whole bucket every time.
     """
     canonical_keys = [k for k in keys if CANONICAL_KEY_RE.match(k)]
     if not canonical_keys:
         return {}
 
+    cache = load_legacy_mtime_cache()
+    to_check = [k for k in canonical_keys if k not in cache]
+
     def head(key: str):
         try:
             resp = s3.head_object(Bucket=bucket, Key=key)
-            raw = resp.get("Metadata", {}).get("legacy-last-modified")
-            if not raw:
-                return key, None
-            return key, datetime.fromisoformat(raw.replace("Z", "+00:00")).timestamp()
+            return key, resp.get("Metadata", {}).get("legacy-last-modified") or None, True
         except Exception:
-            return key, None
+            return key, None, False
 
-    print(f"Checking {len(canonical_keys)} canonical objects for original timestamps ...")
+    if to_check:
+        print(
+            f"Checking {len(to_check)} new canonical objects for original timestamps "
+            f"({len(canonical_keys) - len(to_check)} already cached) ..."
+        )
+        with ThreadPoolExecutor(max_workers=WORKERS) as pool:
+            for key, raw, ok in pool.map(head, to_check):
+                if ok:
+                    cache[key] = raw
+        save_legacy_mtime_cache(cache)
+    else:
+        print(f"All {len(canonical_keys)} canonical objects already cached, skipping sweep")
+
     result: dict[str, float] = {}
-    with ThreadPoolExecutor(max_workers=WORKERS) as pool:
-        for key, ts in pool.map(head, canonical_keys):
-            if ts is not None:
-                result[key] = ts
+    for key in canonical_keys:
+        raw = cache.get(key)
+        if not raw:
+            continue
+        try:
+            result[key] = datetime.fromisoformat(raw.replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            continue
 
     if result:
         print(f"Recovered original timestamps for {len(result)} migrated images")

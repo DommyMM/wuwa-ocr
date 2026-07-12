@@ -9,6 +9,7 @@ from concurrent.futures import ProcessPoolExecutor
 from typing import Any, Optional, cast
 from card import process_card
 from r2_storage import ImageIdentity, R2ImageStore, R2Settings, StorageResult, UnsupportedImageType, identify_image
+from issue_reports import MAX_IMAGE_BYTES, handle_issue_report
 import time
 from collections import defaultdict
 import os
@@ -16,6 +17,7 @@ import asyncio
 from contextlib import asynccontextmanager
 import ipaddress
 import inspect
+import hmac
 import sys
 import uuid
 from pathlib import Path
@@ -32,8 +34,8 @@ MAX_WORKERS = int(os.getenv("OCR_WORKERS", "8"))
 OPENCV_THREADS = int(os.getenv("OCR_OPENCV_THREADS", "1"))
 PROCESS_TIMEOUT = int(os.getenv("OCR_TIMEOUT", "60"))
 REQUESTS_PER_MINUTE = int(os.getenv("OCR_RATE_LIMIT", "10"))
+REPORTS_PER_MINUTE = int(os.getenv("OCR_REPORT_RATE_LIMIT", "5"))
 PORT = int(os.getenv("PORT", "5000"))
-MAX_IMAGE_BYTES = 5 * 1024 * 1024
 INTERNAL_API_KEY = os.getenv("INTERNAL_API_KEY", "").strip()
 R2_SETTINGS = R2Settings.from_env()
 r2_image_store = R2ImageStore.disabled(R2_SETTINGS.timeout_seconds)
@@ -61,14 +63,17 @@ def force_restart(reason: str):
     os._exit(1)  # Hard exit that Railway will detect
     
 class RateLimiter:
-    def __init__(self):
+    def __init__(self, requests_per_minute: int):
+        if requests_per_minute <= 0:
+            raise ValueError("requests_per_minute must be positive")
+        self.requests_per_minute = requests_per_minute
         self.requests = defaultdict(list)
 
     def is_allowed(self, ip: str) -> bool:
         now = time.time()
         minute_ago = now - 60
         self.requests[ip] = [req_time for req_time in self.requests[ip] if req_time > minute_ago]
-        if len(self.requests[ip]) < REQUESTS_PER_MINUTE:
+        if len(self.requests[ip]) < self.requests_per_minute:
             self.requests[ip].append(now)
             return True
         return False
@@ -90,7 +95,10 @@ def is_trusted_proxy_request(request: Request) -> bool:
     if not INTERNAL_API_KEY:
         return False
 
-    return request.headers.get("x-internal-key", "").strip() == INTERNAL_API_KEY
+    return hmac.compare_digest(
+        request.headers.get("x-internal-key", "").strip(),
+        INTERNAL_API_KEY,
+    )
 
 def get_rate_limit_identity(request: Request) -> str:
     if is_trusted_proxy_request(request):
@@ -114,8 +122,15 @@ class APIStatus(BaseModel):
                 "image": "multipart file field or raw image body",
             },
             "response": "application/x-ndjson stream with meta, region, and done events",
-        }
+        },
+        "reportOcrIssue": {
+            "path": "/api/report-ocr-issue",
+            "method": "POST",
+            "request": "multipart report JSON plus one confirmed image key or fallback image",
+            "response": "JSON report receipt",
+        },
     }
+
 
 IMPORT_REGIONS: dict[str, dict[str, float]] = {
     "character": {"x1": 0.0000, "x2": 0.3200, "y1": 0.0000, "y2": 0.5500},
@@ -243,7 +258,8 @@ executor = ProcessPoolExecutor(
     max_workers=MAX_WORKERS,
     initializer=worker_init
 )
-rate_limiter = RateLimiter()
+rate_limiter = RateLimiter(REQUESTS_PER_MINUTE)
+report_rate_limiter = RateLimiter(REPORTS_PER_MINUTE)
 
 app.add_middleware(
     CORSMiddleware,
@@ -255,7 +271,27 @@ app.add_middleware(
 
 @app.middleware("http")
 async def rate_limit_middleware(request: Request, call_next):
-    if request.url.path == "/api/ocr":
+    if request.url.path == "/api/report-ocr-issue":
+        if INTERNAL_API_KEY and not is_trusted_proxy_request(request):
+            return JSONResponse(
+                status_code=403,
+                content={
+                    "success": False,
+                    "reason": "Report endpoint requires the trusted gateway.",
+                },
+            )
+
+        rate_limit_identity = get_rate_limit_identity(request)
+        if not report_rate_limiter.is_allowed(rate_limit_identity):
+            return JSONResponse(
+                status_code=429,
+                content={
+                    "success": False,
+                    "reason": "Too many issue reports. Please try again later.",
+                },
+                headers={"Retry-After": "60"},
+            )
+    elif request.url.path == "/api/ocr":
         rate_limit_identity = get_rate_limit_identity(request)
         if not rate_limiter.is_allowed(rate_limit_identity):
             return JSONResponse(
@@ -296,6 +332,11 @@ async def read_upload_image_bytes(request: Request) -> bytes:
         )
 
     return image_bytes
+
+
+@app.post("/api/report-ocr-issue")
+async def report_ocr_issue(request: Request):
+    return await handle_issue_report(request, r2_image_store)
 
 def ndjson_event(payload: dict[str, Any]) -> str:
     return json.dumps(payload, separators=(",", ":"), ensure_ascii=False) + "\n"

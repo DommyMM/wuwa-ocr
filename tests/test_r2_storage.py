@@ -11,6 +11,7 @@ from botocore.exceptions import ClientError
 from r2_storage import (
     R2ConfigurationError,
     R2ImageStore,
+    R2OperationTimeout,
     R2Settings,
     UnsupportedImageType,
     identify_image,
@@ -90,6 +91,16 @@ class SlowMissingClient(FakeClient):
         return super().head_object(**kwargs)
 
 
+class SlowPutClient(FakeClient):
+    def __init__(self, delay: float):
+        super().__init__()
+        self.delay = delay
+
+    def put_object(self, **kwargs):
+        time.sleep(self.delay)
+        return super().put_object(**kwargs)
+
+
 class ConcurrentWriterClient(FakeClient):
     def __init__(self, image_bytes: bytes, digest: str):
         super().__init__()
@@ -154,6 +165,39 @@ class SettingsTests(unittest.TestCase):
 
 
 class R2ImageStoreTests(unittest.IsolatedAsyncioTestCase):
+    async def test_json_report_is_created_without_overwrite(self):
+        client = FakeClient()
+        store = R2ImageStore(enabled_settings(), client=client)
+        body = b'{"schemaVersion":1}'
+
+        await store.put_json_object("reports/2026/07/11/report.json", body)
+
+        self.assertEqual(client.put_calls, [{
+            "Bucket": "bucket",
+            "Key": "reports/2026/07/11/report.json",
+            "Body": body,
+            "ContentType": "application/json; charset=utf-8",
+            "IfNoneMatch": "*",
+        }])
+
+    async def test_json_report_write_uses_the_r2_deadline(self):
+        store = R2ImageStore(
+            enabled_settings(timeout=0.01),
+            client=SlowPutClient(delay=0.08),
+        )
+        started = time.perf_counter()
+
+        with self.assertRaises(R2OperationTimeout):
+            await store.put_json_object("reports/report.json", b"{}")
+
+        self.assertLess(time.perf_counter() - started, 0.06)
+
+    async def test_disabled_store_rejects_report_operations(self):
+        store = R2ImageStore.disabled()
+
+        with self.assertRaises(R2ConfigurationError):
+            await store.put_json_object("reports/report.json", b"{}")
+
     async def test_missing_object_uploads_exact_bytes_and_checksum(self):
         client = FakeClient(head_error=missing_object_error())
         store = R2ImageStore(enabled_settings(), client=client)

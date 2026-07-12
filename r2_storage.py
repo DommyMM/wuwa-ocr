@@ -39,6 +39,10 @@ class ExistingObjectMismatch(RuntimeError):
     """Raised if a content-addressed key exists with an impossible size mismatch."""
 
 
+class R2OperationTimeout(TimeoutError):
+    """Raised when an auxiliary R2 operation exceeds the configured deadline."""
+
+
 @dataclass(frozen=True)
 class ImageIdentity:
     digest_hex: str
@@ -232,13 +236,38 @@ class R2ImageStore:
                 error_code=_error_code(exc),
             )
 
+    async def put_json_object(self, key: str, body: bytes) -> None:
+        """Create one JSON object without overwriting an existing report."""
+
+        self._require_client()
+        try:
+            await asyncio.wait_for(
+                asyncio.to_thread(self._put_json_object_sync, key, body),
+                timeout=self.settings.timeout_seconds,
+            )
+        except TimeoutError as exc:
+            raise R2OperationTimeout("R2 report write timed out") from exc
+
+    def _require_client(self) -> None:
+        if not self.settings.enabled or self._client is None:
+            raise R2ConfigurationError("R2 client is not configured")
+
+    def _put_json_object_sync(self, key: str, body: bytes) -> None:
+        self._require_client()
+        self._client.put_object(
+            Bucket=self.settings.bucket_name,
+            Key=key,
+            Body=body,
+            ContentType="application/json; charset=utf-8",
+            IfNoneMatch="*",
+        )
+
     def _store_sync(
         self,
         image_bytes: bytes,
         identity: ImageIdentity,
     ) -> Literal["stored", "already_present"]:
-        if self._client is None:
-            raise R2ConfigurationError("R2 client is not configured")
+        self._require_client()
 
         try:
             existing = self._client.head_object(

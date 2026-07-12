@@ -68,6 +68,49 @@ The final `storage.result` is one of:
 Every event includes the same `scanId`, which can be passed to downstream build
 submission and used to correlate frontend, OCR, and leaderboard logs.
 
+### `POST /api/report-ocr-issue`
+
+Persist one import issue report and attach it to the original training image.
+The request must be `multipart/form-data` with:
+
+- one `report` text field containing at most 256 KiB of JSON; and
+- an image source: either a canonical `trainingImageKey` inside the report JSON
+  or one `image` file containing at most 5 MiB of original JPEG/PNG bytes.
+
+The normal path uses the `trainingImageKey` from the final OCR `done` event and
+does not send the image again. That key was minted and stored by this service,
+so it is taken at face value rather than re-confirmed with an extra R2 HEAD.
+When OCR could not return a key, the fallback sends the original file once; the
+service derives the same content-addressed key and reuses an object that already
+exists before attempting a write. If both are supplied, the key wins.
+
+```text
+report={"schemaVersion":1,"route":"/import","reason":"manual_report",...}
+image=<optional fallback file>
+```
+
+`reason` must be `illegal_echo`, `ocr_error`, `validation_error`, or
+`manual_report`, and `route` must be `/import`. `scanId` may be null when a
+network or gateway failure happened before the first OCR event; otherwise it
+must be a canonical UUID. Non-canonical image keys are rejected, because a key
+becomes an R2 object name.
+
+Validation deliberately stops there. A report is diagnostic material, so unknown
+fields and unrecognized `progress` regions are stored rather than rejected: a
+report about an unexpected client state is exactly the report worth keeping, and
+a 400 would discard it at the moment it is most useful.
+
+A successful response is `201 application/json`:
+
+```json
+{"success":true,"reportId":"870de1eb-eed6-49cb-9f75-ce4b23bedca3","reportKey":"reports/2026/07/11/870de1eb-eed6-49cb-9f75-ce4b23bedca3.json","trainingImageKey":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.jpg","imageStorage":"referenced"}
+```
+
+`imageStorage` is `referenced`, `stored`, or `already_present`. Error responses
+use the stable shape `{"success":false,"reason":"..."}` and never include R2
+or credential details. When `INTERNAL_API_KEY` is configured, this write route
+only accepts requests from the trusted gateway.
+
 ## R2 image persistence
 
 Only JPEG and PNG inputs are accepted, determined from file magic rather than
@@ -94,9 +137,10 @@ recognition, and only the final NDJSON event waits for its bounded result.
 | Variable | Default | Description |
 |---|---|---|
 | `PORT` | `5000` | HTTP listen port |
-| `INTERNAL_API_KEY` | — | Trusted proxy key (Railway → OCR); skips per-IP rate limiting and uses forwarded client IP |
+| `INTERNAL_API_KEY` | — | Trusted proxy key (gateway → OCR); selects the forwarded client IP and is required by the issue-report write route when configured. |
 | `OCR_WORKERS` | `8` | `ProcessPoolExecutor` size — parallel Tesseract processes. Match to CPU thread count locally (e.g. `16` for 7800X3D). Railway is capped at `8` vCPU. |
 | `OCR_RATE_LIMIT` | `10` | Requests per minute per IP. Set to `10000` locally to disable effective limiting during batch import. |
+| `OCR_REPORT_RATE_LIMIT` | `5` | Issue reports per minute per client IP. Independent of OCR admission. |
 | `OCR_TIMEOUT` | `60` | Seconds before a single OCR request times out. |
 | `OCR_OPENCV_THREADS` | `1` | Per-worker `cv2.setNumThreads` value. |
 | `OCR_R2_UPLOAD_ENABLED` | `0` | Enable backend-owned R2 persistence. Accepts `1/0`, `true/false`, `yes/no`, or `on/off`. |
@@ -111,8 +155,11 @@ recognition, and only the final NDJSON event waits for its bounded result.
 
 ## Limits and Errors
 
-- Rate limit: `OCR_RATE_LIMIT` requests/minute per IP (default `10`)
+- OCR rate limit: `OCR_RATE_LIMIT` requests/minute per IP (default `10`)
+- Issue-report rate limit: `OCR_REPORT_RATE_LIMIT` requests/minute per IP (default `5`)
 - Image body: at most 5 MiB after multipart extraction
+- Issue-report metadata: at most 256 KiB; fallback image at most 5 MiB; full
+  multipart envelope at most 5,570,560 bytes
 - Timeout: `OCR_TIMEOUT` per OCR request (default `60s`)
 - Common statuses:
   - `400` invalid image/region/request
@@ -121,7 +168,8 @@ recognition, and only the final NDJSON event waits for its bounded result.
   - `500` internal server error
 
 Use an R2 token scoped to the destination bucket with Object Read & Write
-permission: the service needs `HEAD` for deduplication and `PUT` for new bytes.
+permission: the service needs `HEAD` for image deduplication and `PUT` for new
+image and report objects.
 When R2 upload is enabled, startup fails fast if any required setting is absent
 or the timeout value is invalid. Do not expose these credentials to the browser.
 
