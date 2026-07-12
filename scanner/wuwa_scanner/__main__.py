@@ -1,122 +1,73 @@
-"""Phase-1 scanner: process a single screenshot of the Echo bag detail panel.
+"""CLI over a captured bag frame.
 
-Usage:
-    py -m wuwa_scanner <image_path>
+    py -m wuwa_scanner census <frame>   # identify every visible tile, no clicking
+    py -m wuwa_scanner echo <frame>     # the selected tile + its substats
 
-Prints a JSON record of the currently-selected echo (right detail panel).
-Phase-2 will add live capture; Phase-3 the click/scroll loop.
-
-Pipeline (chosen per bench_ocr.py results):
-  echo_name_cost  → Tesseract (cleaner +25 / COST extraction than RapidOCR)
-  echo_stats      → RapidOCR  (7/7 across screenshots, ~300ms warm)
-  echo_icon       → cost-filtered SIFT against backend/Data/Echoes/
-  echo_element    → backend/data.py determine_element (HSV + SIFT fallback)
+Both take a full-screen Echo-bag capture (16:9). Live capture and navigation are
+Phase 1 / Phase 2.
 """
 from __future__ import annotations
 
 import json
 import sys
+from dataclasses import asdict
 from pathlib import Path
 
 import cv2
-from rapidfuzz import fuzz, process
+import numpy as np
 
-# scanner/ on path so the package is importable; backend/ on path for `data`.
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from wuwa_scanner.layout import REGIONS, proportional_crop  # noqa: E402
-from wuwa_scanner.extract.name import parse_name_cost  # noqa: E402
-from wuwa_scanner.extract.stats import parse_stats  # noqa: E402
-from wuwa_scanner.identify.sift import identify_echo, is_confident  # noqa: E402
-from wuwa_scanner.identify.element import classify_element  # noqa: E402
-
-import data  # noqa: E402
+from wuwa_scanner import grid, layout as L, ocr, panel  # noqa: E402
 
 
-def _lookup_id_by_name(name: str) -> tuple[str | None, str | None, float]:
-    """Fuzzy-match `name` against ECHO_NAME_MAP. Returns (id, matched_name, score)."""
-    if not name:
-        return None, None, 0.0
-    inverse = {v: k for k, v in data.ECHO_NAME_MAP.items()}
-    res = process.extractOne(name, list(inverse.keys()), scorer=fuzz.WRatio)
-    if not res:
-        return None, None, 0.0
-    matched, score, _ = res
-    if score < 70:
-        return None, matched, score
-    return inverse[matched], matched, score
-
-
-def scan_panel(image_path: str) -> dict:
-    img = cv2.imread(image_path)
+def _load(path: str) -> np.ndarray:
+    img = cv2.imdecode(np.fromfile(path, dtype=np.uint8), cv2.IMREAD_COLOR)
     if img is None:
-        raise SystemExit(f"could not read {image_path}")
-    h, w = img.shape[:2]
+        raise SystemExit(f"could not read {path}")
+    return img
 
-    name_crop = proportional_crop(img, REGIONS["echo_name_cost"])
-    icon_crop = proportional_crop(img, REGIONS["echo_icon"])
-    element_crop = proportional_crop(img, REGIONS["echo_element"])
-    stats_crop = proportional_crop(img, REGIONS["echo_stats"])
 
-    name_read = parse_name_cost(name_crop)
-    ocr_id, ocr_matched_name, ocr_score = _lookup_id_by_name(name_read.name or "")
+def cmd_census(path: str) -> None:
+    img = _load(path)
+    lat = grid.detect_lattice(img)
+    if not lat["row_tops"]:
+        raise SystemExit("no grid rows detected (is this the Echo bag screen?)")
 
-    sift_name, sift_id, sift_conf, ranked = identify_echo(
-        icon_crop, cost_filter=name_read.cost
-    )
-    sift_confident = is_confident(ranked, ratio_floor=2.0)
+    tiles = []
+    for r in range(len(lat["row_tops"])):
+        for c in range(L.GRID_COLS):
+            box = grid.tile_box(lat, r, c)
+            t = panel.read_tile(img, box)
+            t.update(row=r, col=c, selected=grid.is_selected(img, box))
+            tiles.append(t)
 
-    # OCR drives identity (only signal that captures Phantom/Nightmare prefix).
-    # SIFT is corroboration; falls in as fallback only if OCR didn't resolve.
-    if ocr_id:
-        canonical_id, canonical_name, id_source = ocr_id, ocr_matched_name, "ocr"
-    elif sift_id:
-        canonical_id, canonical_name, id_source = sift_id, sift_name, "sift"
-    else:
-        canonical_id, canonical_name, id_source = None, name_read.name, "none"
+    print(json.dumps({
+        "source": path,
+        "resolution": [img.shape[1], img.shape[0]],
+        "rows_detected": len(lat["row_tops"]),
+        "tiles": tiles,
+    }, indent=2))
 
-    set_id = classify_element(element_crop, canonical_id) if canonical_id else None
-    if canonical_id and set_id is not None and set_id not in data.ECHO_SET_IDS.get(canonical_id, []):
-        set_id = None
-    element = data.SET_NAME_BY_ID.get(set_id) if set_id is not None else None
 
-    parsed_stats = parse_stats(stats_crop)
-    main_stat = parsed_stats[0] if parsed_stats else None
-    sub_stats = parsed_stats[1:] if len(parsed_stats) > 1 else []
-
-    return {
-        "source": image_path,
-        "resolution": [w, h],
-        "id": canonical_id,
-        "name": canonical_name,
-        "phantom": name_read.phantom,
-        "cost": name_read.cost,
-        "level": name_read.level,
-        "element": element,
-        "setId": set_id,
-        "main_stat": main_stat,
-        "sub_stats": sub_stats,
-        "confidence": {
-            "id_source": id_source,
-            "ocr_name_score": round(ocr_score, 1),
-            "sift_score": round(sift_conf, 4),
-            "sift_id": sift_id,
-            "sift_confident": sift_confident,
-            "ocr_vs_sift_agree": bool(canonical_id and sift_id and canonical_id == sift_id),
-        },
-        "raw": {
-            "name_ocr": name_read.raw_name_line,
-        },
-    }
+def cmd_echo(path: str) -> None:
+    img = _load(path)
+    lat = grid.detect_lattice(img)
+    sel = grid.find_selected(img, lat)
+    if sel is None:
+        raise SystemExit("no selected tile found (gold corner bezels)")
+    r, c, box = sel
+    rec = asdict(panel.read_echo(img, box, ocr.default_reader()))
+    rec["tile"] = {"row": r, "col": c}
+    rec["source"] = path
+    print(json.dumps(rec, indent=2, default=str))
 
 
 def main() -> None:
-    if len(sys.argv) < 2:
-        print("usage: py -m wuwa_scanner <image_path>", file=sys.stderr)
+    if len(sys.argv) < 3 or sys.argv[1] not in ("census", "echo"):
+        print(__doc__, file=sys.stderr)
         sys.exit(1)
-    record = scan_panel(sys.argv[1])
-    print(json.dumps(record, indent=2, default=str))
+    {"census": cmd_census, "echo": cmd_echo}[sys.argv[1]](sys.argv[2])
 
 
 if __name__ == "__main__":
