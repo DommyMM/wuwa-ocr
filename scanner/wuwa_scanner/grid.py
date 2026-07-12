@@ -123,7 +123,20 @@ def detect_lattice(frame: np.ndarray) -> dict:
 
 
 def tile_box(lattice: dict, row_idx: int, col: int) -> tuple[float, float, float, float] | None:
-    """Proportional box of a tile, using this frame's DETECTED row offset."""
+    """Proportional box of a tile, using this frame's DETECTED row offset.
+
+    The UNSELECTED box is used for every tile, including the selected one, and that is a
+    measured decision rather than an oversight. The selected tile really is bigger (345x425
+    vs 325x392), but it does NOT grow about its centre: hand measurements put it at (330,
+    250) against an unselected column origin of 334, a 4 px x-shift where centred growth
+    would demand 10. Re-boxing the selected tile on a centred model therefore OVERCROPS it,
+    and measurably: identity margin fell 0.367 -> 0.130 and 0.142 -> 0.009 on the two
+    selected tiles we have. The unselected box reads them correctly (cost included), because
+    the 292x292 art is tolerant of a ~10 px shift.
+
+    If a selected-tile model is ever needed, RE-MEASURE the anchor first -- do not derive it
+    from the size delta.
+    """
     rows = lattice["row_tops"]
     if not (0 <= row_idx < len(rows)):
         return None

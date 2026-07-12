@@ -43,11 +43,14 @@ def _b(x: int, y: int, w: int, h: int) -> tuple[float, float, float, float]:
 GRID_COLS = 6
 GRID_ROWS_VISIBLE = 3
 
-# The SELECTED tile is physically LARGER: 345x425 vs 325x392, i.e. it scales up
-# ~6% about its centre. Measuring the selected tile and applying it to all of them
-# is a ~15%-of-a-tile error. TILE_* below is the UNSELECTED (normal) tile.
+# The SELECTED tile is physically LARGER: 345x425 vs 325x392. But it does NOT scale about
+# its centre -- hand measurements put it at (330, 250) against an unselected column origin
+# of 334, a 4 px x-shift where centred growth would demand 10. So TILE_SEL_* is recorded,
+# not used: re-boxing the selected tile on a centred model OVERCROPS it and measurably hurt
+# (identity margin 0.367 -> 0.130, 0.142 -> 0.009). grid.tile_box() reads every tile with
+# the unselected box, and the 292x292 art absorbs the shift. See grid.tile_box.
 TILE_W, TILE_H = 325 / REF_W, 392 / REF_H
-TILE_SEL_W, TILE_SEL_H = 345 / REF_W, 425 / REF_H
+TILE_SEL_W, TILE_SEL_H = 345 / REF_W, 425 / REF_H   # recorded; needs a re-measured ANCHOR
 
 TILE_ORIGIN = (334 / REF_W, 266 / REF_H)      # top-left of unselected tile (0, 0)
 TILE_PITCH_X = 353.2 / REF_W                  # (2100 - 334) / 5
@@ -61,6 +64,10 @@ TILE_PITCH_Y = 423.0 / REF_H
 # within 2 px. An earlier hand estimate of 440 was wrong; two independent detectors
 # (Sobel edge projection, gold-bar projection) both measured ~424.
 
+# --- Hand-measured, NOT YET WIRED --------------------------------------------
+# Everything under this marker is Photoshop-measured calibration with no reader behind
+# it. It is kept because re-deriving it is manual work, not because it is validated.
+# Treat as a starting point and re-check on first use.
 COUNTER = _b(400, 105, 400, 70)               # "1437/3000" - scan completeness check
 SORT_CONTROL = _b(540, 1935, 700, 90)         # "Sort by Level"
 
@@ -92,23 +99,6 @@ TILE_COST = (241 / _TW, 227 / _TH, (241 + 56) / _TW, (227 + 64) / _TH)
 # border ring by brightness does NOT work - several echoes have bright golden
 # artwork that outscores the real selection ring.
 TILE_CORNER_FRAC = 0.18
-
-
-def tile_box(row: int, col: int, selected: bool = False) -> tuple[float, float, float, float]:
-    """Proportional box of grid tile (row, col) AT SCROLL-TOP.
-
-    Prefer grid.tile_box(lattice, ...) which uses the frame's detected row offset.
-    """
-    w, h = (TILE_SEL_W, TILE_SEL_H) if selected else (TILE_W, TILE_H)
-    x0 = TILE_ORIGIN[0] + col * TILE_PITCH_X - (w - TILE_W) / 2
-    y0 = TILE_ORIGIN[1] + row * TILE_PITCH_Y - (h - TILE_H) / 2
-    return (x0, y0, x0 + w, y0 + h)
-
-
-def tile_center(row: int, col: int) -> tuple[float, float]:
-    """Proportional click target. Tiles are 325x392, so this has enormous margin."""
-    x0, y0, x1, y1 = tile_box(row, col)
-    return ((x0 + x1) / 2, (y0 + y1) / 2)
 
 
 def sub_box(box, frac) -> tuple[float, float, float, float]:
@@ -164,20 +154,3 @@ def crop(img, box: tuple[float, float, float, float]):
     h, w = img.shape[:2]
     x0, y0, x1, y1 = box
     return img[int(y0 * h):int(y1 * h), int(x0 * w):int(x1 * w)]
-
-
-# Back-compat for the old Phase-1 CLI. The pre-2026-07 bounds were calibrated
-# against a reference set that no longer exists, but they were NOT all wrong:
-# the old element badge (2791, 396, 60x60) lands within 1 px of the measured
-# sonata badge, and the old stats block x/width match exactly. The echo_icon box
-# was the genuinely wrong one (it cropped only the right slice of the art).
-REGIONS: dict[str, tuple[float, float, float, float]] = {
-    "echo_name_cost": PANEL_NAME,
-    "echo_icon": PANEL_ART,
-    "echo_element": PANEL_SET,
-    "echo_stats": PANEL_STATS,
-}
-
-
-def proportional_crop(img, bounds):
-    return crop(img, bounds)

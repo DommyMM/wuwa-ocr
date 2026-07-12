@@ -7,14 +7,16 @@ Architecture and the boundary with `backend/` live in [AGENTS.md](AGENTS.md). Th
 tracks **direction, decisions, and measured evidence**.
 
 > **Status (2026-07-12):** recognition core **complete and validated**. Navigation is not
-> built. Everything below is measured on 3 labelled 4K captures and one fully
-> hand-labelled 24-tile grid page.
+> built. Everything below is measured on 3 labelled 4K captures, one fully hand-labelled
+> 24-tile grid page, and a second page carrying the hard Nightmare families.
 
 | component | result |
 |---|---|
-| echo identity from the tile (no click) | **24/24** @ 2.7 ms/tile (65 ms per page) |
+| echo identity from the tile (no click) | **24/24** @ 1.8 ms/tile (42 ms per page) |
+| sonata set from the tile | **24/24** |
 | stat icons in the panel | **21/21** |
 | substat values | **15/15** |
+| hard Nightmare families (Crownless, Thundering Mephis, Feilian Beringal) | **5/5**, hand-confirmed in game |
 | grid row lattice | exact; recovers all rows from partial detections |
 | tile selection (gold corners) | **3/3** |
 
@@ -71,12 +73,50 @@ one.
 
 | field | method | evidence |
 |---|---|---|
-| **echo identity** | Sobel-gradient NCC vs `Data/Echoes`, hue arbitration on near-ties, cost prefilter | **24/24**, 2.7 ms |
+| **echo identity** | cost prefilter → gradient NCC + hue → family-scoped badge | **24/24**, 1.8 ms |
+| **sonata set** | badge, scoped to the identified echo's family | **24/24**, 0.66 ms |
 | stat names | 17-class icon mask IoU | 21/21, IoU 0.78–0.94 |
 | substat values | digits only, snapped to the legal set | 15/15 |
 | main + innate | derived from `(cost, stat, level)` | never OCR'd |
 | grid rows | gold-bar projection + lattice fit | exact |
 | selection | gold **corner** bezels | 3/3 |
+
+### The ordering is the design: identity → badge, not badge → identity
+
+`card.py` runs **badge → identity**: its SIFT descriptors are grayscale gradients, which
+literally cannot see a recolor, so it needs an outside signal to fix identity. Copying that
+here would have made us *worse*. Our gradient matcher is the strong signal and the tile
+badge is the weak one:
+
+```
+blind 34-way badge sweep    15/18    4.8 ms
+scoped to the family        18/18    0.66 ms   (avg 1.8 candidates, not 34)
+```
+
+And the blind errors are the poisonous kind — it read Fleurdelys as **QuietSnow**, a set
+Fleurdelys cannot even roll. As a hard prefilter that would have deleted the true echo from
+its own candidate pool. So the dependency is **inverted**: identity leads, and that collapses
+the badge's job from 34 candidates to 1.8. Fewer comparisons *is* the accuracy win — the ~32
+candidates it drops are precisely the ones that generated every error.
+
+A third of echoes have exactly one legal set, so `determine_element` short-circuits and
+touches **no pixels at all** (0.001 ms). 74% are a 1-or-2-way call.
+
+### Three signals, and no family is blind to all three
+
+Scoring every Nightmare pair template-against-template makes the coverage structural rather
+than lucky (high = the two look alike = hard):
+
+| family | gradient | hue | badge |
+|---|---|---|---|
+| Viridblaze, Baby Viridblaze, Dwarf Cassowary, Baby Roseshroom | blind (0.86–0.96) | blind (0.91–0.94) | **carries it** |
+| Crownless, Thundering Mephis, Inferno Rider | **carries it** (0.06–0.30) | mixed | mute (sets identical to base) |
+| Feilian Beringal | blind (0.937) | **carries it alone** (−0.106) | mute (sets identical to base) |
+
+Four families have sets **identical** to their base, so the badge is mute and `card.py` bails
+outright (`if len(family_set_ids) < 2: return unchanged`). That is its known blind spot, and
+gradient or hue covers every one of them. All five hard tiles — including two Phantom
+Nightmare Crownless and a Nightmare Feilian Beringal — were confirmed correct in game.
 
 ### Why gradient, not grayscale
 
@@ -87,23 +127,61 @@ creature has strong edges, so gradient matching is background-invariant: **3/3**
 
 ### Why hue arbitration
 
-Gradient matching is background-invariant *because it discards colour*, so
-same-silhouette bodies collapse into a near-tie: `Reminiscence: Fleurdelys` lost to
-`Reminiscence: Threnodian - Leviathan` by **0.008**. One is blue/white, the other purple.
-Hue separates them decisively. This is a direct port of `card.py::arbitrate_by_icon_hue`,
-which exists for exactly the same reason. It fired on precisely the 2 near-ties in 24 and
-took the page to **24/24**.
+Gradient is background-invariant *because it discards colour*, so same-silhouette bodies
+collapse into a near-tie: `Reminiscence: Fleurdelys` lost to `Leviathan` by **0.008**. Hue
+separates them decisively — a direct port of `card.py::arbitrate_by_icon_hue`.
+
+When gradient cannot separate the top two **and** hue abstains, the answer is a coin flip
+and `tile.census` says so. That abstain is what surfaced all five hard tiles instead of
+quietly guessing at them.
+
+### Why cost prefilters despite proving nothing on its own
+
+Cost can never separate a Nightmare (variants always share their base's cost), and the speed
+it buys is irrelevant against a 150–250 ms click. It was demoted to a validator on exactly
+that reasoning — and then reinstated, because a washed-out **Phantom Feilian Beringal**
+matched **"Zip Zap"**, a cost-1 echo from an unrelated family. The phantom shimmer flattens
+the very edges gradient depends on, so every score collapsed into noise (top 0.105, top-6
+smeared across 0.105–0.075). Filtering to cost 4 puts the Feilian pair back at ranks 1 and 2.
+Speed was never the argument; recovering a dead signal is.
+
+It is safe because it **abstains rather than guesses** — an unknown cost means the full
+sweep, so a missed badge can never drop the true echo. It is the *only* step permitted to
+remove a candidate.
 
 ### Phantom / Nightmare / Reminiscence
 
-- **Phantom** shares the base echo's canonical id (no `Phantom:` entry in `Echoes.json`),
-  and at tile scale the art is indistinguishable from the base. So matching a Phantom to
-  its base id is the **correct identity answer** — all 3 Phantoms in the test page passed.
-  Detecting the phantom **flag** is a separate problem and needs phantom icon templates we
-  do not have. *(Open: download the phantom skins as templates.)*
-- **Nightmare** echoes have their own ids and templates: a normal identity problem. Both
-  in the test page passed.
-- **Reminiscence** is part of the official name, not a prefix family.
+- **Phantom** shares the base echo's canonical id (no `Phantom:` entry in `Echoes.json`), so
+  matching a Phantom to its base id is the **correct answer**, and the flag is cosmetic —
+  same cost, same legal sets, same stat pools — so we do not detect it. Measured, not
+  assumed: hue-vs-own-template scores a Phantom Fallacy **0.151** and its non-phantom twin
+  **0.191**. No separation; the tile art is genuinely identical.
+
+  The phantom **art** still matters, and this is the subtle part. A Phantom is a *recolor*,
+  so its hue shifts away from the base template — and Feilian Beringal is separated from its
+  Nightmare by **hue alone**. Comparing a phantom's shifted hue against non-phantom templates
+  is precisely how a Phantom base flips to a Nightmare. So `Data/EchoPhantoms/` (38 skins) is
+  loaded as a **second template under the same id**, scored best-of-variants. This removes
+  the trap instead of detecting it, and it buys real margin:
+
+  | tile | margin before | after |
+  |---|---:|---:|
+  | Phantom: Nightmare Crownless | 0.039 | **0.142** |
+  | Phantom Reactor Husk | 0.104 | **0.447** |
+  | Phantom Fallacy | 0.222 | **0.537** |
+
+- **Nightmare** echoes have their own ids and templates. See the coverage table above.
+- **Reminiscence** is part of the official name, **not** a prefix family. `_family_key` must
+  strip only `Nightmare:` — stripping `Reminiscence:` too would merge
+  `Reminiscence: Kronaclaw` with a future base `Kronaclaw` and let the badge flip between two
+  genuinely different echoes.
+
+### Duplicates are not a problem
+
+Row × column **is** the identity. Two Fleurdelys in different cells are two echoes, and if
+they carry identical substats they are *still* two echoes. Never dedupe scanner output by
+content — key it by cell. (This concern was imported from the leaderboard, where it belongs;
+here it does not.)
 
 ---
 
@@ -137,7 +215,8 @@ Three traps, each of which changed the ranking:
 
 | | per echo |
 |---|---:|
-| tile identity | ~2.7 ms |
+| tile identity (cost-prefiltered) | ~1.8 ms |
+| sonata badge (family-scoped) | ~0.4 ms |
 | stat icons | ~1.5 ms |
 | 5 substat values (WinRT) | ~24 ms |
 | **recognition total** | **~28 ms** |
@@ -242,14 +321,37 @@ Decide **before** writing the navigation loop and GUI.
   is why it ships first.
 - **UI patches move the layout.** Mitigated by self-location + loud abstain, not by
   precise constants.
-- **Sample size.** 3 echoes and 1 grid page. Strong, but not validation. Every claim above
-  should be re-checked against more captures — especially a cost-1 echo, an under-levelled
-  echo with <5 substats, a 1920×1080 frame, and a non-English client.
+- **Sample size.** 3 echoes and 2 grid pages, one 4K resolution, one client language. Strong,
+  but not validation. Specifically untested: **cost 1** (85 of 180 echoes), an under-levelled
+  echo with <5 substats, 1920×1080, and a non-English client.
+- **Thin margins on the hard families.** Crownless, Thundering Mephis and Feilian Beringal all
+  resolve correctly but by 0.01–0.06, and hue abstains on them because the phantom shimmer
+  desaturates the art hue depends on. They are flagged, not silent — but they are one UI
+  patch away from flipping, and the abstain floors (`HUE_MIN_SCORE` / `HUE_MIN_MARGIN`,
+  inherited from `card.py` where the crops are cleaner) have never been tuned for tile scale.
 
 ### Bugs the bench caught (all structural, all silent)
 
-Seven, and every one was found by measurement rather than reasoning. This is why the
+Ten, and every one was found by measurement rather than reasoning. This is why the
 design fails loud.
+
+Three of them are the same mistake in different costumes — **a confident number that was
+never actually measuring the thing it claimed to.** Worth internalizing:
+
+8. **The cost box was fitted on a page where every tile was cost 4.** "Reads 4" is then
+   satisfiable by a box sitting on blank background that merely correlates with the `4`
+   glyph — which is exactly what the sweep found. It scored a proud **18/18**, then went
+   **0/6** on the first cost-3 row it met. Refit on a mixed-cost frame: 36/36. *Any refit
+   must span at least two costs.*
+9. **Tile-native cost templates scored higher and were more wrong.** Cropped from a tile,
+   a template carries the artwork *behind* the digit, so it correlates on the creature:
+   **0.715 mean score, 21/36 correct.** `card.py`'s clean glyph templates score **0.127**
+   and are **36/36**. Gate on the margin between the top two, never on absolute score.
+10. **Re-boxing the selected tile on a centred-growth model overcropped it.** The selected
+    tile *is* bigger (345×425 vs 325×392) but does not grow about its centre — measured at
+    (330, 250) against a column origin of 334, a 4 px shift where centred growth demands 10.
+    "Fixing" it dropped identity margins 0.367 → 0.130 and 0.142 → 0.009. The unselected box
+    reads every tile correctly; the 292×292 art absorbs the shift.
 
 1. Row bands took height from the icon **blob extent**; the Heavy Attack glyph's faint
    chevrons fall below Otsu, so its band came out 42 px vs ~57 and clipped the value.
@@ -276,11 +378,17 @@ design fails loud.
 
 | file | what it does |
 |---|---|
-| `bench_census.py` | **regression**: identity over a full 24-tile labelled grid page → 24/24 |
+| `bench_census.py` | **regression**: identity + sonata over a 24-tile labelled page → 24/24, 24/24 |
 | `validate_e2e.py` | **regression**: stat icons + substat values vs gold labels → 21/21, 15/15 |
 | `bench_values.py` | OCR engine shoot-out on substat value cells |
 | `engines.py` | uniform wrappers: Tesseract, RapidOCR 1.x/3.x, Paddle, EasyOCR, OneOCR, WinRT |
 | `fetch_stat_icons.py` | download the 17 stat icons into `Data/Stats/` |
+| `fetch_phantom_icons.py` | download the 38 phantom skins into `Data/EchoPhantoms/` |
+
+`fetch_phantom_icons.py` must resolve URLs through the frontend's three-way `toImageUrl`
+rule (`wuwabuilds/lib/echo.ts`): `/d/` → Wuthery, `/Game/` → encore, absolute → as-is.
+Newly-shipped echoes are not on Wuthery yet and carry an absolute encore URL, so blindly
+prefixing the CDN base silently yields `https://files.wuthery.comhttps://api.encore...`.
 
 Both regressions exercise the **shipped** code path (`wuwa_scanner/`), not a copy of it.
 Run them after any change to layout, geometry or matching.
@@ -306,11 +414,39 @@ real captures will not be lossless either.
 
 ## Next
 
-1. **Tile census fields still to wire**: level (`+25`), sonata set, lock, equipped
-   portrait. Boxes are in `layout.py`; the readers are not written. These are what let us
-   *skip* clicks, so they come first.
-2. **Phantom flag**: download the phantom skin icons as templates.
-3. **More captures**: cost-1, an under-levelled echo with <5 substats, 1920×1080 (to verify
-   the proportional bounds hold), and a non-English client (to *prove* language
-   independence rather than argue it).
-4. Then Phase 1.
+1. **Tile census fields still to wire**: level (`+25`), lock, equipped portrait. Boxes are
+   in `layout.py` under the `NOT YET WIRED` marker; the readers are not written. **Level is
+   the one that matters** — it is what lets us skip clicking the ~2700 echoes below +5 that
+   have no substats at all.
+2. **A cost-1 capture.** Every cost claim rests on cost-3 and cost-4 tiles; cost 1 is 85 of
+   the 180 echoes and is completely untested.
+3. **Re-sync `wuwabuilds/public/Data/Echoes.json`.** It reports no phantom skin for
+   `60001945` (Reminiscence: Kronaclaw) but one exists in game, and probing the `SG_` naming
+   convention across all 142 phantom-less echoes found no undocumented skins — so the table
+   is stale, not the convention. A missing phantom template is a thin margin waiting to
+   happen.
+4. **More captures**: an under-levelled echo with <5 substats, 1920×1080 (to verify the
+   proportional bounds hold), and a non-English client (to *prove* language independence
+   rather than argue it).
+5. Then Phase 1.
+
+## Entry points and packaging
+
+`__main__.py` is the debug CLI (`py -m wuwa_scanner census <frame>`) and is the right idiom
+for it. **The shipped exe is not this CLI** — it is watch mode: a capture loop, a live
+"42 of 47 captured" readout, and a JSON export. Different program, different entry point.
+
+When Phase 1 lands, split it:
+
+```
+wuwa_scanner/
+├── __main__.py   # 2-line shim: from .cli import main; raise SystemExit(main())
+├── cli.py        # the debug commands -- importable and testable, not trapped behind -m
+└── app.py        # the watcher. THIS is what PyInstaller targets.
+pyproject.toml    # [project.scripts] -> a real `wuwa-scanner` command
+```
+
+Do not do it earlier; `__main__.py` is small and the split is churn until there is a second
+entry point to justify it. Keep the empty `wuwa_scanner/__init__.py` — namespace packages
+(PEP 420) import fine but are a known source of PyInstaller module-discovery failures, and
+`setuptools.find_packages()` skips directories without one.
