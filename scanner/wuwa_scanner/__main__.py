@@ -18,7 +18,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from wuwa_scanner import grid, layout as L, ocr, panel  # noqa: E402
+from wuwa_scanner import grid, layout as L, ocr, panel, tile  # noqa: E402
 
 
 def _load(path: str) -> np.ndarray:
@@ -38,7 +38,7 @@ def cmd_census(path: str) -> None:
     for r in range(len(lat["row_tops"])):
         for c in range(L.GRID_COLS):
             box = grid.tile_box(lat, r, c)
-            t = panel.read_tile(img, box)
+            t = tile.census(img, box)
             t.update(row=r, col=c, selected=grid.is_selected(img, box))
             tiles.append(t)
 

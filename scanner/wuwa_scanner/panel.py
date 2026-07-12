@@ -27,8 +27,7 @@ BACKEND = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(BACKEND))
 import data  # noqa: E402
 
-from . import layout as L, ocr, stats
-from .identify import identify_echo
+from . import layout as L, ocr, stats, tile
 
 
 @dataclass
@@ -120,33 +119,16 @@ def read_substats(frame: np.ndarray, reader: ocr.Reader | None = None) -> tuple[
     return out, warnings
 
 
-def read_tile(frame: np.ndarray, tile_box) -> dict:
-    """Census fields from one grid tile. No click required."""
-    art = L.crop(frame, L.sub_box(tile_box, L.TILE_ART))
-    ident = identify_echo(art)
-    return {
-        "id": ident["id"],
-        "name": ident.get("name", ""),
-        "cost": ident.get("cost", 0),
-        "identity_score": ident["score"],
-        "identity_margin": ident["margin"],
-        "identity_via": ident["via"],
-    }
-
-
 def read_echo(frame: np.ndarray, tile_box, reader: ocr.Reader | None = None) -> Echo:
     """Full record: tile census + panel substats (the panel must already be showing it)."""
-    t = read_tile(frame, tile_box)
+    t = tile.census(frame, tile_box)
     subs, warnings = read_substats(frame, reader)
     return Echo(
         id=t["id"],
         name=t["name"],
         cost=t["cost"],
+        set_id=t.get("set_id"),
         substats=subs,
-        confidence={
-            "identity_score": t["identity_score"],
-            "identity_margin": t["identity_margin"],
-            "identity_via": t["identity_via"],
-        },
-        warnings=warnings,
+        confidence=t.get("confidence", {}),
+        warnings=t.get("warnings", []) + warnings,
     )

@@ -81,6 +81,13 @@ TILE_ART = (18 / _TW, 11 / _TH, (18 + 292) / _TW, (11 + 292) / _TH)
 TILE_SET = (28 / _TW, 311 / _TH, (28 + 58) / _TW, (311 + 58) / _TH)
 TILE_LEVEL = (208 / _TW, 317 / _TH, (208 + 92) / _TW, (317 + 47) / _TH)
 
+# The cost digit, bottom-right of the art. Fitted on a MIXED-cost frame: a page where
+# every tile is cost 4 makes "reads 4" satisfiable by a box on blank background that
+# merely correlates with the '4' template, and an earlier sweep did exactly that --
+# scoring 18/18 on a cost-4 page and then 0/6 on the cost-3 rows of another. Any future
+# refit must span at least two costs.
+TILE_COST = (241 / _TW, 227 / _TH, (241 + 56) / _TW, (227 + 64) / _TH)
+
 # Selection is indicated by GOLD BEZELS ON THE TILE CORNERS. Scoring the whole
 # border ring by brightness does NOT work - several echoes have bright golden
 # artwork that outscores the real selection ring.
