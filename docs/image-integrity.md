@@ -1,13 +1,37 @@
 # Build Card Image Integrity
 
-This document captures the current plan for detecting invalid or manipulated
-build-card screenshots before they are trusted as OCR/training data.
+This document captures the implemented upload-time guard and the offline tools
+for detecting invalid or manipulated build-card screenshots before they are
+trusted as OCR/training data.
 
 ## Scope
 
-The goal is not immediate automatic deletion. The first production target should
-be a review queue with evidence: key, verdict, reason, per-panel metrics, and
-overlay/debug artifacts.
+The production endpoint now rejects high-confidence layout failures before R2
+storage and OCR. Offline scans remain review-only and produce evidence: key,
+verdict, reason, per-panel metrics, and overlay/debug artifacts.
+
+## Upload-Time Guard
+
+`image_integrity.py` is called after decode and before R2 storage or region OCR.
+It rejects:
+
+- images outside the supported 16:9-ish aspect range or below 1200x650; and
+- images where at least two of echo3-5 exceed both a 0.25 average near-black
+  row-coverage limit and a 0.20 average contiguous dark-run limit.
+
+These are fixed, conservative limits rather than a runtime percentile. A
+mutable bucket baseline would be vulnerable to poisoned uploads and would make
+each request depend on an expensive R2 scan. The limits came from the clean-card
+position distributions below and were checked against a deterministic sample
+of 1,000 canonical root images: 993 accepted and seven rejected. Manual review
+confirmed all seven rejected files were unsupported inputs (the generated card
+and its duplicate, other card generators, desktop/chat screenshots, or an
+in-game screenshot), with no observed false positive in that sample.
+
+The generated incident crossed the limits in all three panels by a wide margin:
+dark-row averages were approximately 0.90-0.92 and run averages approximately
+0.87. The guard validates the supported card layout; it does not claim to be a
+generic AI-image detector.
 
 ## Observed Evidence
 
@@ -194,12 +218,11 @@ are understood.
 
 Use both.
 
-Upload-time:
+Upload-time (implemented):
 
-- Run decode/shape/layout checks synchronously.
-- Run the cheap echo-row integrity check after image upload.
-- If suspicious, store the image/report and mark as `needs_review` instead of
-  trusting it immediately.
+- Run decode, shape, and the cheap echo-row integrity checks synchronously.
+- Reject high-confidence failures before normal R2 storage and region OCR.
+- Stream a structured `error` event with the integrity reasons.
 
 Cron/backfill:
 

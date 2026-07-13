@@ -21,6 +21,7 @@ PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 StorageStatus = Literal[
     "stored",
     "already_present",
+    "pending",
     "failed",
     "timed_out",
     "disabled",

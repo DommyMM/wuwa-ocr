@@ -10,6 +10,7 @@ from typing import Any, Optional, cast
 from card import process_card
 from r2_storage import ImageIdentity, R2ImageStore, R2Settings, StorageResult, UnsupportedImageType, identify_image
 from issue_reports import MAX_IMAGE_BYTES, handle_issue_report
+from image_integrity import validate_image_integrity
 import time
 from collections import defaultdict
 import os
@@ -363,6 +364,49 @@ def start_storage_task(
     task.add_done_callback(active_storage_tasks.discard)
     return task
 
+
+def log_deferred_storage_result(
+    scan_id: str,
+    image_identity: ImageIdentity,
+    task: asyncio.Task[StorageResult],
+) -> None:
+    """Log the eventual result of an upload that outlived OCR recognition."""
+
+    try:
+        result = task.result()
+    except asyncio.CancelledError:
+        return
+    except Exception as exc:
+        print(
+            json.dumps({
+                "event": "ocr_image_storage_completed",
+                "level": "warning",
+                "scan_id": scan_id,
+                "hash_prefix": image_identity.hash_prefix,
+                "r2_result": "failed",
+                "r2_error_code": type(exc).__name__,
+            }, separators=(",", ":")),
+            flush=True,
+        )
+        return
+
+    print(
+        json.dumps({
+            "event": "ocr_image_storage_completed",
+            "level": (
+                "warning"
+                if result.result in {"failed", "timed_out"}
+                else "info"
+            ),
+            "scan_id": scan_id,
+            "hash_prefix": image_identity.hash_prefix,
+            "r2_result": result.result,
+            "r2_ms": round(result.elapsed_ms, 2),
+            "r2_error_code": result.error_code,
+        }, separators=(",", ":")),
+        flush=True,
+    )
+
 def slow_region_summary(timings: dict[str, Any]) -> str:
     region_timings = timings.get("regions") if isinstance(timings, dict) else None
     if not isinstance(region_timings, dict):
@@ -485,6 +529,30 @@ async def stream_full_import_image(
         })
         return
 
+    integrity = validate_image_integrity(image)
+    if not integrity["accepted"]:
+        print(
+            json.dumps({
+                "event": "ocr_import_rejected",
+                "level": "warning",
+                "scan_id": scan_id,
+                "reason": ",".join(integrity["reasons"]),
+                "bytes": len(image_bytes),
+                "media_type": image_identity.content_type,
+                "hash_prefix": image_identity.hash_prefix,
+                "integrity": integrity,
+            }, separators=(",", ":")),
+            flush=True,
+        )
+        yield ndjson_event({
+            "type": "error",
+            "success": False,
+            "scanId": scan_id,
+            "error": "This image does not match a supported build card.",
+            "integrity": integrity,
+        })
+        return
+
     crop_started = time.perf_counter()
     crops = {
         region: crop_region(image, coords)
@@ -505,12 +573,15 @@ async def stream_full_import_image(
     async def run_region(region: str) -> dict[str, Any]:
         return await loop.run_in_executor(executor, process_region_task, (region, crops[region]))
 
+    storage_enabled = r2_image_store.settings.enabled
     storage_task = start_storage_task(image_bytes, image_identity, scan_id)
     tasks = [asyncio.create_task(run_region(region)) for region in REGION_KEYS]
     yield ndjson_event({
         "type": "meta",
         "scanId": scan_id,
+        "sourceImageKey": image_identity.key if storage_enabled else None,
         "image": image_meta,
+        "integrity": integrity,
     })
     analysis: dict[str, Any] = {}
     progress: dict[str, str] = {}
@@ -577,17 +648,37 @@ async def stream_full_import_image(
             progress[region] = "error"
             region_errors[region] = "Region recognition did not complete"
 
-    storage_wait_started = time.perf_counter()
-    storage_result = await storage_task
-    storage_waited_at = time.perf_counter()
+    # The object name is already definitive because it is the SHA-256 of the
+    # exact request bytes. Do not hold completed OCR behind a stalled R2 call:
+    # return the optimistic sourceImageKey and retain the upload in the process.
+    # trainingImageKey remains confirmation-only for consumers that must know
+    # the object exists (notably issue reports).
+    # Give an already-completing storage coroutine one non-blocking scheduler
+    # turn so normal fast uploads retain the confirmed-key response shape.
+    await asyncio.sleep(0)
+    if storage_task.done():
+        storage_result = await storage_task
+    else:
+        storage_result = StorageResult(
+            result="pending",
+            elapsed_ms=(time.perf_counter() - recognition_started) * 1000,
+            key=image_identity.key,
+        )
+        storage_task.add_done_callback(
+            lambda task: log_deferred_storage_result(scan_id, image_identity, task)
+        )
     finished_at = time.perf_counter()
     timings = {
         "hashMs": round((hashed_at - hash_started) * 1000, 2),
         "decodeMs": round((decoded_at - decode_started) * 1000, 2),
         "cropMs": round((cropped_at - crop_started) * 1000, 2),
         "recognitionWallMs": round((recognized_at - recognition_started) * 1000, 2),
-        "r2Ms": round(storage_result.elapsed_ms, 2),
-        "storageWaitMs": round((storage_waited_at - storage_wait_started) * 1000, 2),
+        "r2Ms": (
+            round(storage_result.elapsed_ms, 2)
+            if storage_result.result != "pending"
+            else None
+        ),
+        "storageWaitMs": 0.0,
         "totalMs": round((finished_at - timing_start) * 1000, 2),
         "bodyReadMs": round(body_read_ms, 2),
         "wallMs": round((time.perf_counter() - request_start) * 1000, 2),
@@ -599,11 +690,21 @@ async def stream_full_import_image(
         "analysis": analysis,
         "progress": progress,
         "timings": timings,
-        "trainingImageKey": storage_result.key,
+        "sourceImageKey": (
+            image_identity.key
+            if storage_enabled and storage_result.result not in {"disabled", "failed"}
+            else None
+        ),
+        "trainingImageKey": (
+            storage_result.key
+            if storage_result.result in {"stored", "already_present"}
+            else None
+        ),
         "storage": storage_result.public_payload(),
         "regionErrors": region_errors,
         "image": image_meta,
         "unsupportedLanguage": detect_unsupported_language(analysis),
+        "integrity": integrity,
     }
     log_import_completed(
         result,

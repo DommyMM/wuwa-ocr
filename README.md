@@ -6,14 +6,15 @@ Hosted at `https://ocr.wuwa.build`.
 ## Runtime Model
 
 - Single OCR mode: English full-card import processing. The API receives the original
-  screenshot, decodes it once, crops fixed regions server-side, then fans out
-  region recognition through `card.py`.
+  screenshot, decodes it once, validates the supported card layout, crops fixed
+  regions server-side, then fans out region recognition through `card.py`.
 - Legacy full-screen mode (`char.py` / `echo.py`) has been removed
 - Data is loaded from local `backend/Data/*.json` and image templates at startup import time (`data.py`)
 - Echo, character, and weapon OCR results include IDs for robust frontend matching
 - Echo and element templates may be PNG or WebP; current element templates are WebP-only.
 - The original JPEG/PNG request bytes are content-addressed and persisted to
   Cloudflare R2 concurrently with recognition when `OCR_R2_UPLOAD_ENABLED=1`.
+  High-confidence integrity failures are rejected before R2 storage and OCR.
 
 ## Start
 
@@ -40,27 +41,32 @@ or a raw image body with an image `Content-Type`.
 The response is always an `application/x-ndjson` stream. Each line is one JSON
 event: `meta`, zero or more per-region `region` events, then a final `done`
 event that contains the merged import analysis, per-region status, and timing
-data.
+data. Unsupported card layouts instead receive one structured `error` event
+with an `integrity` verdict and do not enter the normal R2 namespace.
 
 ```json
-{"type":"meta","scanId":"76078ac4-9ac5-4b52-a933-4fb724f62659","image":{"width":1920,"height":1080,"bytes":271977,"mediaType":"image/jpeg"}}
-{"type":"region","scanId":"76078ac4-9ac5-4b52-a933-4fb724f62659","region":"watermark","status":"done","analysis":{"username":"Player","uid":500000000},"elapsedMs":180.2}
-{"type":"region","scanId":"76078ac4-9ac5-4b52-a933-4fb724f62659","region":"echo1","status":"done","analysis":{"main":{"name":"ATK%","value":"18%"}},"elapsedMs":1111.0}
-{"type":"done","success":true,"scanId":"76078ac4-9ac5-4b52-a933-4fb724f62659","analysis":{},"progress":{},"timings":{"r2Ms":86.4,"storageWaitMs":0.02},"storage":{"result":"stored","elapsedMs":86.4},"trainingImageKey":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.jpg"}
+{"type":"meta","scanId":"00000000-0000-4000-8000-000000000000","sourceImageKey":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.jpg","image":{"width":1920,"height":1080,"bytes":271977,"mediaType":"image/jpeg"}}
+{"type":"region","scanId":"00000000-0000-4000-8000-000000000000","region":"watermark","status":"done","analysis":{"username":"Player","uid":123456789},"elapsedMs":180.2}
+{"type":"region","scanId":"00000000-0000-4000-8000-000000000000","region":"echo1","status":"done","analysis":{"main":{"name":"ATK%","value":"18%"}},"elapsedMs":1111.0}
+{"type":"done","success":true,"scanId":"00000000-0000-4000-8000-000000000000","analysis":{},"progress":{},"timings":{"r2Ms":86.4,"storageWaitMs":0},"storage":{"result":"stored","elapsedMs":86.4},"sourceImageKey":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.jpg","trainingImageKey":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.jpg"}
 ```
 
 Interactive import consumes the `region` events for live UI updates. Bulk import
 uses the same stream parser and only consumes the final `done` event.
 
-`meta` intentionally never contains `trainingImageKey`: storage is still in
-progress at that point. The final `done.trainingImageKey` is a confirmed,
-root-level R2 object key, or `null` if storage was disabled, failed, or exceeded
-its deadline. A storage problem does not fail otherwise-successful OCR.
+`meta.sourceImageKey` is the deterministic root-level object name derived from
+the exact request bytes. It is optimistic: storage may still be running, but a
+later upload of the same bytes always addresses the same object. The final
+`done.sourceImageKey` is used for build provenance without waiting behind R2.
+`done.trainingImageKey` remains confirmation-only and is `null` until R2 reports
+`stored` or `already_present`; issue reports use this stricter field or resend
+the original file. A storage problem does not fail otherwise-successful OCR.
 
 The final `storage.result` is one of:
 
 - `stored` — this request wrote the object;
 - `already_present` — identical exact bytes were already stored;
+- `pending` — OCR completed first; the retained upload continues in the backend;
 - `failed` — R2 returned an error;
 - `timed_out` — the configured storage deadline elapsed;
 - `disabled` — backend persistence is turned off.
@@ -103,7 +109,7 @@ a 400 would discard it at the moment it is most useful.
 A successful response is `201 application/json`:
 
 ```json
-{"success":true,"reportId":"870de1eb-eed6-49cb-9f75-ce4b23bedca3","reportKey":"reports/2026/07/11/870de1eb-eed6-49cb-9f75-ce4b23bedca3.json","trainingImageKey":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.jpg","imageStorage":"referenced"}
+{"success":true,"reportId":"11111111-1111-4111-8111-111111111111","reportKey":"reports/2026/07/11/11111111-1111-4111-8111-111111111111.json","trainingImageKey":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.jpg","imageStorage":"referenced"}
 ```
 
 `imageStorage` is `referenced`, `stored`, or `already_present`. Error responses

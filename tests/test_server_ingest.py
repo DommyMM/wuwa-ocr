@@ -6,6 +6,7 @@ import json
 import time
 import unittest
 import uuid
+from types import SimpleNamespace
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import redirect_stdout
 from unittest.mock import patch
@@ -53,9 +54,10 @@ def make_request(body: bytes, content_type: str) -> Request:
 
 
 class FakeStore:
-    def __init__(self, status: str, delay: float = 0.0):
+    def __init__(self, status: str, delay: float = 0.0, enabled: bool = True):
         self.status = status
         self.delay = delay
+        self.settings = SimpleNamespace(enabled=enabled)
         self.calls = 0
         self.started_at: float | None = None
         self.finished_at: float | None = None
@@ -90,6 +92,13 @@ async def collect_stream(
             patch.object(server, "executor", test_executor),
             patch.object(server, "process_region_task", process_region),
             patch.object(server, "r2_image_store", store),
+            patch.object(server, "validate_image_integrity", lambda _image: {
+                "accepted": True,
+                "verdict": "ok",
+                "reasons": [],
+                "panels": {},
+                "image": {},
+            }),
             redirect_stdout(io.StringIO()),
         ):
             async for line in server.stream_full_import_image(
@@ -99,6 +108,8 @@ async def collect_stream(
                 scan_id=scan_id,
             ):
                 events.append(json.loads(line))
+            if server.active_storage_tasks:
+                await asyncio.gather(*server.active_storage_tasks)
     return events
 
 
@@ -158,7 +169,7 @@ class RequestBodyTests(unittest.IsolatedAsyncioTestCase):
 
 
 class StreamContractTests(unittest.IsolatedAsyncioTestCase):
-    async def test_meta_has_scan_id_but_never_an_unconfirmed_key(self):
+    async def test_meta_has_scan_id_and_optimistic_key(self):
         store = FakeStore("stored")
 
         events = await collect_stream(
@@ -171,12 +182,14 @@ class StreamContractTests(unittest.IsolatedAsyncioTestCase):
         done = events[-1]
         self.assertEqual(meta["type"], "meta")
         self.assertEqual(meta["scanId"], "scan-test")
+        self.assertRegex(meta["sourceImageKey"], r"^[a-f0-9]{64}\.jpg$")
         self.assertNotIn("trainingImageKey", meta)
         self.assertEqual(meta["image"]["mediaType"], "image/jpeg")
         self.assertEqual(done["type"], "done")
         self.assertTrue(done["success"])
         self.assertEqual(done["scanId"], "scan-test")
         self.assertRegex(done["trainingImageKey"], r"^[a-f0-9]{64}\.jpg$")
+        self.assertEqual(done["sourceImageKey"], done["trainingImageKey"])
         self.assertEqual(done["storage"]["result"], "stored")
         self.assertIn("r2Ms", done["timings"])
         self.assertIn("storageWaitMs", done["timings"])
@@ -204,6 +217,39 @@ class StreamContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertLess(min(start for start, _ in recognition_times), store.finished_at)
         self.assertLess(store.started_at, max(end for _, end in recognition_times))
 
+    async def test_slow_storage_does_not_hold_ocr_done_open(self):
+        store = FakeStore("stored", delay=0.5)
+        started = time.perf_counter()
+        events = []
+        with ThreadPoolExecutor(max_workers=len(server.REGION_KEYS)) as test_executor:
+            with (
+                patch.object(server, "executor", test_executor),
+                patch.object(server, "process_region_task", successful_region),
+                patch.object(server, "r2_image_store", store),
+                patch.object(server, "validate_image_integrity", lambda _image: {
+                    "accepted": True,
+                    "verdict": "ok",
+                    "reasons": [],
+                    "panels": {},
+                    "image": {},
+                }),
+                redirect_stdout(io.StringIO()),
+            ):
+                async for line in server.stream_full_import_image(
+                    encoded_image(".jpg"),
+                    body_read_ms=3.5,
+                    request_start=started,
+                    scan_id="scan-test",
+                ):
+                    events.append(json.loads(line))
+        elapsed = time.perf_counter() - started
+        self.assertLess(elapsed, 0.2)
+        self.assertEqual(events[-1]["storage"]["result"], "pending")
+        self.assertRegex(events[-1]["sourceImageKey"], r"^[a-f0-9]{64}\.jpg$")
+        self.assertIsNone(events[-1]["trainingImageKey"])
+        if server.active_storage_tasks:
+            await asyncio.gather(*server.active_storage_tasks)
+
     async def test_r2_failure_does_not_fail_ocr(self):
         events = await collect_stream(
             encoded_image(".png"),
@@ -215,6 +261,7 @@ class StreamContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(done["type"], "done")
         self.assertTrue(done["success"])
         self.assertIsNone(done["trainingImageKey"])
+        self.assertIsNone(done["sourceImageKey"])
         self.assertEqual(done["storage"]["result"], "failed")
         self.assertEqual(done["image"]["mediaType"], "image/png")
 
@@ -228,7 +275,19 @@ class StreamContractTests(unittest.IsolatedAsyncioTestCase):
         done = events[-1]
         self.assertTrue(done["success"])
         self.assertIsNone(done["trainingImageKey"])
+        self.assertRegex(done["sourceImageKey"], r"^[a-f0-9]{64}\.jpg$")
         self.assertEqual(done["storage"]["result"], "timed_out")
+
+    async def test_disabled_storage_never_emits_an_optimistic_key(self):
+        events = await collect_stream(
+            encoded_image(".jpg"),
+            FakeStore("disabled", enabled=False),
+            successful_region,
+        )
+
+        self.assertIsNone(events[0]["sourceImageKey"])
+        self.assertIsNone(events[-1]["sourceImageKey"])
+        self.assertIsNone(events[-1]["trainingImageKey"])
 
     async def test_wrong_magic_never_starts_storage_or_recognition(self):
         store = FakeStore("stored")
@@ -244,6 +303,42 @@ class StreamContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(events[0]["type"], "error")
         self.assertFalse(events[0]["success"])
         self.assertEqual(events[0]["scanId"], "scan-test")
+        self.assertEqual(store.calls, 0)
+        self.assertEqual(recognition_calls, [])
+
+    async def test_integrity_rejection_skips_storage_and_recognition(self):
+        store = FakeStore("stored")
+        recognition_calls = []
+
+        def should_not_run(task):
+            recognition_calls.append(task)
+            return successful_region(task)
+
+        with (
+            patch.object(server, "validate_image_integrity", lambda _image: {
+                "accepted": False,
+                "verdict": "reject",
+                "reasons": ["lower_echo_rows_invalid"],
+                "panels": {},
+                "image": {},
+            }),
+            patch.object(server, "r2_image_store", store),
+            patch.object(server, "process_region_task", should_not_run),
+            redirect_stdout(io.StringIO()),
+        ):
+            events = [
+                json.loads(line)
+                async for line in server.stream_full_import_image(
+                    encoded_image(".jpg"),
+                    body_read_ms=1.0,
+                    request_start=time.perf_counter(),
+                    scan_id="scan-test",
+                )
+            ]
+
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["type"], "error")
+        self.assertEqual(events[0]["integrity"]["reasons"], ["lower_echo_rows_invalid"])
         self.assertEqual(store.calls, 0)
         self.assertEqual(recognition_calls, [])
 
