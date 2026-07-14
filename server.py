@@ -606,20 +606,17 @@ async def stream_full_import_image(
 
     storage_enabled = r2_image_store.settings.enabled
     requires_ocr_validation = bool(integrity.get("requiresOcrValidation"))
-    storage_started_at: float | None = None
-    storage_task: asyncio.Task[StorageResult] | None = None
-    if not requires_ocr_validation:
-        storage_started_at = time.perf_counter()
-        storage_task = start_storage_task(image_bytes, image_identity, scan_id)
+    # Storage always runs concurrently with recognition, including for suspect
+    # images. Deferring it until after an OCR verdict guaranteed a `pending`
+    # result at response time, which hands the frontend an optimistic key for an
+    # upload that has barely started.
+    storage_started_at = time.perf_counter()
+    storage_task = start_storage_task(image_bytes, image_identity, scan_id)
     tasks = [asyncio.create_task(run_region(region)) for region in REGION_KEYS]
     yield ndjson_event({
         "type": "meta",
         "scanId": scan_id,
-        "sourceImageKey": (
-            image_identity.key
-            if storage_enabled and not requires_ocr_validation
-            else None
-        ),
+        "sourceImageKey": image_identity.key if storage_enabled else None,
         "image": image_meta,
         "integrity": integrity,
     })
@@ -689,42 +686,38 @@ async def stream_full_import_image(
             region_errors[region] = "Region recognition did not complete"
 
     if requires_ocr_validation:
+        # OBSERVE-ONLY. This gate rejected 88% of the images the fast triage
+        # escalates, measured over the r2-backup corpus — ~3% of all real
+        # uploads, against the ~0.06% that are actually invalid. Escalation
+        # correlates with lossy re-encodes (Discord/WebP), which degrade OCR
+        # without making the card fake, and the editor already lets a user fix a
+        # misread. Nothing here may reject until the signal is rebuilt around
+        # the QR anchor and echo-panel geometry.
         ocr_integrity = validate_ocr_integrity(analysis)
         integrity["ocr"] = ocr_integrity
+        integrity["initialVerdict"] = integrity["verdict"]
+        integrity["verdict"] = "ok"
+        integrity["accepted"] = True
+        integrity["requiresOcrValidation"] = False
+        integrity["resolvedBy"] = (
+            "ocr_structure" if ocr_integrity["accepted"] else "ocr_structure_observed"
+        )
         if not ocr_integrity["accepted"]:
             print(
                 json.dumps({
-                    "event": "ocr_import_rejected",
-                    "message": f"ocr_import_rejected {','.join(ocr_integrity['reasons'])}",
-                    "level": "warning",
+                    "event": "ocr_integrity_observed",
+                    "message": (
+                        "ocr_integrity_observed (not enforced) "
+                        f"{','.join(ocr_integrity['reasons'])}"
+                    ),
+                    "level": "info",
                     "scan_id": scan_id,
                     "reason": ",".join(ocr_integrity["reasons"]),
-                    "bytes": len(image_bytes),
-                    "media_type": image_identity.content_type,
                     "hash_prefix": image_identity.hash_prefix,
                     "integrity": integrity,
                 }, separators=(",", ":")),
                 flush=True,
             )
-            yield ndjson_event({
-                "type": "error",
-                "success": False,
-                "scanId": scan_id,
-                "error": (
-                    ocr_integrity.get("message")
-                    or "This image does not match a supported build card."
-                ),
-                "integrity": integrity,
-            })
-            return
-
-        integrity["initialVerdict"] = integrity["verdict"]
-        integrity["verdict"] = "ok"
-        integrity["accepted"] = True
-        integrity["requiresOcrValidation"] = False
-        integrity["resolvedBy"] = "ocr_structure"
-        storage_started_at = time.perf_counter()
-        storage_task = start_storage_task(image_bytes, image_identity, scan_id)
 
     # The object name is already definitive because it is the SHA-256 of the
     # exact request bytes. Do not hold completed OCR behind a stalled R2 call:

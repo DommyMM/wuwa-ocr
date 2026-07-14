@@ -346,7 +346,13 @@ class StreamContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(store.calls, 0)
         self.assertEqual(recognition_calls, [])
 
-    async def test_suspicious_invalid_image_is_never_stored(self):
+    async def test_failed_ocr_integrity_is_observed_not_enforced(self):
+        """A suspect image whose OCR structure fails must still import.
+
+        The gate rejected 88% of escalated images across the r2-backup corpus
+        (~3% of all real uploads) while only ~0.06% are actually invalid, so it
+        records its verdict and nothing more.
+        """
         store = FakeStore("stored")
         suspect = {
             "accepted": True,
@@ -377,13 +383,15 @@ class StreamContractTests(unittest.IsolatedAsyncioTestCase):
                         encoded_image(".jpg"), 1.0, time.perf_counter(), "scan-test"
                     )
                 ]
+                if server.active_storage_tasks:
+                    await asyncio.gather(*server.active_storage_tasks)
 
-        self.assertIsNone(events[0]["sourceImageKey"])
-        self.assertEqual(events[-1]["type"], "error")
-        self.assertEqual(events[-1]["error"], rejected["message"])
-        self.assertEqual(store.calls, 0)
+        self.assertEqual(events[-1]["type"], "done")
+        self.assertEqual(events[-1]["integrity"]["resolvedBy"], "ocr_structure_observed")
+        self.assertFalse(events[-1]["integrity"]["ocr"]["accepted"])
+        self.assertEqual(store.calls, 1)
 
-    async def test_suspicious_valid_image_is_stored_after_ocr(self):
+    async def test_suspect_image_starts_storage_with_recognition(self):
         store = FakeStore("stored")
         suspect = {
             "accepted": True,
@@ -413,7 +421,10 @@ class StreamContractTests(unittest.IsolatedAsyncioTestCase):
                 if server.active_storage_tasks:
                     await asyncio.gather(*server.active_storage_tasks)
 
-        self.assertIsNone(events[0]["sourceImageKey"])
+        # Storage runs concurrently with recognition even for a suspect image:
+        # deferring it guaranteed a `pending` result, which handed the frontend
+        # an optimistic key for an upload that had barely started.
+        self.assertRegex(events[0]["sourceImageKey"], r"^[a-f0-9]{64}\.jpg$")
         self.assertEqual(events[-1]["type"], "done")
         self.assertRegex(events[-1]["sourceImageKey"], r"^[a-f0-9]{64}\.jpg$")
         self.assertEqual(events[-1]["integrity"]["resolvedBy"], "ocr_structure")
