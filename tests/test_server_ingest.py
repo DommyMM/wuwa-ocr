@@ -95,6 +95,7 @@ async def collect_stream(
             patch.object(server, "validate_image_integrity", lambda _image: {
                 "accepted": True,
                 "verdict": "ok",
+                "requiresOcrValidation": False,
                 "reasons": [],
                 "panels": {},
                 "image": {},
@@ -229,6 +230,7 @@ class StreamContractTests(unittest.IsolatedAsyncioTestCase):
                 patch.object(server, "validate_image_integrity", lambda _image: {
                     "accepted": True,
                     "verdict": "ok",
+                    "requiresOcrValidation": False,
                     "reasons": [],
                     "panels": {},
                     "image": {},
@@ -318,7 +320,9 @@ class StreamContractTests(unittest.IsolatedAsyncioTestCase):
             patch.object(server, "validate_image_integrity", lambda _image: {
                 "accepted": False,
                 "verdict": "reject",
-                "reasons": ["lower_echo_rows_invalid"],
+                "requiresOcrValidation": False,
+                "reasons": ["suspected_modified_card"],
+                "message": "This build card appears modified and cannot be imported.",
                 "panels": {},
                 "image": {},
             }),
@@ -338,9 +342,82 @@ class StreamContractTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0]["type"], "error")
-        self.assertEqual(events[0]["integrity"]["reasons"], ["lower_echo_rows_invalid"])
+        self.assertEqual(events[0]["integrity"]["reasons"], ["suspected_modified_card"])
         self.assertEqual(store.calls, 0)
         self.assertEqual(recognition_calls, [])
+
+    async def test_suspicious_invalid_image_is_never_stored(self):
+        store = FakeStore("stored")
+        suspect = {
+            "accepted": True,
+            "verdict": "suspect",
+            "requiresOcrValidation": True,
+            "reasons": ["wrong_card_format"],
+            "panels": {},
+            "image": {},
+        }
+        rejected = {
+            "accepted": False,
+            "reasons": ["missing_echo_structure"],
+            "message": "Upload the original KuroBot build card.",
+        }
+
+        with ThreadPoolExecutor(max_workers=len(server.REGION_KEYS)) as test_executor:
+            with (
+                patch.object(server, "executor", test_executor),
+                patch.object(server, "process_region_task", successful_region),
+                patch.object(server, "r2_image_store", store),
+                patch.object(server, "validate_image_integrity", return_value=suspect),
+                patch.object(server, "validate_ocr_integrity", return_value=rejected),
+                redirect_stdout(io.StringIO()),
+            ):
+                events = [
+                    json.loads(line)
+                    async for line in server.stream_full_import_image(
+                        encoded_image(".jpg"), 1.0, time.perf_counter(), "scan-test"
+                    )
+                ]
+
+        self.assertIsNone(events[0]["sourceImageKey"])
+        self.assertEqual(events[-1]["type"], "error")
+        self.assertEqual(events[-1]["error"], rejected["message"])
+        self.assertEqual(store.calls, 0)
+
+    async def test_suspicious_valid_image_is_stored_after_ocr(self):
+        store = FakeStore("stored")
+        suspect = {
+            "accepted": True,
+            "verdict": "suspect",
+            "requiresOcrValidation": True,
+            "reasons": ["wrong_card_format"],
+            "panels": {},
+            "image": {},
+        }
+        accepted = {"accepted": True, "reasons": [], "message": None}
+
+        with ThreadPoolExecutor(max_workers=len(server.REGION_KEYS)) as test_executor:
+            with (
+                patch.object(server, "executor", test_executor),
+                patch.object(server, "process_region_task", successful_region),
+                patch.object(server, "r2_image_store", store),
+                patch.object(server, "validate_image_integrity", return_value=suspect),
+                patch.object(server, "validate_ocr_integrity", return_value=accepted),
+                redirect_stdout(io.StringIO()),
+            ):
+                events = [
+                    json.loads(line)
+                    async for line in server.stream_full_import_image(
+                        encoded_image(".jpg"), 1.0, time.perf_counter(), "scan-test"
+                    )
+                ]
+                if server.active_storage_tasks:
+                    await asyncio.gather(*server.active_storage_tasks)
+
+        self.assertIsNone(events[0]["sourceImageKey"])
+        self.assertEqual(events[-1]["type"], "done")
+        self.assertRegex(events[-1]["sourceImageKey"], r"^[a-f0-9]{64}\.jpg$")
+        self.assertEqual(events[-1]["integrity"]["resolvedBy"], "ocr_structure")
+        self.assertEqual(store.calls, 1)
 
 
 if __name__ == "__main__":

@@ -14,7 +14,8 @@ Hosted at `https://ocr.wuwa.build`.
 - Echo and element templates may be PNG or WebP; current element templates are WebP-only.
 - The original JPEG/PNG request bytes are content-addressed and persisted to
   Cloudflare R2 concurrently with recognition when `OCR_R2_UPLOAD_ENABLED=1`.
-  High-confidence integrity failures are rejected before R2 storage and OCR.
+  High-confidence integrity failures are rejected before R2 storage and OCR;
+  suspicious inputs must pass OCR structure checks before storage begins.
 
 ## Start
 
@@ -61,6 +62,8 @@ later upload of the same bytes always addresses the same object. The final
 `done.trainingImageKey` remains confirmation-only and is `null` until R2 reports
 `stored` or `already_present`; issue reports use this stricter field or resend
 the original file. A storage problem does not fail otherwise-successful OCR.
+For a suspicious image, `meta.sourceImageKey` is intentionally `null`; the key
+is emitted in `done` only after the OCR structure check permits R2 storage.
 
 The final `storage.result` is one of:
 
@@ -130,7 +133,8 @@ Keys live at the bucket root; there is no `training-images/` prefix. Before
 writing, the service performs `HEAD` and reuses an existing object with the
 same key and byte length. A new `PUT` carries the original bytes, detected MIME
 type, SHA-256 checksum, and digest metadata. R2 work begins alongside region
-recognition, and only the final NDJSON event waits for its bounded result.
+recognition for normal cards. Suspicious cards run OCR validation first so a
+rejected wrong-format image is never written to the normal R2 namespace.
 
 ### Other Endpoints
 

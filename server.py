@@ -10,7 +10,7 @@ from typing import Any, Optional, cast
 from card import process_card
 from r2_storage import ImageIdentity, R2ImageStore, R2Settings, StorageResult, UnsupportedImageType, identify_image
 from issue_reports import MAX_IMAGE_BYTES, handle_issue_report
-from image_integrity import validate_image_integrity
+from image_integrity import validate_image_integrity, validate_ocr_integrity
 import time
 from collections import defaultdict
 import os
@@ -375,11 +375,26 @@ def log_deferred_storage_result(
     try:
         result = task.result()
     except asyncio.CancelledError:
+        # A cancelled retained upload is the one case that silently strands a
+        # build: the response already handed out the optimistic key, so the row
+        # points at an object nobody will ever write. Never swallow it.
+        print(
+            json.dumps({
+                "event": "ocr_image_storage_completed",
+                "message": "ocr_image_storage_completed r2=cancelled",
+                "level": "warning",
+                "scan_id": scan_id,
+                "hash_prefix": image_identity.hash_prefix,
+                "r2_result": "cancelled",
+            }, separators=(",", ":")),
+            flush=True,
+        )
         return
     except Exception as exc:
         print(
             json.dumps({
                 "event": "ocr_image_storage_completed",
+                "message": f"ocr_image_storage_completed r2=failed ({type(exc).__name__})",
                 "level": "warning",
                 "scan_id": scan_id,
                 "hash_prefix": image_identity.hash_prefix,
@@ -393,6 +408,10 @@ def log_deferred_storage_result(
     print(
         json.dumps({
             "event": "ocr_image_storage_completed",
+            "message": (
+                f"ocr_image_storage_completed r2={result.result} "
+                f"in {round(result.elapsed_ms)}ms"
+            ),
             "level": (
                 "warning"
                 if result.result in {"failed", "timed_out"}
@@ -458,6 +477,13 @@ def log_import_completed(
 
     completion = {
         "event": "ocr_import_completed",
+        # Railway parses any JSON log line as a structured log and renders
+        # `message`. Without it the whole event ships as a blank line and
+        # matches no log search, which hid every r2_result in production.
+        "message": (
+            f"ocr_import_completed r2={storage_result.result} "
+            f"wall={timings.get('wallMs')}ms"
+        ),
         "level": (
             "warning"
             if storage_result.result in {"failed", "timed_out"}
@@ -499,6 +525,7 @@ async def stream_full_import_image(
         print(
             json.dumps({
                 "event": "ocr_import_rejected",
+                "message": "ocr_import_rejected unsupported_image_type",
                 "level": "info",
                 "scan_id": scan_id,
                 "reason": "unsupported_image_type",
@@ -534,6 +561,7 @@ async def stream_full_import_image(
         print(
             json.dumps({
                 "event": "ocr_import_rejected",
+                "message": f"ocr_import_rejected {','.join(integrity['reasons'])}",
                 "level": "warning",
                 "scan_id": scan_id,
                 "reason": ",".join(integrity["reasons"]),
@@ -548,7 +576,10 @@ async def stream_full_import_image(
             "type": "error",
             "success": False,
             "scanId": scan_id,
-            "error": "This image does not match a supported build card.",
+            "error": (
+                integrity.get("message")
+                or "This image does not match a supported build card."
+            ),
             "integrity": integrity,
         })
         return
@@ -574,12 +605,21 @@ async def stream_full_import_image(
         return await loop.run_in_executor(executor, process_region_task, (region, crops[region]))
 
     storage_enabled = r2_image_store.settings.enabled
-    storage_task = start_storage_task(image_bytes, image_identity, scan_id)
+    requires_ocr_validation = bool(integrity.get("requiresOcrValidation"))
+    storage_started_at: float | None = None
+    storage_task: asyncio.Task[StorageResult] | None = None
+    if not requires_ocr_validation:
+        storage_started_at = time.perf_counter()
+        storage_task = start_storage_task(image_bytes, image_identity, scan_id)
     tasks = [asyncio.create_task(run_region(region)) for region in REGION_KEYS]
     yield ndjson_event({
         "type": "meta",
         "scanId": scan_id,
-        "sourceImageKey": image_identity.key if storage_enabled else None,
+        "sourceImageKey": (
+            image_identity.key
+            if storage_enabled and not requires_ocr_validation
+            else None
+        ),
         "image": image_meta,
         "integrity": integrity,
     })
@@ -648,6 +688,44 @@ async def stream_full_import_image(
             progress[region] = "error"
             region_errors[region] = "Region recognition did not complete"
 
+    if requires_ocr_validation:
+        ocr_integrity = validate_ocr_integrity(analysis)
+        integrity["ocr"] = ocr_integrity
+        if not ocr_integrity["accepted"]:
+            print(
+                json.dumps({
+                    "event": "ocr_import_rejected",
+                    "message": f"ocr_import_rejected {','.join(ocr_integrity['reasons'])}",
+                    "level": "warning",
+                    "scan_id": scan_id,
+                    "reason": ",".join(ocr_integrity["reasons"]),
+                    "bytes": len(image_bytes),
+                    "media_type": image_identity.content_type,
+                    "hash_prefix": image_identity.hash_prefix,
+                    "integrity": integrity,
+                }, separators=(",", ":")),
+                flush=True,
+            )
+            yield ndjson_event({
+                "type": "error",
+                "success": False,
+                "scanId": scan_id,
+                "error": (
+                    ocr_integrity.get("message")
+                    or "This image does not match a supported build card."
+                ),
+                "integrity": integrity,
+            })
+            return
+
+        integrity["initialVerdict"] = integrity["verdict"]
+        integrity["verdict"] = "ok"
+        integrity["accepted"] = True
+        integrity["requiresOcrValidation"] = False
+        integrity["resolvedBy"] = "ocr_structure"
+        storage_started_at = time.perf_counter()
+        storage_task = start_storage_task(image_bytes, image_identity, scan_id)
+
     # The object name is already definitive because it is the SHA-256 of the
     # exact request bytes. Do not hold completed OCR behind a stalled R2 call:
     # return the optimistic sourceImageKey and retain the upload in the process.
@@ -656,12 +734,14 @@ async def stream_full_import_image(
     # Give an already-completing storage coroutine one non-blocking scheduler
     # turn so normal fast uploads retain the confirmed-key response shape.
     await asyncio.sleep(0)
+    assert storage_task is not None
+    assert storage_started_at is not None
     if storage_task.done():
         storage_result = await storage_task
     else:
         storage_result = StorageResult(
             result="pending",
-            elapsed_ms=(time.perf_counter() - recognition_started) * 1000,
+            elapsed_ms=(time.perf_counter() - storage_started_at) * 1000,
             key=image_identity.key,
         )
         storage_task.add_done_callback(
@@ -726,6 +806,7 @@ async def process_image_request(request: Request):
         print(
             json.dumps({
                 "event": "ocr_import_started",
+                "message": "ocr_import_started",
                 "level": "info",
                 "scan_id": scan_id,
             }, separators=(",", ":")),
@@ -759,6 +840,7 @@ async def process_image_request(request: Request):
         print(
             json.dumps({
                 "event": "ocr_import_failed",
+                "message": f"ocr_import_failed {type(e).__name__}: {e}",
                 "level": "error",
                 "scan_id": scan_id,
                 "error_code": type(e).__name__,
