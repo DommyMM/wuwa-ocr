@@ -1,7 +1,7 @@
 # =======================
 # Builder stage
 # =======================
-FROM python:3.13.13-slim-trixie AS builder
+FROM python:3.13.14-slim-trixie AS builder
 
 WORKDIR /build
 
@@ -12,7 +12,7 @@ RUN pip install --no-cache-dir --user -r requirements.txt
 # =======================
 # Runtime stage
 # =======================
-FROM python:3.13.13-slim-trixie
+FROM python:3.13.14-slim-trixie
 
 WORKDIR /app
 
@@ -31,6 +31,7 @@ COPY --from=builder /root/.local /root/.local
 
 # Copy application files
 COPY Data /app/Data
+COPY assets /app/assets
 COPY *.py /app/
 
 # Set Python path
