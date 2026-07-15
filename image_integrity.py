@@ -38,12 +38,16 @@ _ASSETS = Path(__file__).resolve().parent / "assets"
 
 CHROME_WIDTH, CHROME_HEIGHT = 480, 270
 CHROME_BLUR_SIGMA = 1.6
-# Genuine English cards score <= 2.2 against the reference; AI-generated fakes
-# and non-cards score >= 3.9. 3.5 sits in the empty gap: ~1.6x headroom over the
-# worst genuine English card, and it still catches every fake in the r2-backup
+# The reference mask covers only invariant chrome. The weapon panel is EXCLUDED:
+# the weapon is a player choice, and a distinctive one (e.g. a bright glowing
+# weapon) deviates from the average-weapon blur enough to flag a clean card --
+# the same failure the echo band caused, one region over.
+# With that fixed: genuine English cards score <= 2.4, AI-generated fakes and
+# non-cards score >= 4.0. 3.5 sits in the empty gap (~1.5x headroom over the
+# worst genuine English card) and still catches every fake in the r2-backup
 # corpus. Non-English cards (rejected downstream with a language message) may sit
-# just under this and pass the gate, which is intended -- they get the correct
-# error, not "not a build card". Env-overridable for threshold tuning.
+# near this and pass the gate, which is intended -- they get the correct error,
+# not "not a build card". Env-overridable for threshold tuning.
 CHROME_REJECT_SCORE = float(os.getenv("OCR_CHROME_REJECT", "3.5"))
 
 try:
