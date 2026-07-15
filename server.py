@@ -31,7 +31,11 @@ except ImportError:
 IS_RAILWAY = bool(os.getenv("RAILWAY_ENVIRONMENT_NAME"))
 USE_GPU = os.getenv("USE_GPU", "0" if IS_RAILWAY else "1") == "1"
 
-MAX_WORKERS = int(os.getenv("OCR_WORKERS", "8"))
+# One worker per heavyweight region: 5 echoes + forte. Those six fill the pool
+# in a single parallel wave; the remaining light regions (character/weapon SIFT,
+# uid Tesseract, sequences pixel-count) clear in one following wave regardless of
+# worker count, meaning 6 shuold be fine. Raise if we get more than one upload per second
+MAX_WORKERS = int(os.getenv("OCR_WORKERS", "6"))
 OPENCV_THREADS = int(os.getenv("OCR_OPENCV_THREADS", "1"))
 PROCESS_TIMEOUT = int(os.getenv("OCR_TIMEOUT", "60"))
 REQUESTS_PER_MINUTE = int(os.getenv("OCR_RATE_LIMIT", "10"))
