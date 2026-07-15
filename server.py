@@ -10,7 +10,7 @@ from typing import Any, Optional, cast
 from card import process_card
 from r2_storage import ImageIdentity, R2ImageStore, R2Settings, StorageResult, UnsupportedImageType, identify_image
 from issue_reports import MAX_IMAGE_BYTES, handle_issue_report
-from image_integrity import validate_image_integrity, validate_ocr_integrity
+from image_integrity import echo_bed_score, validate_image_integrity
 import time
 from collections import defaultdict
 import os
@@ -53,6 +53,11 @@ MAX_CONSECUTIVE_500S = 3
 # screenshot/odd layout) yet too few substat names match the English vocabulary.
 NONENGLISH_NAME_MATCH_FLOOR = float(os.getenv("OCR_NONENGLISH_NAME_FLOOR", "0.35"))
 NONENGLISH_MIN_VALUES = int(os.getenv("OCR_NONENGLISH_MIN_VALUES", "15"))
+
+# Phase B observe: only the elevated tail is worth a log line. Genuine cards sit
+# ~1.6 and the labelled pastes start at 3.2; 2.5 captures the suspicious tail
+# (~0.05% of the corpus) without logging every clean upload.
+BED_OBSERVE_SCORE_FLOOR = float(os.getenv("OCR_BED_OBSERVE_FLOOR", "2.5"))
 
 # Ensure output is flushed for Railway
 if hasattr(sys.stdout, "reconfigure"):
@@ -576,6 +581,9 @@ async def stream_full_import_image(
             }, separators=(",", ":")),
             flush=True,
         )
+        # The client gets the message only. The full integrity vector (chrome
+        # score, reasons) stays server-side: handing a forger a live score is a
+        # tuning oracle.
         yield ndjson_event({
             "type": "error",
             "success": False,
@@ -584,7 +592,6 @@ async def stream_full_import_image(
                 integrity.get("message")
                 or "This image does not match a supported build card."
             ),
-            "integrity": integrity,
         })
         return
 
@@ -609,11 +616,9 @@ async def stream_full_import_image(
         return await loop.run_in_executor(executor, process_region_task, (region, crops[region]))
 
     storage_enabled = r2_image_store.settings.enabled
-    requires_ocr_validation = bool(integrity.get("requiresOcrValidation"))
-    # Storage always runs concurrently with recognition, including for suspect
-    # images. Deferring it until after an OCR verdict guaranteed a `pending`
-    # result at response time, which hands the frontend an optimistic key for an
-    # upload that has barely started.
+    # An accepted image starts storage concurrently with recognition. Deferring
+    # it until after OCR guaranteed a `pending` result at response time, which
+    # hands the frontend an optimistic key for an upload that has barely started.
     storage_started_at = time.perf_counter()
     storage_task = start_storage_task(image_bytes, image_identity, scan_id)
     tasks = [asyncio.create_task(run_region(region)) for region in REGION_KEYS]
@@ -622,7 +627,6 @@ async def stream_full_import_image(
         "scanId": scan_id,
         "sourceImageKey": image_identity.key if storage_enabled else None,
         "image": image_meta,
-        "integrity": integrity,
     })
     analysis: dict[str, Any] = {}
     progress: dict[str, str] = {}
@@ -689,39 +693,26 @@ async def stream_full_import_image(
             progress[region] = "error"
             region_errors[region] = "Region recognition did not complete"
 
-    if requires_ocr_validation:
-        # OBSERVE-ONLY. This gate rejected 88% of the images the fast triage
-        # escalates, measured over the r2-backup corpus — ~3% of all real
-        # uploads, against the ~0.06% that are actually invalid. Escalation
-        # correlates with lossy re-encodes (Discord/WebP), which degrade OCR
-        # without making the card fake, and the editor already lets a user fix a
-        # misread. Nothing here may reject until the signal is rebuilt around
-        # the QR anchor and echo-panel geometry.
-        ocr_integrity = validate_ocr_integrity(analysis)
-        integrity["ocr"] = ocr_integrity
-        integrity["initialVerdict"] = integrity["verdict"]
-        integrity["verdict"] = "ok"
-        integrity["accepted"] = True
-        integrity["requiresOcrValidation"] = False
-        integrity["resolvedBy"] = (
-            "ocr_structure" if ocr_integrity["accepted"] else "ocr_structure_observed"
+    # Phase B: echo-bed integrity, OBSERVE-ONLY. A pasted stat cell breaks the
+    # panel's substat-bed gradient; this scores that without rejecting. It cannot
+    # gate yet because wrapped substat names ("Resonance Liberation DMG Bonus")
+    # still produce false positives. Log only the elevated tail so the signal can
+    # be hardened against real traffic without flooding the logs.
+    bed = echo_bed_score(image)
+    if bed["score"] >= BED_OBSERVE_SCORE_FLOOR:
+        print(
+            json.dumps({
+                "event": "echo_bed_observed",
+                "message": f"echo_bed_observed (not enforced) score={bed['score']:.2f}",
+                "level": "info",
+                "scan_id": scan_id,
+                "hash_prefix": image_identity.hash_prefix,
+                "bed_score": round(bed["score"], 2),
+                "bed_panels": [round(p, 2) for p in bed["panels"]],
+                "chrome_score": integrity.get("chromeScore"),
+            }, separators=(",", ":")),
+            flush=True,
         )
-        if not ocr_integrity["accepted"]:
-            print(
-                json.dumps({
-                    "event": "ocr_integrity_observed",
-                    "message": (
-                        "ocr_integrity_observed (not enforced) "
-                        f"{','.join(ocr_integrity['reasons'])}"
-                    ),
-                    "level": "info",
-                    "scan_id": scan_id,
-                    "reason": ",".join(ocr_integrity["reasons"]),
-                    "hash_prefix": image_identity.hash_prefix,
-                    "integrity": integrity,
-                }, separators=(",", ":")),
-                flush=True,
-            )
 
     # The object name is already definitive because it is the SHA-256 of the
     # exact request bytes. Do not hold completed OCR behind a stalled R2 call:
@@ -781,7 +772,6 @@ async def stream_full_import_image(
         "regionErrors": region_errors,
         "image": image_meta,
         "unsupportedLanguage": detect_unsupported_language(analysis),
-        "integrity": integrity,
     }
     log_import_completed(
         result,

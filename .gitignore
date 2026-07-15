@@ -2,12 +2,5 @@ __pycache__/
 *.pyc
 venv/
 .env
-wuwa*.png
-hsv.py
 .claude
-benchmark_results.json
-diff_verdicts.json
-invalid_images.json
-ocr_results.json
 r2-backup/
-forensics/

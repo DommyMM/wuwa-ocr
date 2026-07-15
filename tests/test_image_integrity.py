@@ -6,128 +6,120 @@ from unittest.mock import patch
 import cv2
 import numpy as np
 
+import image_integrity
 from image_integrity import (
-    ECHO_REGIONS,
-    STAT_ROWS,
+    CHROME_REJECT_SCORE,
+    chrome_score,
+    echo_bed_score,
     validate_image_integrity,
-    validate_ocr_integrity,
 )
 
 
-class ImageIntegrityTests(unittest.TestCase):
-    @staticmethod
-    def image_with_modified_rows() -> np.ndarray:
-        image = np.full((1080, 1920, 3), 127, dtype=np.uint8)
-        for x1, y1, x2, y2 in ECHO_REGIONS.values():
-            panel_top = round(y1 * 1080)
-            panel_height = round(y2 * 1080) - panel_top
-            panel_left = round(x1 * 1920)
-            panel_width = round(x2 * 1920) - panel_left
-            for row_top, row_bottom in STAT_ROWS:
-                image[
-                    panel_top + round(row_top * panel_height):
-                    panel_top + round(row_bottom * panel_height),
-                    panel_left + round(0.08 * panel_width):
-                    panel_left + round(0.95 * panel_width),
-                ] = 0
-        return image
+def _card_from_reference() -> np.ndarray:
+    """A 1920x1080 BGR image built from the chrome reference.
 
-    def test_plain_supported_canvas_is_accepted(self):
-        gradient = np.tile(
-            np.linspace(0, 255, 1920, dtype=np.uint8),
-            (1080, 1),
-        )
-        image = np.repeat(gradient[:, :, None], 3, axis=2)
+    Upscaled back to card size, it is the closest thing to a genuine card we can
+    synthesize without shipping a real screenshot. The resample-then-reblur path
+    inside chrome_score softens it beyond a real card, so it is used only for
+    RELATIVE comparisons (much lower than noise), never an absolute pass.
+    """
+    ref = image_integrity._CHROME_MEDIAN
+    assert ref is not None, "reference asset must be present for these tests"
+    full = cv2.resize(ref, (1920, 1080), interpolation=cv2.INTER_LINEAR)
+    full = np.clip(full, 0, 255).astype(np.uint8)
+    return cv2.cvtColor(full, cv2.COLOR_GRAY2BGR)
 
-        with patch("image_integrity._has_kurobot_qr_anchor", return_value=True):
-            result = validate_image_integrity(image)
+
+class PhaseAChromeTests(unittest.TestCase):
+    def test_gate_accepts_a_low_score(self):
+        with patch.object(image_integrity, "chrome_score", return_value=1.0):
+            result = validate_image_integrity(np.zeros((1080, 1920, 3), np.uint8))
 
         self.assertTrue(result["accepted"])
         self.assertEqual(result["verdict"], "ok")
+        self.assertEqual(result["chromeScore"], 1.0)
 
-    def test_small_image_is_rejected(self):
+    def test_gate_rejects_a_high_score(self):
+        with patch.object(image_integrity, "chrome_score", return_value=9.0):
+            result = validate_image_integrity(np.zeros((1080, 1920, 3), np.uint8))
+
+        self.assertFalse(result["accepted"])
+        self.assertIn("not_build_card", result["reasons"])
+        self.assertEqual(result["chromeScore"], 9.0)
+
+    def test_wrong_dimensions_are_rejected_before_scoring(self):
         image = np.full((64, 96, 3), 127, dtype=np.uint8)
 
         result = validate_image_integrity(image)
 
         self.assertFalse(result["accepted"])
         self.assertIn("wrong_card_dimensions", result["reasons"])
+        # No chrome scoring happens on a wrong-size image.
+        self.assertIsNone(result["chromeScore"])
 
-    def test_dark_stat_rows_are_directly_rejected(self):
-        image = self.image_with_modified_rows()
-
-        with patch("image_integrity._has_kurobot_qr_anchor", return_value=True):
-            result = validate_image_integrity(image)
-
-        self.assertFalse(result["accepted"])
-        self.assertIn("suspected_modified_card", result["reasons"])
-        self.assertEqual(
-            sum(bool(panel["darkHit"]) for panel in result["panels"].values()),
-            3,
-        )
-
-    def test_modified_rows_cannot_evade_with_simple_transforms(self):
-        image = self.image_with_modified_rows()
-        rng = np.random.default_rng(7)
-        variants = (
-            cv2.convertScaleAbs(image, alpha=1.0, beta=45),
-            cv2.GaussianBlur(image, (5, 5), 0),
-            np.clip(
-                image.astype(np.int16) + rng.normal(0, 8, image.shape),
-                0,
-                255,
-            ).astype(np.uint8),
-        )
-
-        with patch("image_integrity._has_kurobot_qr_anchor", return_value=True):
-            verdicts = [validate_image_integrity(item)["verdict"] for item in variants]
-
-        self.assertNotIn("ok", verdicts)
-
-    def test_missing_qr_is_escalated_not_directly_rejected(self):
+    def test_flat_canvas_is_rejected_as_not_a_card(self):
         image = np.full((1080, 1920, 3), 127, dtype=np.uint8)
 
-        with patch("image_integrity._has_kurobot_qr_anchor", return_value=False):
-            result = validate_image_integrity(image)
-
-        self.assertTrue(result["accepted"])
-        self.assertEqual(result["verdict"], "suspect")
-        self.assertTrue(result["requiresOcrValidation"])
-        self.assertIn("wrong_card_format", result["reasons"])
-
-    @staticmethod
-    def valid_analysis(uid: int = 0) -> dict:
-        analysis = {
-            "character": {"id": "character"},
-            "weapon": {"id": "weapon"},
-            "watermark": {"uid": uid},
-        }
-        for index in range(1, 6):
-            analysis[f"echo{index}"] = {
-                "name": {"confidence": 0.2},
-                "substats": [{}, {}, {}, {}, {}],
-            }
-        return analysis
-
-    def test_structured_ocr_accepts_hidden_uid(self):
-        result = validate_ocr_integrity(self.valid_analysis(uid=0))
-
-        self.assertTrue(result["accepted"])
-
-    def test_structured_ocr_rejects_wrong_card(self):
-        analysis = self.valid_analysis(uid=1234567890)
-        analysis["weapon"] = {}
-        for index in range(1, 6):
-            analysis[f"echo{index}"]["name"]["confidence"] = 0.01
-            analysis[f"echo{index}"]["substats"] = []
-
-        result = validate_ocr_integrity(analysis)
+        result = validate_image_integrity(image)
 
         self.assertFalse(result["accepted"])
-        self.assertIn("missing_weapon", result["reasons"])
-        self.assertIn("invalid_uid", result["reasons"])
-        self.assertIn("missing_echo_structure", result["reasons"])
-        self.assertIn("low_echo_confidence", result["reasons"])
+        self.assertIn("not_build_card", result["reasons"])
+
+    def test_noise_is_rejected_as_not_a_card(self):
+        rng = np.random.default_rng(3)
+        image = rng.integers(0, 255, (1080, 1920, 3), dtype=np.uint8)
+
+        result = validate_image_integrity(image)
+
+        self.assertFalse(result["accepted"])
+        self.assertIn("not_build_card", result["reasons"])
+
+    def test_reference_scores_far_below_noise(self):
+        """The scoring function separates a card-shaped image from junk."""
+        rng = np.random.default_rng(3)
+        noise = rng.integers(0, 255, (1080, 1920, 3), dtype=np.uint8)
+
+        self.assertLess(chrome_score(_card_from_reference()), chrome_score(noise))
+
+    def test_tint_shift_barely_moves_the_score(self):
+        """Per-card median normalization makes the score blind to exposure."""
+        card = _card_from_reference()
+        base = chrome_score(card)
+        shifted = chrome_score(cv2.convertScaleAbs(card, alpha=1.0, beta=15))
+
+        self.assertLess(abs(base - shifted), 0.75)
+
+    def test_fail_open_when_reference_missing(self):
+        image = np.full((1080, 1920, 3), 127, dtype=np.uint8)
+
+        with (
+            patch.object(image_integrity, "_CHROME_MEDIAN", None),
+            patch.object(image_integrity, "_CHROME_MASK", None),
+        ):
+            self.assertEqual(chrome_score(image), 0.0)
+            result = validate_image_integrity(image)
+
+        # Reference gone: Phase A must not crash or reject; only dimensions gate.
+        self.assertTrue(result["accepted"])
+        self.assertEqual(result["verdict"], "ok")
+
+
+class PhaseBBedTests(unittest.TestCase):
+    def test_shape_is_score_plus_five_panels(self):
+        result = echo_bed_score(_card_from_reference())
+
+        self.assertIn("score", result)
+        self.assertEqual(len(result["panels"]), 5)
+        self.assertEqual(result["score"], max(result["panels"]))
+
+    def test_flat_bed_scores_low(self):
+        """An untampered flat/gradient bed has no pasted cell, so it scores low."""
+        gradient = np.tile(np.linspace(20, 90, 1920, dtype=np.uint8), (1080, 1))
+        image = cv2.cvtColor(gradient, cv2.COLOR_GRAY2BGR)
+
+        result = echo_bed_score(image)
+
+        self.assertLess(result["score"], 2.5)
 
 
 if __name__ == "__main__":

@@ -95,11 +95,12 @@ async def collect_stream(
             patch.object(server, "validate_image_integrity", lambda _image: {
                 "accepted": True,
                 "verdict": "ok",
-                "requiresOcrValidation": False,
                 "reasons": [],
-                "panels": {},
+                "message": None,
+                "chromeScore": 1.0,
                 "image": {},
             }),
+            patch.object(server, "echo_bed_score", lambda _image: {"score": 0.0, "panels": [0.0] * 5}),
             redirect_stdout(io.StringIO()),
         ):
             async for line in server.stream_full_import_image(
@@ -230,11 +231,12 @@ class StreamContractTests(unittest.IsolatedAsyncioTestCase):
                 patch.object(server, "validate_image_integrity", lambda _image: {
                     "accepted": True,
                     "verdict": "ok",
-                    "requiresOcrValidation": False,
                     "reasons": [],
-                    "panels": {},
+                    "message": None,
+                    "chromeScore": 1.0,
                     "image": {},
                 }),
+                patch.object(server, "echo_bed_score", lambda _image: {"score": 0.0, "panels": [0.0] * 5}),
                 redirect_stdout(io.StringIO()),
             ):
                 async for line in server.stream_full_import_image(
@@ -320,10 +322,9 @@ class StreamContractTests(unittest.IsolatedAsyncioTestCase):
             patch.object(server, "validate_image_integrity", lambda _image: {
                 "accepted": False,
                 "verdict": "reject",
-                "requiresOcrValidation": False,
-                "reasons": ["suspected_modified_card"],
-                "message": "This build card appears modified and cannot be imported.",
-                "panels": {},
+                "reasons": ["not_build_card"],
+                "message": "This image does not match a KuroBot build card.",
+                "chromeScore": 9.9,
                 "image": {},
             }),
             patch.object(server, "r2_image_store", store),
@@ -342,39 +343,33 @@ class StreamContractTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0]["type"], "error")
-        self.assertEqual(events[0]["integrity"]["reasons"], ["suspected_modified_card"])
+        self.assertIn("KuroBot build card", events[0]["error"])
+        # The chrome score / integrity vector must never reach the client.
+        self.assertNotIn("integrity", events[0])
         self.assertEqual(store.calls, 0)
         self.assertEqual(recognition_calls, [])
 
-    async def test_failed_ocr_integrity_is_observed_not_enforced(self):
-        """A suspect image whose OCR structure fails must still import.
+    async def test_bed_integrity_is_observed_not_enforced(self):
+        """Phase B (echo-bed) records a high score but never rejects a build.
 
-        The gate rejected 88% of escalated images across the r2-backup corpus
-        (~3% of all real uploads) while only ~0.06% are actually invalid, so it
-        records its verdict and nothing more.
+        A pasted stat cell scores high, yet the card must still import: wrapped
+        substat names still produce false positives, so the signal is logged for
+        offline hardening and nothing more. The score also must not reach the
+        client, where it would be a forger's tuning oracle.
         """
         store = FakeStore("stored")
-        suspect = {
-            "accepted": True,
-            "verdict": "suspect",
-            "requiresOcrValidation": True,
-            "reasons": ["wrong_card_format"],
-            "panels": {},
-            "image": {},
-        }
-        rejected = {
-            "accepted": False,
-            "reasons": ["missing_echo_structure"],
-            "message": "Upload the original KuroBot build card.",
-        }
+        loud_bed = {"score": 9.9, "panels": [1.0, 1.0, 1.0, 9.9, 8.0]}
 
         with ThreadPoolExecutor(max_workers=len(server.REGION_KEYS)) as test_executor:
             with (
                 patch.object(server, "executor", test_executor),
                 patch.object(server, "process_region_task", successful_region),
                 patch.object(server, "r2_image_store", store),
-                patch.object(server, "validate_image_integrity", return_value=suspect),
-                patch.object(server, "validate_ocr_integrity", return_value=rejected),
+                patch.object(server, "validate_image_integrity", lambda _image: {
+                    "accepted": True, "verdict": "ok", "reasons": [],
+                    "message": None, "chromeScore": 1.2, "image": {},
+                }),
+                patch.object(server, "echo_bed_score", return_value=loud_bed),
                 redirect_stdout(io.StringIO()),
             ):
                 events = [
@@ -386,49 +381,13 @@ class StreamContractTests(unittest.IsolatedAsyncioTestCase):
                 if server.active_storage_tasks:
                     await asyncio.gather(*server.active_storage_tasks)
 
-        self.assertEqual(events[-1]["type"], "done")
-        self.assertEqual(events[-1]["integrity"]["resolvedBy"], "ocr_structure_observed")
-        self.assertFalse(events[-1]["integrity"]["ocr"]["accepted"])
+        done = events[-1]
+        self.assertEqual(done["type"], "done")
+        self.assertTrue(done["success"])
         self.assertEqual(store.calls, 1)
-
-    async def test_suspect_image_starts_storage_with_recognition(self):
-        store = FakeStore("stored")
-        suspect = {
-            "accepted": True,
-            "verdict": "suspect",
-            "requiresOcrValidation": True,
-            "reasons": ["wrong_card_format"],
-            "panels": {},
-            "image": {},
-        }
-        accepted = {"accepted": True, "reasons": [], "message": None}
-
-        with ThreadPoolExecutor(max_workers=len(server.REGION_KEYS)) as test_executor:
-            with (
-                patch.object(server, "executor", test_executor),
-                patch.object(server, "process_region_task", successful_region),
-                patch.object(server, "r2_image_store", store),
-                patch.object(server, "validate_image_integrity", return_value=suspect),
-                patch.object(server, "validate_ocr_integrity", return_value=accepted),
-                redirect_stdout(io.StringIO()),
-            ):
-                events = [
-                    json.loads(line)
-                    async for line in server.stream_full_import_image(
-                        encoded_image(".jpg"), 1.0, time.perf_counter(), "scan-test"
-                    )
-                ]
-                if server.active_storage_tasks:
-                    await asyncio.gather(*server.active_storage_tasks)
-
-        # Storage runs concurrently with recognition even for a suspect image:
-        # deferring it guaranteed a `pending` result, which handed the frontend
-        # an optimistic key for an upload that had barely started.
-        self.assertRegex(events[0]["sourceImageKey"], r"^[a-f0-9]{64}\.jpg$")
-        self.assertEqual(events[-1]["type"], "done")
-        self.assertRegex(events[-1]["sourceImageKey"], r"^[a-f0-9]{64}\.jpg$")
-        self.assertEqual(events[-1]["integrity"]["resolvedBy"], "ocr_structure")
-        self.assertEqual(store.calls, 1)
+        # Observed, not enforced, and never leaked to the client.
+        self.assertNotIn("integrity", done)
+        self.assertNotIn("bed", done)
 
 
 if __name__ == "__main__":
