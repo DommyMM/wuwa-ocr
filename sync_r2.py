@@ -8,6 +8,9 @@ Usage:
   py sync_r2.py             # dry run — shows what would be downloaded
   py sync_r2.py --run       # actually downloads and stamps file mtimes
   py sync_r2.py --run --manifest  # also write compact r2-backup-manifest.json
+  py sync_r2.py --run --recheck-legacy  # also re-verify uncached canonical
+                                         # keys against R2 instead of assuming
+                                         # they have no legacy metadata
 """
 import sys
 import os
@@ -25,9 +28,10 @@ MANIFEST    = BACKEND_DIR.parent / "r2-backup-manifest.json"
 # key's been checked its result never goes stale. Losing this file just means
 # a full re-sweep next run, never a wrong answer.
 LEGACY_MTIME_CACHE = BACKEND_DIR.parent / "r2-legacy-mtime-cache.json"
-DRY_RUN     = "--run" not in sys.argv
+DRY_RUN        = "--run" not in sys.argv
 WRITE_MANIFEST = "--manifest" in sys.argv
-WORKERS     = 32
+RECHECK_LEGACY = "--recheck-legacy" in sys.argv
+WORKERS        = 128
 
 # R2 can't have its own LastModified overridden, but the source-image migration
 # stamps this custom metadata field on every canonical object it creates so the
@@ -84,7 +88,7 @@ def save_legacy_mtime_cache(cache: dict[str, str | None]) -> None:
     )
 
 
-def fetch_legacy_mtimes(s3, bucket: str, keys: list[str]) -> dict[str, float]:
+def fetch_legacy_mtimes(s3, bucket: str, keys: list[str], recheck: bool = False) -> dict[str, float]:
     """Read each canonical-keyed object's own `legacy-last-modified` metadata
     via HeadObject. Legacy 16-hex-named objects were never given this field
     (they're untouched originals, their own LastModified is already correct),
@@ -92,15 +96,20 @@ def fetch_legacy_mtimes(s3, bucket: str, keys: list[str]) -> dict[str, float]:
 
     Results are cached locally by key (`None` means confirmed-absent, a real
     marker not just a missing entry) since the answer can never change once
-    checked. Repeat runs only sweep newly-appeared canonical keys instead of
-    the whole bucket every time.
+    checked. The 16->64 hex migration that populates this field ran once and
+    is closed, so any canonical key not already in the cache is, by
+    construction, a normal upload through r2_storage.py — which never sets
+    legacy-last-modified. By default that's trusted instead of paying a
+    network round trip to confirm it; pass recheck=True (--recheck-legacy) to
+    verify anyway, e.g. after another migration-style copy job runs.
     """
     canonical_keys = [k for k in keys if CANONICAL_KEY_RE.match(k)]
     if not canonical_keys:
         return {}
 
     cache = load_legacy_mtime_cache()
-    to_check = [k for k in canonical_keys if k not in cache]
+    uncached = [k for k in canonical_keys if k not in cache]
+    to_check = uncached if recheck else []
 
     def head(key: str):
         try:
@@ -114,11 +123,29 @@ def fetch_legacy_mtimes(s3, bucket: str, keys: list[str]) -> dict[str, float]:
             f"Checking {len(to_check)} new canonical objects for original timestamps "
             f"({len(canonical_keys) - len(to_check)} already cached) ..."
         )
+        failed = []
+        surprises = []
         with ThreadPoolExecutor(max_workers=WORKERS) as pool:
             for key, raw, ok in pool.map(head, to_check):
                 if ok:
                     cache[key] = raw
+                    if raw:
+                        surprises.append(key)
+                else:
+                    failed.append(key)
         save_legacy_mtime_cache(cache)
+        if failed:
+            print(f"  WARNING: {len(failed)} HEAD requests failed, will retry next run (e.g. {failed[0]})")
+        if surprises:
+            print(
+                f"  NOTICE: {len(surprises)} objects assumed to have no legacy metadata actually "
+                f"had it (e.g. {surprises[0]}) — the migration may not be fully closed"
+            )
+    elif uncached:
+        print(
+            f"{len(uncached)} canonical objects not legacy-checked — assuming no legacy metadata "
+            f"since the migration is closed (pass --recheck-legacy to verify)"
+        )
     else:
         print(f"All {len(canonical_keys)} canonical objects already cached, skipping sweep")
 
@@ -140,6 +167,7 @@ def fetch_legacy_mtimes(s3, bucket: str, keys: list[str]) -> dict[str, float]:
 def main():
     try:
         import boto3
+        from botocore.config import Config
     except ImportError:
         print("ERROR: boto3 not installed. Run: pip install boto3")
         sys.exit(1)
@@ -156,6 +184,7 @@ def main():
         aws_access_key_id=env["R2_ACCESS_KEY_ID"],
         aws_secret_access_key=env["R2_SECRET_ACCESS_KEY"],
         region_name="auto",
+        config=Config(max_pool_connections=WORKERS),
     )
 
     # List all objects in bucket (paginated)
@@ -197,7 +226,7 @@ def main():
         MANIFEST.write_text(json.dumps(manifest, separators=(",", ":"), sort_keys=True), encoding="utf-8")
         print(f"Wrote manifest: {MANIFEST}")
 
-    migration_mtimes = fetch_legacy_mtimes(s3, bucket, all_keys)
+    migration_mtimes = fetch_legacy_mtimes(s3, bucket, all_keys, recheck=RECHECK_LEGACY)
 
     def effective_mtime(key: str) -> float:
         return migration_mtimes.get(key, by_key[key]["LastModified"].timestamp())
