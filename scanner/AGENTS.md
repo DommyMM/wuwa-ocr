@@ -111,10 +111,12 @@ py bench/bench_census.py      # -> identity: 24/24   sonata: 24/24
 py bench/validate_e2e.py      # -> icons: 21/21      substat values: 15/15
 ```
 
-`fetch_phantom_icons.py` must resolve URLs through the frontend's three-way `toImageUrl`
-rule (`wuwabuilds/lib/echo.ts`): `/d/` → Wuthery, `/Game/` → encore, absolute → as-is.
-Newly-shipped echoes are not on Wuthery yet and carry an absolute encore URL, so blindly
-prefixing the CDN base silently produces `https://files.wuthery.comhttps://api.encore...`.
+`fetch_phantom_icons.py` must resolve icon refs through the frontend's `toImageUrl`
+rule (`wuwabuilds/lib/echo.ts`) plus the mirror case: `/assets/` → read from
+`wuwabuilds/public/` on disk (the normal case since the image mirror), `/d/` → Wuthery,
+`/Game/` → encore, absolute → as-is. Newly-shipped echoes are not on Wuthery yet and
+carry an absolute encore URL, so blindly prefixing the CDN base silently produces
+`https://files.wuthery.comhttps://api.encore...`.
 
 The OCR engine bench needs the isolated venv (`.bench-venv`, gitignored); runtime only
 needs `ocr.py`'s WinRT/Tesseract path.

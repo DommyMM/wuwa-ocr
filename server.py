@@ -11,6 +11,7 @@ from card import process_card
 from r2_storage import ImageIdentity, R2ImageStore, R2Settings, StorageResult, UnsupportedImageType, identify_image
 from issue_reports import MAX_IMAGE_BYTES, handle_issue_report
 from image_integrity import echo_bed_score, validate_image_integrity
+from log_events import log_event
 import time
 from collections import defaultdict
 import os
@@ -34,7 +35,7 @@ USE_GPU = os.getenv("USE_GPU", "0" if IS_RAILWAY else "1") == "1"
 # One worker per heavyweight region: 5 echoes + forte. Those six fill the pool
 # in a single parallel wave; the remaining light regions (character/weapon SIFT,
 # uid Tesseract, sequences pixel-count) clear in one following wave regardless of
-# worker count, meaning 6 shuold be fine. Raise if we get more than one upload per second
+# worker count, so 6 should be fine. Raise if we get more than one upload per second.
 MAX_WORKERS = int(os.getenv("OCR_WORKERS", "6"))
 OPENCV_THREADS = int(os.getenv("OCR_OPENCV_THREADS", "1"))
 PROCESS_TIMEOUT = int(os.getenv("OCR_TIMEOUT", "60"))
@@ -309,7 +310,8 @@ async def rate_limit_middleware(request: Request, call_next):
                 content={
                     "success": False,
                     "error": "Rate limit exceeded. Please try again later.",
-                }
+                },
+                headers={"Retry-After": "60"},
             )
     response = await call_next(request)
     return response
@@ -387,52 +389,39 @@ def log_deferred_storage_result(
         # A cancelled retained upload is the one case that silently strands a
         # build: the response already handed out the optimistic key, so the row
         # points at an object nobody will ever write. Never swallow it.
-        print(
-            json.dumps({
-                "event": "ocr_image_storage_completed",
-                "message": "ocr_image_storage_completed r2=cancelled",
-                "level": "warning",
-                "scan_id": scan_id,
-                "hash_prefix": image_identity.hash_prefix,
-                "r2_result": "cancelled",
-            }, separators=(",", ":")),
-            flush=True,
+        log_event(
+            "ocr_image_storage_completed",
+            "ocr_image_storage_completed r2=cancelled",
+            level="warning",
+            scan_id=scan_id,
+            hash_prefix=image_identity.hash_prefix,
+            r2_result="cancelled",
         )
         return
     except Exception as exc:
-        print(
-            json.dumps({
-                "event": "ocr_image_storage_completed",
-                "message": f"ocr_image_storage_completed r2=failed ({type(exc).__name__})",
-                "level": "warning",
-                "scan_id": scan_id,
-                "hash_prefix": image_identity.hash_prefix,
-                "r2_result": "failed",
-                "r2_error_code": type(exc).__name__,
-            }, separators=(",", ":")),
-            flush=True,
+        log_event(
+            "ocr_image_storage_completed",
+            f"ocr_image_storage_completed r2=failed ({type(exc).__name__})",
+            level="warning",
+            scan_id=scan_id,
+            hash_prefix=image_identity.hash_prefix,
+            r2_result="failed",
+            r2_error_code=type(exc).__name__,
         )
         return
 
-    print(
-        json.dumps({
-            "event": "ocr_image_storage_completed",
-            "message": (
-                f"ocr_image_storage_completed r2={result.result} "
-                f"in {round(result.elapsed_ms)}ms"
-            ),
-            "level": (
-                "warning"
-                if result.result in {"failed", "timed_out"}
-                else "info"
-            ),
-            "scan_id": scan_id,
-            "hash_prefix": image_identity.hash_prefix,
-            "r2_result": result.result,
-            "r2_ms": round(result.elapsed_ms, 2),
-            "r2_error_code": result.error_code,
-        }, separators=(",", ":")),
-        flush=True,
+    log_event(
+        "ocr_image_storage_completed",
+        (
+            f"ocr_image_storage_completed r2={result.result} "
+            f"in {round(result.elapsed_ms)}ms"
+        ),
+        level="warning" if result.result in {"failed", "timed_out"} else "info",
+        scan_id=scan_id,
+        hash_prefix=image_identity.hash_prefix,
+        r2_result=result.result,
+        r2_ms=round(result.elapsed_ms, 2),
+        r2_error_code=result.error_code,
     )
 
 def slow_region_summary(timings: dict[str, Any]) -> str:
@@ -484,37 +473,26 @@ def log_import_completed(
             flush=True,
         )
 
-    completion = {
-        "event": "ocr_import_completed",
-        # Railway parses any JSON log line as a structured log and renders
-        # `message`. Without it the whole event ships as a blank line and
-        # matches no log search, which hid every r2_result in production.
-        "message": (
+    log_event(
+        "ocr_import_completed",
+        (
             f"ocr_import_completed r2={storage_result.result} "
             f"wall={timings.get('wallMs')}ms"
         ),
-        "level": (
-            "warning"
-            if storage_result.result in {"failed", "timed_out"}
-            else "info"
-        ),
-        "scan_id": scan_id,
-        "bytes": result.get("image", {}).get("bytes"),
-        "media_type": result.get("image", {}).get("mediaType"),
-        "hash_prefix": hash_prefix,
-        "r2_result": storage_result.result,
-        "r2_ms": timings.get("r2Ms"),
-        "r2_error_code": storage_result.error_code,
-        "storage_wait_ms": timings.get("storageWaitMs"),
-        "hash_ms": timings.get("hashMs"),
-        "ocr_wall_ms": timings.get("recognitionWallMs"),
-        "wall_ms": timings.get("wallMs"),
-        "unsupported_language": bool(result.get("unsupportedLanguage")),
-        "slow_regions": slow_region_summary(timings),
-    }
-    print(
-        json.dumps(completion, separators=(",", ":"), ensure_ascii=False),
-        flush=True,
+        level="warning" if storage_result.result in {"failed", "timed_out"} else "info",
+        scan_id=scan_id,
+        bytes=result.get("image", {}).get("bytes"),
+        media_type=result.get("image", {}).get("mediaType"),
+        hash_prefix=hash_prefix,
+        r2_result=storage_result.result,
+        r2_ms=timings.get("r2Ms"),
+        r2_error_code=storage_result.error_code,
+        storage_wait_ms=timings.get("storageWaitMs"),
+        hash_ms=timings.get("hashMs"),
+        ocr_wall_ms=timings.get("recognitionWallMs"),
+        wall_ms=timings.get("wallMs"),
+        unsupported_language=bool(result.get("unsupportedLanguage")),
+        slow_regions=slow_region_summary(timings),
     )
 
 async def stream_full_import_image(
@@ -531,16 +509,12 @@ async def stream_full_import_image(
     try:
         image_identity = identify_image(image_bytes)
     except UnsupportedImageType as exc:
-        print(
-            json.dumps({
-                "event": "ocr_import_rejected",
-                "message": "ocr_import_rejected unsupported_image_type",
-                "level": "info",
-                "scan_id": scan_id,
-                "reason": "unsupported_image_type",
-                "bytes": len(image_bytes),
-            }, separators=(",", ":")),
-            flush=True,
+        log_event(
+            "ocr_import_rejected",
+            "ocr_import_rejected unsupported_image_type",
+            scan_id=scan_id,
+            reason="unsupported_image_type",
+            bytes=len(image_bytes),
         )
         yield ndjson_event({
             "type": "error",
@@ -567,19 +541,16 @@ async def stream_full_import_image(
 
     integrity = validate_image_integrity(image)
     if not integrity["accepted"]:
-        print(
-            json.dumps({
-                "event": "ocr_import_rejected",
-                "message": f"ocr_import_rejected {','.join(integrity['reasons'])}",
-                "level": "warning",
-                "scan_id": scan_id,
-                "reason": ",".join(integrity["reasons"]),
-                "bytes": len(image_bytes),
-                "media_type": image_identity.content_type,
-                "hash_prefix": image_identity.hash_prefix,
-                "integrity": integrity,
-            }, separators=(",", ":")),
-            flush=True,
+        log_event(
+            "ocr_import_rejected",
+            f"ocr_import_rejected {','.join(integrity['reasons'])}",
+            level="warning",
+            scan_id=scan_id,
+            reason=",".join(integrity["reasons"]),
+            bytes=len(image_bytes),
+            media_type=image_identity.content_type,
+            hash_prefix=image_identity.hash_prefix,
+            integrity=integrity,
         )
         # The client gets the message only. The full integrity vector (chrome
         # score, reasons) stays server-side: handing a forger a live score is a
@@ -700,18 +671,14 @@ async def stream_full_import_image(
     # be hardened against real traffic without flooding the logs.
     bed = echo_bed_score(image)
     if bed["score"] >= BED_OBSERVE_SCORE_FLOOR:
-        print(
-            json.dumps({
-                "event": "echo_bed_observed",
-                "message": f"echo_bed_observed (not enforced) score={bed['score']:.2f}",
-                "level": "info",
-                "scan_id": scan_id,
-                "hash_prefix": image_identity.hash_prefix,
-                "bed_score": round(bed["score"], 2),
-                "bed_panels": [round(p, 2) for p in bed["panels"]],
-                "chrome_score": integrity.get("chromeScore"),
-            }, separators=(",", ":")),
-            flush=True,
+        log_event(
+            "echo_bed_observed",
+            f"echo_bed_observed (not enforced) score={bed['score']:.2f}",
+            scan_id=scan_id,
+            hash_prefix=image_identity.hash_prefix,
+            bed_score=round(bed["score"], 2),
+            bed_panels=[round(p, 2) for p in bed["panels"]],
+            chrome_score=integrity.get("chromeScore"),
         )
 
     # The object name is already definitive because it is the SHA-256 of the
@@ -722,8 +689,6 @@ async def stream_full_import_image(
     # Give an already-completing storage coroutine one non-blocking scheduler
     # turn so normal fast uploads retain the confirmed-key response shape.
     await asyncio.sleep(0)
-    assert storage_task is not None
-    assert storage_started_at is not None
     if storage_task.done():
         storage_result = await storage_task
     else:
@@ -790,15 +755,7 @@ async def process_image_request(request: Request):
     scan_id = new_scan_id()
         
     try:
-        print(
-            json.dumps({
-                "event": "ocr_import_started",
-                "message": "ocr_import_started",
-                "level": "info",
-                "scan_id": scan_id,
-            }, separators=(",", ":")),
-            flush=True,
-        )
+        log_event("ocr_import_started", "ocr_import_started", scan_id=scan_id)
 
         body_read_started = time.perf_counter()
         image_bytes = await read_upload_image_bytes(request)
@@ -824,17 +781,14 @@ async def process_image_request(request: Request):
         )
         
     except Exception as e:
-        print(
-            json.dumps({
-                "event": "ocr_import_failed",
-                "message": f"ocr_import_failed {type(e).__name__}: {e}",
-                "level": "error",
-                "scan_id": scan_id,
-                "error_code": type(e).__name__,
-            }, separators=(",", ":")),
-            flush=True,
+        log_event(
+            "ocr_import_failed",
+            f"ocr_import_failed {type(e).__name__}: {e}",
+            level="error",
+            scan_id=scan_id,
+            error_code=type(e).__name__,
         )
-        
+
         consecutive_500s += 1
         if consecutive_500s > 1:
             print(f"Consecutive errors: {consecutive_500s}/{MAX_CONSECUTIVE_500S}", flush=True)
@@ -862,12 +816,11 @@ async def health_check():
 @app.get("/ocr-results")
 async def ocr_results():
     """Serve the batch OCR results JSON for frontend bulk submission."""
-    import json as _json
     results_path = Path(__file__).parent.parent / "ocr_results.json"
     if not results_path.exists():
         return JSONResponse(status_code=404, content={"error": "ocr_results.json not found — run batch_ocr.py first"})
     with open(results_path, encoding="utf-8") as f:
-        return _json.load(f)
+        return json.load(f)
 
 if __name__ == "__main__":
     import uvicorn

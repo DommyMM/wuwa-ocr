@@ -38,15 +38,22 @@ BACKEND = Path(__file__).resolve().parents[2]
 OUT = BACKEND / "Data" / "EchoPhantoms"
 # The frontend's CDN echo table is the only source carrying phantomIcon; backend
 # Data/Echoes.json is the trimmed (id/name/cost/setIds) mirror.
-CDN_ECHOES = BACKEND.parent / "wuwabuilds" / "public" / "Data" / "Echoes.json"
+FRONTEND_PUBLIC = BACKEND.parent / "wuwabuilds" / "public"
+CDN_ECHOES = FRONTEND_PUBLIC / "Data" / "Echoes.json"
 
 
-def to_url(raw: str) -> str:
+def to_source(raw: str) -> str | Path:
     """Port of wuwabuilds/lib/echo.ts::toImageUrl -- the paths are NOT uniform.
 
-    Newly-shipped echoes are not on Wuthery yet and carry an absolute encore URL, so
-    blindly prefixing CDN_BASE yields 'https://files.wuthery.comhttps://api.encore...'.
+    Since the image mirror (wuwabuilds scripts/mirror_images_to_public.py) the normal
+    case is a site-relative /assets/ path, whose file already sits in the frontend's
+    public/ dir — read it from disk. The CDN URL forms survive for pre-mirror
+    snapshots: newly-shipped echoes are not on Wuthery yet and carry an absolute
+    encore URL, so blindly prefixing CDN_BASE yields
+    'https://files.wuthery.comhttps://api.encore...'.
     """
+    if raw.startswith("/assets/"):
+        return FRONTEND_PUBLIC / raw.lstrip("/")
     if raw.startswith(("http://", "https://")):
         return raw
     if raw.startswith("/d/"):
@@ -61,25 +68,32 @@ def main() -> int:
     rows = rows if isinstance(rows, list) else list(rows.values())
 
     urls = {
-        str(r["id"]): to_url(r["phantomIcon"])
+        str(r["id"]): to_source(r["phantomIcon"])
         for r in rows
         if r.get("phantomIcon")
     }
     OUT.mkdir(parents=True, exist_ok=True)
 
-    def get(item: tuple[str, str]) -> str:
-        eid, url = item
-        # Keep the source extension: encore serves .webp, Wuthery .png. cv2.imdecode
-        # reads both, and identify.py globs on the id, not the suffix.
-        dest = OUT / f"{eid}{Path(url).suffix or '.png'}"
-        if dest.exists():
+    def get(item: tuple[str, str | Path]) -> str:
+        eid, src = item
+        # Keep the source extension: the /assets/ mirror and encore serve .webp,
+        # Wuthery .png. cv2.imdecode reads both, and identify.py globs on the id,
+        # not the suffix.
+        suffix = src.suffix if isinstance(src, Path) else Path(src).suffix
+        dest = OUT / f"{eid}{suffix or '.png'}"
+        # Suffix-agnostic: a skin fetched as .png pre-mirror must not be
+        # re-fetched as .webp — identify.py globs on the id, so both would load.
+        if any((OUT / f"{eid}{s}").exists() for s in (".png", ".webp")):
             return f"  have  {eid}"
         try:
-            with urlopen(Request(url, headers={"User-Agent": UA}), timeout=30) as r:
-                dest.write_bytes(r.read())
+            if isinstance(src, Path):
+                dest.write_bytes(src.read_bytes())
+            else:
+                with urlopen(Request(src, headers={"User-Agent": UA}), timeout=30) as r:
+                    dest.write_bytes(r.read())
             return f"  got   {eid}{dest.suffix}  ({dest.stat().st_size:,} B)"
         except Exception as exc:
-            return f"  FAIL  {eid}  {url}  {exc}"
+            return f"  FAIL  {eid}  {src}  {exc}"
 
     print(f"{len(urls)} phantom skins -> {OUT}")
     fails = 0

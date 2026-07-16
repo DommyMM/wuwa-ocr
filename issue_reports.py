@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field, ValidationError
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
+from log_events import log_event
 from r2_storage import UnsupportedImageType, identify_image
 
 
@@ -264,19 +265,13 @@ async def persist_issue_report(
     ).encode("utf-8")
     await image_store.put_json_object(report_key, report_body)
 
-    print(
-        json.dumps(
-            {
-                "event": "ocr_issue_report_stored",
-                "level": "info",
-                "report_id": report_id,
-                "scan_id": report.scanId,
-                "reason": report.reason,
-                "image_storage": image_storage,
-            },
-            separators=(",", ":"),
-        ),
-        flush=True,
+    log_event(
+        "ocr_issue_report_stored",
+        f"ocr_issue_report_stored reason={report.reason} image={image_storage}",
+        report_id=report_id,
+        scan_id=report.scanId,
+        reason=report.reason,
+        image_storage=image_storage,
     )
     return {
         "success": True,
@@ -295,16 +290,11 @@ async def handle_issue_report(request: Request, image_store: Any) -> JSONRespons
     except OcrIssueRequestError as exc:
         return issue_report_error(exc.status_code, exc.reason)
     except Exception as exc:
-        print(
-            json.dumps(
-                {
-                    "event": "ocr_issue_report_failed",
-                    "level": "error",
-                    "error_code": type(exc).__name__,
-                },
-                separators=(",", ":"),
-            ),
-            flush=True,
+        log_event(
+            "ocr_issue_report_failed",
+            f"ocr_issue_report_failed {type(exc).__name__}",
+            level="error",
+            error_code=type(exc).__name__,
         )
         return issue_report_error(
             503,

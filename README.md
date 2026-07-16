@@ -148,7 +148,7 @@ rejected wrong-format image is never written to the normal R2 namespace.
 |---|---|---|
 | `PORT` | `5000` | HTTP listen port |
 | `INTERNAL_API_KEY` | — | Trusted proxy key (gateway → OCR); selects the forwarded client IP and is required by the issue-report write route when configured. |
-| `OCR_WORKERS` | `8` | `ProcessPoolExecutor` size — parallel Tesseract processes. Match to CPU thread count locally (e.g. `16` for 7800X3D). Railway is capped at `8` vCPU. |
+| `OCR_WORKERS` | `6` | `ProcessPoolExecutor` size — parallel Tesseract processes. One per heavyweight region (5 echoes + forte), which is the wave that sets the wall; the lighter regions clear in a following wave regardless. Each worker holds its own OCR models, so this is also the main lever on the RAM bill. Raise locally for batch work (e.g. `16` for 7800X3D); Railway is capped at `8` vCPU. |
 | `OCR_RATE_LIMIT` | `10` | Requests per minute per IP. Set to `10000` locally to disable effective limiting during batch import. |
 | `OCR_REPORT_RATE_LIMIT` | `5` | Issue reports per minute per client IP. Independent of OCR admission. |
 | `OCR_TIMEOUT` | `60` | Seconds before a single OCR request times out. |
