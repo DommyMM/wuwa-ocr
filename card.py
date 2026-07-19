@@ -53,6 +53,7 @@ ROVER_ELEMENT_ALIASES = {
     "Aero": ("aero", "acro"),
     "Spectro": ("spectro", "speetro"),
     "Havoc": ("havoc", "lavoc"),
+    "Electro": ("electro", "clectro"),
 }
 # Everything below derives from Characters.json + the hand-kept gender ids in
 # data.py — a new Rover element only needs its two ids added to
@@ -75,6 +76,7 @@ ROVER_BADGE_SET_IDS = list(ROVER_SET_ID_TO_ELEMENT)
 ROVER_BADGE_HUE_ANCHORS = {
     "Spectro": 26,
     "Aero": 77,
+    "Electro": 135,
     "Havoc": 161,
 }
 
