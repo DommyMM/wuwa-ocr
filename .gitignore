@@ -4,3 +4,4 @@ venv/
 .env
 .claude
 r2-backup/
+benchmarks/

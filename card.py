@@ -64,15 +64,8 @@ ROVER_IDS_BY_GENDER_ELEMENT = {
     if cid in ROVER_ELEMENT_BY_ID
 }
 ROVER_KNOWN_ELEMENTS = {element for _gender, element in ROVER_IDS_BY_GENDER_ELEMENT}
-# The base elemental sonata sets are named exactly by element, so inverting
-# SET_NAME_BY_ID over the known Rover elements yields the badge set ids (4/5/6).
-ROVER_SET_ID_TO_ELEMENT = {
-    set_id: name
-    for set_id, name in SET_NAME_BY_ID.items()
-    if name in ROVER_KNOWN_ELEMENTS
-}
-ROVER_BADGE_SET_IDS = list(ROVER_SET_ID_TO_ELEMENT)
-# Empirical badge-crop hue medians for the color fallback when badge SIFT abstains.
+# Empirical character-badge hue medians. Rover's badge preserves the element
+# color even though the rest of the export-card header has a purple background.
 ROVER_BADGE_HUE_ANCHORS = {
     "Spectro": 26,
     "Aero": 77,
@@ -957,10 +950,6 @@ def _match_asset(region: np.ndarray, feats: dict) -> tuple:
 
 def _detect_rover_badge_element(region_img: np.ndarray) -> str | None:
     badge = _subcrop(region_img, CHAR_ELEMENT_SUBBOX)
-    set_id = determine_element(badge, ROVER_BADGE_SET_IDS)
-    if set_id in ROVER_SET_ID_TO_ELEMENT:
-        return ROVER_SET_ID_TO_ELEMENT[set_id]
-
     hsv = cv2.cvtColor(badge, cv2.COLOR_BGR2HSV)
     mask = cv2.inRange(hsv, np.array([0, 50, 50]), np.array([180, 255, 255]))
     hues = hsv[:, :, 0][mask > 0]
@@ -977,6 +966,8 @@ def _detect_rover_badge_element(region_img: np.ndarray) -> str | None:
         for element, anchor in ROVER_BADGE_HUE_ANCHORS.items()
         if element in ROVER_KNOWN_ELEMENTS
     }
+    if not anchors:
+        return None
     element, distance = min(
         ((element, hue_distance(anchor)) for element, anchor in anchors.items()),
         key=lambda item: item[1],
@@ -997,6 +988,12 @@ def _rover_analysis(cid: str | None, element: str | None, level: int = 90) -> di
     return {"name": name, "id": resolved_id, "level": level, "element": element}
 
 
+def _read_character_title(region_img: np.ndarray) -> dict:
+    text = process_ocr("character", _subcrop(region_img, CHAR_NAME_SUBBOX))
+    cleaned = "\n".join(line.strip() for line in text.splitlines() if line.strip())
+    return parse_character_title(cleaned)
+
+
 def recognize_character_asset(region_img: np.ndarray) -> dict:
     """SIFT the character splash; OCR the name strip on abstain (Rover, junk).
 
@@ -1009,15 +1006,31 @@ def recognize_character_asset(region_img: np.ndarray) -> dict:
         _CHARACTER_FEATURES = _load_asset_features("Characters", CHAR_SIFT_MAX_SIDE)
     splash = _resize_max_side(_subcrop(region_img, CHAR_SPLASH_SUBBOX), CHAR_SIFT_MAX_SIDE)
     cid, conf, margin = _match_asset(splash, _CHARACTER_FEATURES)
+    parsed = None
     if cid in ROVER_GENDER_BY_ID and conf >= CHAR_CONF_FLOOR:
-        rover = _rover_analysis(cid, _detect_rover_badge_element(region_img))
+        # Newer Rover variants include their element in the title, while older
+        # Spectro/Aero cards may still say only "Rover". An explicit title is
+        # authoritative; the colored badge is the fallback for an unsuffixed or
+        # unreadable title.
+        parsed = _read_character_title(region_img)
+        title_element = parsed.get("element")
+        badge_element = _detect_rover_badge_element(region_img)
+        if title_element and badge_element and title_element != badge_element:
+            print(
+                "Rover title/badge disagreement: "
+                f"title={title_element} badge={badge_element}; using title"
+            )
+        rover = _rover_analysis(
+            cid,
+            title_element or badge_element,
+            parsed.get("level", 90),
+        )
         if rover is not None:
             return rover
-    if cid and conf >= CHAR_CONF_FLOOR and margin >= CHAR_MARGIN_FLOOR:
+    if cid and cid not in ROVER_GENDER_BY_ID and conf >= CHAR_CONF_FLOOR and margin >= CHAR_MARGIN_FLOOR:
         return {"name": CHARACTER_ID_NAME.get(cid, ""), "id": cid, "level": 90}
-    text = process_ocr("character", _subcrop(region_img, CHAR_NAME_SUBBOX))
-    cleaned = "\n".join(line.strip() for line in text.splitlines() if line.strip())
-    parsed = parse_character_title(cleaned)
+    if parsed is None:
+        parsed = _read_character_title(region_img)
     if "rover" in re.sub(r'[^a-z]', '', parsed.get("name", "").lower()):
         rover = _rover_analysis(cid, parsed.get("element") or _detect_rover_badge_element(region_img), parsed.get("level", 90))
         if rover is not None:

@@ -192,6 +192,45 @@ py -m unittest discover -s tests -v
 The ingest tests use fake S3 clients and local in-memory images. They do not
 contact R2, Railway, or any production service.
 
+## OCR benchmarks
+
+The local `r2-backup/` corpus is evaluation input, not automatic ground truth.
+Historical database values may contain the same OCR error being investigated,
+so benchmark reports distinguish database-proxy agreement from visually
+verified gold-label accuracy.
+
+```bash
+# UID configuration ablation (scale-safe preprocessing + per-reader latency)
+py benchmark_uid_ocr.py --limit 500
+
+# Corpus pass after narrowing the candidates
+py benchmark_uid_ocr.py --all --workers 12 \
+  --configs live tight_up4_fixed_psm7_digits
+
+# Render raw UID bands wherever two readers disagree
+py render_uid_review.py benchmarks/uid_ocr/<run>/results.tsv \
+  --right tight_up4_fixed_psm7_digits
+
+# Live RapidOCR-assisted substats vs the preserved alternatives
+py benchmark_echo_substats.py --limit 100 --workers 6 --candidate tess_only
+py benchmark_echo_substats.py --limit 100 --workers 6 --candidate hybrid
+```
+
+`benchmark_uid_ocr.py` accepts the explicit gold-label JSON shape documented in
+`optimize_crops.py`, or a two-column `image-key<TAB>uid` proxy TSV. Pass
+`--labels-are-gold` only after the pixels were reviewed by a human. The echo
+benchmark likewise treats live OCR as a regression baseline, writes every
+disagreement for review, and never calls it ground truth.
+
+The July 2026 corpus pass selected `tight_up4_fixed_psm7_digits` for UID OCR:
+a tight UID-only crop, 4x cubic upscale, grayscale fixed threshold 140,
+Tesseract `--psm 7`, digit whitelist, and an exact-nine-digit acceptance rule.
+It produced 18,942 valid reads out of 19,567 images (96.81%), versus 17,699
+(90.45%) for the live watermark reader, while being about 5% faster locally.
+All 262 cases where both readers returned different UIDs were visually reviewed
+and favored the candidate. Benchmark output under `benchmarks/` is intentionally
+ignored by Git.
+
 ## Railway Operations
 
 Production runs in Railway project `wuwa-backend` as service `WuWa OCR`.

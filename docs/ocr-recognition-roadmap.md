@@ -436,6 +436,11 @@ design and the floors used; the calibration note remains the tuning lever.
 - Calibrate the floors on a larger slice before shipping; 500 cards points at
   conf ~0.10 (character) and conf ~0.08 + margin ~0.03 (weapon). Rover variants
   should abstain → OCR (or a base-Rover/element fallback) rather than guess.
+- A Rover splash match identifies gender only. An explicit element suffix in
+  the title is authoritative; older Aero/Spectro cards that say only `Rover`
+  fall back to the saturated foreground hue of the character badge. Do not
+  reuse the Sonata badge matcher here: its broader histogram mask includes the
+  purple card header, which can make Aero and Spectro badges look Electro.
 
 Phase 1 acceptance remains:
 

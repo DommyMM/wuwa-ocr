@@ -118,9 +118,28 @@ it is **Lagu, not H7** (H7 is the Chinese font); Lagu wins decisively on the dig
 The font's correct use is **fine-tuning Tesseract** (a discriminative reader), not whole-string
 template matching (rejected above).
 
-## Recommendation / plan
+## July 2026 recheck against the current reader
 
-1. **Ship `tess_only` and delete RapidOCR.** Apply the names wrap-merge + `--psm 6` values +
+The preserved `benchmark_echo_substats.py` harness reran 500 echo panels from
+100 images against today's RapidOCR-assisted implementation:
+
+| candidate | identical to live | legal substat delta | speed result |
+| --- | ---: | ---: | ---: |
+| Tesseract-only | 98.4% (492/500) | -12 / 2468 | 8.5% faster mean locally |
+| conditional Rapid hybrid | 99.4% (497/500) | -3 / 2468 | 1.0% slower mean locally |
+
+The hybrid's three misses jointly dropped a name and its legal value, so count
+and legality checks could not detect them. These live outputs are still not
+human gold labels, but the result is enough to reject both candidates for a
+production change: Tesseract-only loses too many rows, while hybrid gives up its
+speed advantage without reaching parity. Keep the current mixed reader until a
+gold-labeled set or a more discriminative per-row fallback exists.
+
+## Original recommendation / plan (superseded by the July recheck)
+
+1. ~~**Ship `tess_only` and delete RapidOCR.**~~ Do not ship this based on the
+   proxy regression; the July recheck above supersedes this recommendation. The
+   original proposed implementation was the names wrap-merge + `--psm 6` values +
    upscaled second read arbitrated by the legal set + deterministic `%`. Remove
    `Rapid = RapidOCR(...)` from `data.py` and the rapid fallback in `card.py`
    (`reconcile_echo_substat_rows` / `choose_substat_value`'s rapid arm). Drop `OCR_WORKERS`
@@ -135,10 +154,17 @@ template matching (rejected above).
    help tesstrain (CPU); the RTX 5090 only matters if we ever train a custom NN, which the
    closed-set problem does not warrant.
 
-**Open decision (user):** ship step 1 now at the < 1% delta, or fine-tune first (step 2) and
-ship both together. Step 1 alone already captures the entire RAM/cost/latency win.
+**Current decision:** keep the live mixed reader. Fine-tuning or a gold-labeled
+evaluation can reopen the deletion proposal later.
 
-## Tooling (removed after the investigation)
+## Tooling
+
+`benchmark_echo_substats.py` now preserves the A/B reader, disagreement output,
+legal-row counts, RapidOCR call counts, and per-panel timings. Use
+`--candidate tess_only` or `--candidate hybrid`; benchmark results are written
+under the ignored `benchmarks/echo_substats/` directory.
+
+### Earlier scratch tooling (removed after the investigation)
 
 These untracked harnesses produced the numbers above and were deleted at the end of the
 session; the methodology here is enough to recreate them if needed:
