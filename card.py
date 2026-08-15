@@ -96,6 +96,11 @@ SEQUENCE_REGIONS = {
     "S6": {"center": (449, 58), "width": 30, "height": 26}
 }
 
+# Active nodes contain a large pale center. Lossy JPEG cards can push the
+# matching-pixel ratio below the original 0.75 cutoff (the reviewed Chisa S1
+# source measures 0.709), while reviewed inactive nodes remain below 0.58.
+SEQUENCE_ACTIVE_GRAY_RATIO = 0.65
+
 ECHO_REGIONS = {
     "main": {"x1": 195, "y1": 66, "x2": 366, "y2": 148},
     "subs_names": {"x1": 36, "y1": 228, "x2": 290, "y2": 400},
@@ -763,7 +768,6 @@ def parse_sequence_region(image) -> int:
         'lower': np.array([0, 0, 160]),
         'upper': np.array([40, 180, 255])
     }
-    GRAY_THRESHOLD = 0.75
     active_count = 0
     
     for seq_num, region in SEQUENCE_REGIONS.items():
@@ -782,7 +786,7 @@ def parse_sequence_region(image) -> int:
         gray_mask = cv2.inRange(hsv, GRAY_HSV['lower'], GRAY_HSV['upper'])
         gray_ratio = np.count_nonzero(gray_mask) / gray_mask.size
         
-        if gray_ratio > GRAY_THRESHOLD:
+        if gray_ratio > SEQUENCE_ACTIVE_GRAY_RATIO:
             active_count += 1
     
     return active_count
