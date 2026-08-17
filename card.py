@@ -293,6 +293,25 @@ def _tess_lines(image: np.ndarray) -> list[str]:
     return [l.strip() for l in pytesseract.image_to_string(image).splitlines() if l.strip()]
 
 
+def _main_strip_lines(main_img: np.ndarray) -> list[str]:
+    """Read the echo main strip on plain grayscale, deliberately skipping preprocess_region.
+
+    Its fixed 140 threshold keeps the bright value row but shreds the dimmer name row, and 
+    psm 3 then returns the whole strip empty, which resolve_echo_main silently turns into HP%
+    Grayscale at 2x/psm 6 measured 99.99% vs 99.60%->7.79% across a softness ladder
+    see docs/echo-main-strip-preprocessing.md for the sweep, the rejected axes, and why this is scoped to this strip only
+    """
+    upscaled = cv2.resize(
+        cv2.cvtColor(main_img, cv2.COLOR_BGR2GRAY), None,
+        fx=2, fy=2, interpolation=cv2.INTER_CUBIC,
+    )
+    return [
+        l.strip()
+        for l in pytesseract.image_to_string(upscaled, config="--psm 6").splitlines()
+        if l.strip()
+    ]
+
+
 def _rapid_main_line(main_img: np.ndarray) -> str:
     """Rapid OCR of the echo main strip, collapsed to one 'Name Value' line."""
     lines = rapid_text_lines(main_img)
@@ -1132,7 +1151,7 @@ def _process_card_inner(image, region: str):
     elif region.startswith("echo"):
         # --- main stat: raw Tesseract read, resolved against the echo cost below ---
         main_img = _crop_region(image, ECHO_REGIONS["main"])
-        main_lines = _tess_lines(preprocess_region(main_img))
+        main_lines = _main_strip_lines(main_img)
         main_line = " ".join(main_lines[:2]) if len(main_lines) >= 2 else (main_lines[0] if main_lines else "")
         raw_main_name, raw_main_value = _parse_main_line(main_line)
 

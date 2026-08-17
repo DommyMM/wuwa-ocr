@@ -4,6 +4,13 @@ This backend should be treated as a fixed-layout recognition service, not a
 general OCR service. The import image format is constrained, the crop geometry
 is stable, and most labels come from small finite game-data vocabularies.
 
+> **Worked example (2026-08).** The echo main strip was the clearest case of the
+> general-OCR habit costing us accuracy: a fixed global binarisation threshold,
+> which cannot be right for a strip whose two rows sit at different brightness.
+> Deleting it outright beat every one of 6336 tuned alternatives. See
+> [echo-main-strip-preprocessing.md](echo-main-strip-preprocessing.md) — including
+> the rejected axes, so they are not re-attempted.
+
 ## Attempted but not adopted — Tesseract-only echo substat OCR (first attempt)
 
 > **Superseded (2026-06).** This documents the *first* Tesseract-only attempt,
