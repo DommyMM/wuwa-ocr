@@ -5,20 +5,24 @@ training data. It is a deterministic layout check, not a generic AI detector.
 
 ## Production flow
 
-`image_integrity.py` runs after decode and returns one of three verdicts:
+`validate_image_integrity` runs after decode and returns one of two verdicts.
+There is deliberately no `suspect` tier: the only two things that turn a user
+away are a wrong size and a chrome mismatch, both invariants of a genuine card.
 
-- `ok`: a 1920x1080 card with the expected Discord QR/layout anchors. R2 upload
-  and region OCR run concurrently.
-- `suspect`: an anchor is missing or lower stat rows are unusual. Region OCR
-  runs first; R2 storage starts only if the OCR structure is plausible.
-- `reject`: wrong dimensions or a high-confidence modified-row signature. R2
-  storage and OCR are both skipped and the client receives a specific message.
+- `ok`: a 1920x1080 card whose fixed chrome matches the template. R2 upload and
+  region OCR run concurrently.
+- `reject`: wrong dimensions, or a chrome score at or above `CHROME_REJECT_SCORE`.
+  R2 storage and OCR are both skipped and the client receives a specific message.
 
-The suspicious OCR gate requires a recognized character and weapon, a hidden
-or nine-digit UID, at least four structurally complete echoes, and at least two
-confident echo-template matches. This rejects unrelated screenshots, Discord
-screenshots, and other card generators without storing them. A suspicious but
-valid transformed KuroBot card can still pass.
+This is Phase A ("is this a KuroBot card at all?"). It rejects wrong-size images,
+screenshots, crops and AI-generated cards, and is blind to progression, language
+and blur by construction. Phase B (`echo_bed_score`) and Phase C
+(`forensics_card_render.render_consistency`) both ask "is the echo content
+authentic?" and neither gates today — see `card-forgery-detection.md`.
+
+An earlier revision of this document described a three-verdict flow with a QR
+anchor and an OCR-structure gate. That is not what the code does; the text was
+corrected on 2026-08-19 to match `image_integrity.py`.
 
 ## Evidence and thresholds
 
@@ -54,6 +58,8 @@ with R2.
 - `scan_image_integrity.py`: corpus scan and JSON/CSV review queue.
 - `review_integrity_gui.py`: manual keep/delete/review decisions.
 - `forensics_echo_integrity.py`: panel crops and diagnostic overlays.
+- `forensics_card_render.py`: re-rendered substat rows (Phase C) plus JPEG
+  encoder signature; corpus scan and review queue. See `card-forgery-detection.md`.
 - `baseline_echo_row_darkness.py`: position-specific threshold analysis.
 - `clean_invalid.py`: dry-run or apply reviewed deletions.
 
