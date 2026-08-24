@@ -152,19 +152,36 @@ def tile_box(lattice: dict, row_idx: int, col: int) -> tuple[float, float, float
 # Test the CORNERS, and test for the gold HUE rather than for brightness.
 SELECT_LO = np.array([15, 60, 140])
 SELECT_HI = np.array([40, 255, 255])
-SELECT_FLOOR = 25.0     # below this, nothing on the page is selected
+
+# The gap this floor sits in, measured over all five fixtures: a real selection scores
+# 28.0-44.0 on its WEAKEST corner, and every non-selected tile scores 0.0 on its weakest.
+SELECT_FLOOR = 15.0
 
 
 def selection_score(frame: np.ndarray, box) -> float:
+    """Gold coverage of the WEAKEST of the four corners.
+
+    Pooling all four corners into one mean was the first version, and a mean lets one
+    very bright corner carry a tile that has no ring at all. Two different things do
+    exactly that:
+
+      * the orange "New" ribbon on a freshly-obtained echo sits in the top-right corner
+        and scored 165.9 there, four times a real selection, with 0.0 on the other three
+      * gold artwork bleeding into one or two corners (bug #7's original culprit, which
+        moving to corners reduced but did not remove): 59.5 / 35.2 / 11.4 / 0.0
+
+    The selection ring is the only thing that lights up ALL FOUR corners, so the minimum
+    is the discriminating statistic and the mean is not. This matters beyond a cosmetic
+    flag: the panel is only trustworthy when it belongs to the tile we think is selected.
+    """
     t = L.crop(frame, box)
     h, w = t.shape[:2]
     k = max(2, int(L.TILE_CORNER_FRAC * min(h, w)))
-    corners = np.concatenate([
-        t[:k, :k].reshape(-1, 3), t[:k, -k:].reshape(-1, 3),
-        t[-k:, :k].reshape(-1, 3), t[-k:, -k:].reshape(-1, 3),
-    ]).reshape(1, -1, 3)
-    hsv = cv2.cvtColor(corners, cv2.COLOR_BGR2HSV)
-    return float(cv2.inRange(hsv, SELECT_LO, SELECT_HI).mean())
+    return min(
+        float(cv2.inRange(cv2.cvtColor(patch.reshape(1, -1, 3), cv2.COLOR_BGR2HSV),
+                          SELECT_LO, SELECT_HI).mean())
+        for patch in (t[:k, :k], t[:k, -k:], t[-k:, :k], t[-k:, -k:])
+    )
 
 
 def is_selected(frame: np.ndarray, box) -> bool:

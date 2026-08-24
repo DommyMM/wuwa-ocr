@@ -39,28 +39,21 @@ BACKEND = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(BACKEND))
 import data  # noqa: E402
 
-from . import layout as L
+from . import glyphs, layout as L
 from .identify import identify_echo
 
-# Cost PREFILTERS the template pool (card.py's trick: 180 echoes partition into 42/53/85).
+# Cost PREFILTERS the template pool (card.py's trick: 180 echoes partition into
+# 42/53/85 by cost). On a washed-out tile it is not a speed tweak, it is the
+# difference between right and wrong: a Phantom Feilian Beringal matched "Zip Zap",
+# a cost-1 echo from an unrelated family, because the phantom shimmer flattens the
+# very edges gradient relies on and every candidate collapsed to noise (top score
+# 0.105, top-6 smeared across 0.105..0.075). Filtering to cost 4 puts the Feilian
+# pair back at ranks 1 and 2. Speed was never the argument; recovering a dead
+# signal is.
 #
-# On this page it is not a speed tweak, it is the difference between right and wrong. A
-# washed-out Phantom Feilian Beringal matched "Zip Zap" -- a cost-1 echo from an unrelated
-# family -- because the phantom shimmer flattens the very edges gradient relies on, and
-# every candidate collapsed to noise (top score 0.105, top-6 smeared across 0.105..0.075).
-# Filtering to cost 4 puts the Feilian pair back at ranks 1 and 2. Speed was never the
-# argument; recovering a dead signal is.
-#
-# It is safe because it ABSTAINS rather than guesses, and an unknown cost simply means the
-# full sweep, so a missed cost badge can never drop the true echo.
-#
-# Matching uses card.py's clean glyph templates. Tile-native templates score far HIGHER
-# (0.715 vs 0.127 mean) and are far MORE WRONG (21/36 vs 36/36): cropped from a tile they
-# carry the artwork behind the digit, so they correlate on the creature, not the numeral.
-# High confidence, wrong answer. Correlating a small glyph against busy art is genuinely
-# low-scoring, so trust the RANKING (36/36 over two frames) and gate on the MARGIN.
-# Cost 1 is untested -- no capture has one.
-COST_MIN_MARGIN = 0.03
+# It is safe ONLY because it abstains rather than guesses: an unknown cost means the
+# full sweep, so a missed read can never drop the true echo. That guarantee was
+# broken for a while - see glyphs.py for the post-mortem and the fix.
 
 # Gradient failed to separate the top two AND hue could not break the tie. The answer is
 # then a coin flip and must say so: this is how the Feilian Beringal family surfaces, where
@@ -97,30 +90,48 @@ def _families() -> dict[str, list[str]]:
 
 
 def read_cost(frame: np.ndarray, tile_box) -> int | None:
-    """Cost digit from the tile. None when the two best templates are too close to call."""
-    if not data.COST_TEMPLATES:
-        return None
-    crop = L.crop(frame, L.sub_box(tile_box, L.TILE_COST))
-    if crop.size == 0:
-        return None
-    g = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-    scores = sorted(
-        (
-            (
-                float(cv2.matchTemplate(
-                    g,
-                    cv2.resize(t, (g.shape[1], g.shape[0]), interpolation=cv2.INTER_AREA),
-                    cv2.TM_CCOEFF_NORMED,
-                ).max()),
-                cost,
-            )
-            for cost, t in data.COST_TEMPLATES.items()
-        ),
-        reverse=True,
-    )
-    if len(scores) < 2 or (scores[0][0] - scores[1][0]) < COST_MIN_MARGIN:
-        return None
-    return scores[0][1]
+    """Cost digit from the tile. None when no glyph was found or the call is too close.
+
+    Delegates to glyphs.classify_cost, which masks the gold ink and compares SHAPES.
+    The previous implementation correlated the raw grayscale crop against card.py's
+    Data/Costs templates and scored 2/18 on a mixed-cost page, because those templates
+    are a digit inside a diamond frame and the diamond is what the correlation saw.
+    Full post-mortem in glyphs.py.
+    """
+    return glyphs.classify_cost(L.crop(frame, L.sub_box(tile_box, L.TILE_COST)))[0]
+
+
+MAX_LEVEL = 25
+
+
+def read_levels(frame: np.ndarray, tile_boxes: list, reader) -> list[int | None]:
+    """Level (+N) for a whole PAGE of tiles, in one OCR invocation.
+
+    Batched on purpose: TesseractReader spends ~150 ms on process spawn and almost
+    nothing per image, so a page of 18 costs about what one tile would. Batching here is
+    safe in a way that batching the panel's value column was not -- these are independent
+    crops handed over as a file list and returned one-for-one, not one tall image an
+    engine can drop a line out of (PLAN.md bug #2).
+
+    Level is what makes the scan cheap: substats unlock at +5, so everything below that
+    has nothing the detail panel could add and must never be clicked.
+
+    USE TESSERACT. WinRT scores 0/18 on this field at any upscale, while scoring 5/5 on
+    the panel's value cells -- the pill is one or two digits on a ~57x41 crop, and
+    Windows.Media.Ocr wants more textual context than that before it will return a line.
+    The engine choice is per-FIELD here, not global.
+    """
+    cells = [glyphs.level_digits(L.crop(frame, L.sub_box(b, L.TILE_LEVEL)))
+             for b in tile_boxes]
+    out: list[int | None] = []
+    for value in reader.read(cells):
+        if value is None:
+            out.append(None)
+            continue
+        n = int(value)
+        # A closed range, so a misread lands outside it rather than passing as a level.
+        out.append(n if 0 <= n <= MAX_LEVEL else None)
+    return out
 
 
 def read_sonata(frame: np.ndarray, tile_box, echo_id: str) -> tuple[int | None, str]:

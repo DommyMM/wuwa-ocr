@@ -123,10 +123,14 @@ def read_echo(frame: np.ndarray, tile_box, reader: ocr.Reader | None = None) -> 
     """Full record: tile census + panel substats (the panel must already be showing it)."""
     t = tile.census(frame, tile_box)
     subs, warnings = read_substats(frame, reader)
+    # Level comes from the TILE, and deliberately not from `reader`: that one is WinRT by
+    # default, which returns nothing on a level pill. See ocr.level_reader.
+    level = tile.read_levels(frame, [tile_box], ocr.level_reader())[0]
     return Echo(
         id=t["id"],
         name=t["name"],
         cost=t["cost"],
+        level=level,
         set_id=t.get("set_id"),
         substats=subs,
         confidence=t.get("confidence", {}),

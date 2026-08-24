@@ -8,6 +8,7 @@ Phase 1 / Phase 2.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import sys
 from dataclasses import asdict
@@ -18,7 +19,12 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from wuwa_scanner import grid, layout as L, ocr, panel, tile  # noqa: E402
+# Importing the scanner pulls in backend/data.py, which announces itself on stdout
+# ("Loaded local data: ..."). Both commands here emit JSON on stdout, so that banner
+# lands in the middle of the document and `census frame.jpg > out.json` produces a file
+# that will not parse. Push the noise to stderr, where progress output belongs anyway.
+with contextlib.redirect_stdout(sys.stderr):
+    from wuwa_scanner import grid, layout as L, ocr, panel, tile  # noqa: E402
 
 
 def _load(path: str) -> np.ndarray:
@@ -34,13 +40,16 @@ def cmd_census(path: str) -> None:
     if not lat["row_tops"]:
         raise SystemExit("no grid rows detected (is this the Echo bag screen?)")
 
+    boxes = [(r, c, grid.tile_box(lat, r, c))
+             for r in range(len(lat["row_tops"])) for c in range(L.GRID_COLS)]
+    # One OCR invocation for the whole page; see tile.read_levels.
+    levels = tile.read_levels(img, [b for _r, _c, b in boxes], ocr.level_reader())
+
     tiles = []
-    for r in range(len(lat["row_tops"])):
-        for c in range(L.GRID_COLS):
-            box = grid.tile_box(lat, r, c)
-            t = tile.census(img, box)
-            t.update(row=r, col=c, selected=grid.is_selected(img, box))
-            tiles.append(t)
+    for (r, c, box), level in zip(boxes, levels):
+        t = tile.census(img, box)
+        t.update(row=r, col=c, level=level, selected=grid.is_selected(img, box))
+        tiles.append(t)
 
     print(json.dumps({
         "source": path,

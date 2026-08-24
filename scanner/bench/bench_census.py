@@ -145,8 +145,10 @@ def main() -> None:
     print("-" * 112)
     print(f"identity: {ok}/{n}   ({by_hue} near-ties resolved by hue)")
     print(f"sonata:   {n_set}/{n} resolved")
-    # The cost read only PREFILTERS, and it abstains rather than guess, so a low read
-    # rate costs speed and nothing else. See tile.COST_MIN_SCORE.
+    # The cost read only PREFILTERS and abstains rather than guess, so an abstain costs a
+    # full template sweep and nothing else. It used to abstain on 2 of 24 here; since the
+    # glyph-mask rewrite it reads all 24. Correctness across all three costs is measured
+    # by bench_fields.py, not here -- this page is entirely cost 4.
     print(f"cost:     {n_cost}/{n} read ({n - n_cost} abstained -> full template sweep)")
     print(f"{t_all / n * 1000:.1f} ms per tile  ->  {t_all / n * 1000 * 24:.0f} ms per 24-tile page")
 

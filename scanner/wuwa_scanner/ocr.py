@@ -45,8 +45,12 @@ import numpy as np
 NUM_RX = re.compile(r"\d+(?:[.,]\d+)?")
 
 
-def _prep(img: np.ndarray) -> np.ndarray:
-    up = cv2.resize(img, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
+def _prep(img: np.ndarray, scale: int = 2) -> np.ndarray:
+    """Upscale, grayscale, Otsu. `scale` matters more than it looks: a 285x68 substat
+    value cell reads fine at 2x, but a 43x59 level-digit crop needs 4x before Tesseract
+    will commit to it (89/90 -> 90/90). At 4x every page-segmentation mode agrees, so it
+    is a plateau rather than a tuned constant."""
+    up = cv2.resize(img, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
     gray = cv2.cvtColor(up, cv2.COLOR_BGR2GRAY)
     _, th = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)
     return th
@@ -66,6 +70,9 @@ def parse_number(text: str) -> float | None:
 class Reader:
     """Reads numbers from a batch of value cells. One result per cell, always."""
 
+    def __init__(self, upscale: int = 2) -> None:
+        self.upscale = upscale
+
     def read(self, cells: list[np.ndarray | None]) -> list[float | None]:
         raise NotImplementedError
 
@@ -79,7 +86,8 @@ class WinRTReader(Reader):
 
     name = "winrt"
 
-    def __init__(self) -> None:
+    def __init__(self, upscale: int = 2) -> None:
+        super().__init__(upscale)
         import winocr
         from PIL import Image
         self._winocr = winocr
@@ -91,7 +99,7 @@ class WinRTReader(Reader):
             if c is None:
                 out.append(None)
                 continue
-            rgb = cv2.cvtColor(_prep(c), cv2.COLOR_GRAY2RGB)
+            rgb = cv2.cvtColor(_prep(c, self.upscale), cv2.COLOR_GRAY2RGB)
             res = self._winocr.recognize_pil_sync(self._Image.fromarray(rgb), "en")
             lines = res["lines"] if isinstance(res, dict) else res.lines
             txt = "".join((l["text"] if isinstance(l, dict) else l.text) for l in lines)
@@ -118,7 +126,7 @@ class TesseractReader(Reader):
             paths = []
             for i in idx:
                 p = f"{td}/c{i:02d}.png"
-                cv2.imwrite(p, _prep(cells[i]))
+                cv2.imwrite(p, _prep(cells[i], self.upscale))
                 paths.append(p)
             Path(f"{td}/list.txt").write_text("\n".join(paths))
             out = subprocess.run(
@@ -136,8 +144,23 @@ class TesseractReader(Reader):
 
 
 def default_reader() -> Reader:
-    """WinRT if available (24 ms/echo, zero bundle), else Tesseract (213 ms/echo)."""
+    """Substat value cells: WinRT if available (24 ms/echo, zero bundle), else Tesseract."""
     try:
         return WinRTReader()
     except Exception:
         return TesseractReader()
+
+
+def level_reader() -> Reader:
+    """Tile level pills. ALWAYS Tesseract, and that is measured, not a preference.
+
+    WinRT scores 5/5 on the panel's 285x68 value cells and 0/18 on the level pill's
+    ~57x41 digit crop, at 2x and at 4x upscale alike -- it returns no lines at all rather
+    than returning them wrongly. Windows.Media.Ocr wants more textual context than one or
+    two digits before it will commit. Tesseract reads the same crops 18/18.
+
+    So the engine choice is per-FIELD, not global, and this function exists to keep a
+    caller from reaching for default_reader() here and silently getting zero levels back.
+    A scan with no levels reads as "nothing is worth clicking".
+    """
+    return TesseractReader(upscale=4)

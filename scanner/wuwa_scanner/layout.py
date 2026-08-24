@@ -68,6 +68,9 @@ TILE_PITCH_Y = 423.0 / REF_H
 # Everything under this marker is Photoshop-measured calibration with no reader behind
 # it. It is kept because re-deriving it is manual work, not because it is validated.
 # Treat as a starting point and re-check on first use.
+#
+# TILE_LEVEL used to live here, and the re-check was not ceremonial: as measured it
+# clipped the tops of the digits on 17 of 90 tiles. See its entry below.
 COUNTER = _b(400, 105, 400, 70)               # "1437/3000" - scan completeness check
 SORT_CONTROL = _b(540, 1935, 700, 90)         # "Sort by Level"
 
@@ -86,7 +89,25 @@ SORT_CONTROL = _b(540, 1935, 700, 90)         # "Sort by Level"
 _TW, _TH = 325.0, 392.0
 TILE_ART = (18 / _TW, 11 / _TH, (18 + 292) / _TW, (11 + 292) / _TH)
 TILE_SET = (28 / _TW, 311 / _TH, (28 + 58) / _TW, (311 + 58) / _TH)
-TILE_LEVEL = (208 / _TW, 317 / _TH, (208 + 92) / _TW, (317 + 47) / _TH)
+# The level pill, "+25". Hand-measured at y 317..364, and that was WRONG in the way a
+# hand measurement usually is: it fit the tile it was measured on. The lattice carries a
+# few pixels of sub-row phase, so on other frames the glyph tops crossed the box edge and
+# OCR read a clipped "+25" as 2. Seventeen of ninety tiles, silently.
+#
+# Refitted by sweeping the vertical bounds over all 90 labelled tiles and asking not
+# "does it read correctly" but "does any ink touch an edge", which is the property that
+# actually has to hold. There is a PLATEAU, and the chosen bounds sit in the middle of it:
+#
+#   y0 = 306   7/90 touch   <- the footer's own top edge enters the box and becomes ink
+#   y0 = 307   0/90         <- plateau starts
+#   y0 = 314   0/90         <- plateau ends
+#   y0 = 315  12/90 touch   <- glyph tops clip
+#
+# Vertical slack is free in both directions here (flat footer chrome above and below) and
+# clipping is fatal, so this is the same trade PANEL_STATS makes on the left. Generous,
+# then let the ink locate itself inside. glyphs.level_digits ABSTAINS if ink still reaches
+# an edge, so a future UI shift surfaces as a missing level rather than a wrong one.
+TILE_LEVEL = (208 / _TW, 310 / _TH, (208 + 92) / _TW, 371 / _TH)
 
 # The cost digit, bottom-right of the art. Fitted on a MIXED-cost frame: a page where
 # every tile is cost 4 makes "reads 4" satisfiable by a box on blank background that
