@@ -74,11 +74,6 @@ ROVER_BADGE_HUE_ANCHORS = {
 }
 
 
-WEAPON_REGIONS = {
-    "name": {"x1": 152, "y1": 25, "x2": 437, "y2": 79},
-    "level": {"x1": 191, "y1": 79, "x2": 269, "y2": 133}
-}
-
 FORTE_REGIONS = {
     "normal": {"x1": 270, "y1": 144, "x2": 389, "y2": 204},
     "skill": {"x1": 48, "y1": 302, "x2": 158, "y2": 356},
@@ -466,6 +461,68 @@ def parse_character_title(text: str) -> dict:
     char_name = validate_character_name(name_text)
     return {"name": char_name, "id": CHARACTER_ID_MAP.get(char_name, ""), "level": level}
 
+def parse_watermark_username(lines: list[str], uid: int) -> str:
+    """Strip the 'Player ID:' label off the name line, and any UID that bled into it."""
+    if not lines:
+        return ""
+    first_line = lines[0].strip()
+    if ':' in first_line:
+        username = first_line.split(':', 1)[-1].strip()
+    else:
+        username = re.sub(r'^(?:Player\s*ID|Name|Neme)[.:;]?\s*', '', first_line, flags=re.IGNORECASE).strip()
+    if uid > 0 and str(uid) in username:
+        username = username.replace(str(uid), "").strip().rstrip(':').strip()
+    return username
+
+
+# --- Watermark: the two lines are read separately ------------------------------
+#
+# The strip is "Player ID:<name>" stacked over "UID:<9 digits>". Reading both in one
+# pass forces a single Tesseract config to serve both, which is why the UID could
+# never take the digits-only whitelist the roadmap prescribes: the same call has to
+# stay Unicode-capable for arbitrary usernames.
+#
+# Splitting is also what fixes the documented 9->3 UID misread. That defect is
+# Tesseract under-resolution, NOT a bad crop and NOT bad preprocessing -- the
+# binarised glyphs are plainly legible (a card reading 500019690 returned
+# 500013650) and the crop has generous margin. A 2x upscale before the read is what
+# resolves it. Measured over 600 r2-backup cards with every disagreement
+# hand-labelled, UID error fell 1.7% -> 0.17%; that 1.7% baseline matches the
+# 1.2-1.7% per-scan rate in OCR_PROFILE_INVESTIGATION.md.
+#
+# Scoped deliberately to this strip. The same upscale DESTROYS forte (77% missed
+# nodes vs 0.4% today), because preprocess_region's fixed threshold(140) is
+# calibrated for native scale and the forte nodes sit on bright diamond artwork. It
+# works here for the same reason it works on the echo main strip: pale text on a
+# dark ground.
+WATERMARK_UID_LINE_TOP = 0.46
+WATERMARK_UPSCALE = 2
+WATERMARK_UID_CONFIG = "--psm 7 -c tessedit_char_whitelist=0123456789"
+
+
+def read_watermark(image: np.ndarray) -> dict:
+    """Username from the free-form strip, UID from an upscaled digits-only line read."""
+    height = image.shape[0]
+    uid_line = image[int(height * WATERMARK_UID_LINE_TOP):, :]
+    upscaled = cv2.resize(
+        uid_line, None, fx=WATERMARK_UPSCALE, fy=WATERMARK_UPSCALE,
+        interpolation=cv2.INTER_CUBIC,
+    )
+    uid = 0
+    if match := re.search(
+        r'\d{6,12}',
+        pytesseract.image_to_string(preprocess_region(upscaled), config=WATERMARK_UID_CONFIG),
+    ):
+        uid = int(match.group(0))
+
+    name_lines = [
+        line.strip()
+        for line in pytesseract.image_to_string(preprocess_region(image)).splitlines()
+        if line.strip()
+    ]
+    return {"username": parse_watermark_username(name_lines, uid), "uid": uid}
+
+
 def parse_region_text(name, text):
     match name:
         case "character":
@@ -473,23 +530,14 @@ def parse_region_text(name, text):
             
         case "watermark":
             lines = text.split('\n')
-            username = ""
             uid = 0
             for line in lines:
                 if uid_match := re.search(r'\d{6,12}', line):
                     uid = int(uid_match.group(0))
                     break
-            if lines:
-                first_line = lines[0].strip()
-                if ':' in first_line:
-                    username = first_line.split(':', 1)[-1].strip()
-                else:
-                    username = re.sub(r'^(?:Player\s*ID|Name|Neme)[.:;]?\s*', '', first_line, flags=re.IGNORECASE).strip()
-                if uid > 0 and str(uid) in username:
-                    username = username.replace(str(uid), "").strip().rstrip(':').strip()
             return {
-                "username": username,
-                "uid": uid
+                "username": parse_watermark_username(lines, uid),
+                "uid": uid,
             }
 
 
@@ -906,14 +954,30 @@ def merge_wrapped_substat_names(lines: list[str]) -> list[str]:
 # falling back to the original OCR path so accuracy never regresses.
 DATA_DIR = Path(__file__).resolve().parent / "Data"
 
-CHAR_SPLASH_SUBBOX = (0.125, 0.2545, 0.9375, 0.9455)  # splash within character region
+# Widened from (0.125, 0.2545, 0.9375, 0.9455) after an 800-card A/B. The splash
+# has no fixed frame -- the art varies per character and bleeds past the region's
+# right edge -- so unlike the weapon icon there is no "correct" box to measure, only
+# a better-performing one. This box raised SIFT accept 97.8% -> 99.2%, median
+# confidence 0.1748 -> 0.1960 and median margin 0.1577 -> 0.1741, with ZERO identity
+# changes against the old box. Character was never broken (the splash is highly
+# distinctive, which is why a bad crop still worked); this is headroom, not a fix.
+CHAR_SPLASH_SUBBOX = (0.10, 0.16, 1.0, 0.9455)        # splash within character region
 CHAR_NAME_SUBBOX = (0.1025, 0.0135, 0.944, 0.1515)    # name strip within character region
 CHAR_ELEMENT_SUBBOX = (0.018, 0.025, 0.105, 0.14)      # element badge left of name strip
 CHAR_SIFT_MAX_SIDE = 150
 CHAR_CONF_FLOOR = 0.10
 CHAR_MARGIN_FLOOR = 0.04
 
-WEAP_ICON_SUBBOX = (0.0, 0.0785, 0.209, 0.7285)       # square icon within weapon panel
+# Measured, not eyeballed: stacking 400 weapon panels and taking per-pixel variance
+# isolates the icon exactly, because the panel frame is identical on every card and
+# the icon is not. The previous box came from the roadmap's crop spec and was
+# 92x140 (aspect 0.657) sitting +20px left and +22px above the icon while clipping
+# 44px off its right edge -- roughly half an icon, matched against square templates.
+# The measured box is 116x116, aspect 1.000, matching the 256x256 Data/Weapons art.
+# Over 1200 cards this lifted SIFT accept 77.9% -> 88.3% and median margin
+# 0.0754 -> 0.2659 (floor 0.03) while changing ZERO identities: it does not alter
+# answers, it stops abstaining on cards it should always have recognized.
+WEAP_ICON_SUBBOX = (0.0456, 0.1806, 0.3098, 0.7176)   # square icon within weapon panel
 WEAP_SIFT_MAX_SIDE = 120
 WEAP_CONF_FLOOR = 0.08
 WEAP_MARGIN_FLOOR = 0.03
@@ -1148,6 +1212,8 @@ def _process_card_inner(image, region: str):
         return {"success": True, "analysis": recognize_character_asset(image)}
     elif region == "weapon":
         return {"success": True, "analysis": recognize_weapon_asset(image)}
+    elif region == "watermark":
+        return {"success": True, "analysis": read_watermark(image)}
     elif region.startswith("echo"):
         # --- main stat: raw Tesseract read, resolved against the echo cost below ---
         main_img = _crop_region(image, ECHO_REGIONS["main"])

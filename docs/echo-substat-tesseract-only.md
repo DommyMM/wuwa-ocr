@@ -1,29 +1,22 @@
-# Echo Substat OCR: Deleting RapidOCR (Tesseract-only) — Investigation + Plan (2026-06)
+# Echo Substat Reading: history of the RapidOCR-removal attempts (2026-06 → 2026-07)
 
-Goal: **trim the latency tail and stop paying for RapidOCR's RAM footprint, without losing
-accuracy.** The lever is deleting RapidOCR from the echo substat path and running 100%
-Tesseract.
+Superseded. This file is kept only so the two failed attempts are not repeated.
+The live design discussion moved to a row-anchored, value-first formulation; see
+[ocr-recognition-roadmap.md](ocr-recognition-roadmap.md).
 
-> **Framing (2026-06):** the absolute Railway cost (~$7/mo) is *acceptable* — this is not a
-> cost-pressure exercise. The motivation is efficiency: RapidOCR is loaded in every worker and
-> pins ~92% of RAM, yet the fallback that justifies it fires on only ~25% of echoes and a
-> Tesseract-only path matches it within <1%. We're paying a large fixed RAM cost (and a latency
-> tail) for very little. Removing it is worthwhile *if* accuracy holds — optimize-if-possible,
-> not optimize-because-we-must.
+The benchmark artifacts (`benchmarks/echo_substats/`, gitignored) and the
+scratch harnesses (`benchmark_echo_substats.py`, `prototype_geom_subs.py`,
+`measure_rapid_fallback.py`, `diagnose_values.py`, `font_match.py`) were all
+deleted. The numbers below are the surviving record.
 
-## Why this is the right target (efficiency reframe)
+## Why RapidOCR was targeted
 
-The Railway bill for the OCR service is **~92% RAM** (`$6.35` RAM vs `$0.53` CPU of `$6.89`).
-RapidOCR (onnxruntime) is loaded at import in **every** worker (`data.py` `Rapid = RapidOCR(...)`),
-so it is the RAM driver whether or not it is called. Therefore:
+`data.py` instantiates `Rapid = RapidOCR(...)` at module import, so **every**
+worker pays its resident cost whether or not it is called. Calling it less does
+not help; only deleting it frees the RAM. That made a Tesseract-only substat
+path the prerequisite for removing it.
 
-- Calling rapid *less* barely helps; the base load + inference spikes stay.
-- **Deleting RapidOCR entirely** is what frees the RAM — which requires a Tesseract-only
-  path that matches accuracy.
-
-Latency corroborates: prod recognition wall ≈ the slowest of the 5 parallel echoes, and the
-RapidOCR fallback is what inflates it. Measured on r2-backup (`measure_rapid_fallback.py`,
-800-card sample):
+Fallback frequency, measured on an 800-card r2-backup sample:
 
 | trigger | per-echo rate | rapid calls |
 | --- | ---: | --- |
@@ -31,155 +24,99 @@ RapidOCR fallback is what inflates it. Measured on r2-backup (`measure_rapid_fal
 | illegal value (counts matched) | 10.8% | 1 (values) |
 | any fallback | 24.6% | 0.42 / echo avg |
 
-P(≥1 of 5 echoes hits fallback) ≈ **71% of cards**, which is exactly the gap between the
-~730ms no-fallback floor and the ~1237ms prod mean. Kill the fallback → kill the tail.
+P(≥1 of 5 echoes hits fallback) ≈ 71% of cards.
 
-## Root causes of the fallback (diagnosed, not guessed)
+## Attempt 1 (2026-06) — rolled back
 
-Test card `d92aea7866c92d37b33305491102660e428b501d5b6895dcaf80ebcd46d21a8b.jpg`
-together with `diagnose_values.py` made the three failure modes concrete:
+Per-row Tesseract with a value-driven **stat-name inference** fallback: when the
+name read was garbage and the value was legal for exactly one stat, the name was
+overridden from the value.
 
-1. **Name wrapping with garbage tails.** Only `Resonance Liberation DMG Bonus` (wraps
-   `DMG Bonus`) and `Resonance Skill DMG Bonus` (wraps `Bonus`) ever wrap. The existing
-   `clean_echo_substat_name_lines` merges *clean* continuations; when the 2nd line OCRs as
-   garbage (`NIAC Rie`, `Brite`, `Do`) it doesn't, so 6-7 name lines vs 5 values → mismatch.
-   This is the bulk of the 17.6%, and the **values are fine** in these cases.
-2. **psm-3 drops short flat values.** Default `image_to_string` (psm 3) drops integer values
-   like `430`/`60`/`40` on the narrow values strip — but **`--psm 6` recovers them**
-   (`['8.6%','19.8%','430','7.5%','10.1%']`). The current code uses bare `image_to_string`.
-3. **Digit misreads.** `330`→`390`, `[2`→`60`. **3x cubic upscale** recovers most of these,
-   but upscale alone is not safe (it broke `7.5%`→`1.5%` elsewhere). The value is a **closed
-   legal set** per stat, so legality can arbitrate between the two reads.
+200-card A/B: 135/200 identical, +14 improvements, **2 regressions**. Both
+regressions were flat ATK: `ATK 40` → `Crit Rate 40`, `ATK 50` → `Heavy Attack
+DMG Bonus 50`. Flat ATK and DEF share the values 40/50/60, so value-driven
+inference cannot disambiguate them, and a confident-but-wrong name passes every
+downstream legality check.
 
-## The Tesseract-only path that works (`tess_only`)
+**Rule that came out of this and still holds: never *infer* a short flat name
+from its value.** A wrong-but-legal substat is worse than a dropped one.
 
-Implemented + regressed in `prototype_geom_subs.py` (`tess_only_subs`), validated against the
-**live card.py (with real RapidOCR) as ground truth** over an even r2-backup sample:
+## Attempt 2 (2026-07) — validated at 97.6%, then rejected
 
-- **names**: `image_to_string` (unchanged, proven) + a hardened wrap-merge that absorbs the
-  garbage 2nd line for the two known wrappers (`improved_merge`).
-- **values**: two cheap Tesseract reads of the values strip —
-  - primary `--psm 6` (recovers psm-3 drops),
-  - alt `3x cubic + tessedit_char_whitelist=0123456789.%` (recovers misreads),
-  - **legality arbitrates** (closed legal-value set) — the exact role RapidOCR played, but
-    with a second Tesseract pass instead of the onnx model (Tesseract is already loaded → **no
-    added RAM**).
-- **%-suffix** is deterministic by stat type (Crit/DMG/ER/`*%` always `%`; flat HP/ATK/DEF never).
+Names via `image_to_string` + hardened wrap-merge; values via two cheap
+Tesseract reads (`--psm 6`, and `3x cubic + tessedit_char_whitelist=0123456789.%`)
+arbitrated by the closed legal-value set; `%` suffix deterministic by stat type.
+No name inference, so attempt 1's failure mode could not recur.
 
-### Result (800 cards, vs live card.py)
+800-card run: 97.6% of substat sets identical to prod, 0 rapid calls, −1.03%
+legal substats. A July recheck on 500 panels from 100 images:
 
-| metric | value |
-| --- | --- |
-| substat sets identical to prod | **97.6%** |
-| RapidOCR calls | **0** (was 0.42/echo) |
-| total legal substats vs prod | −1.03% (−199 / 19331) |
-| echoes where tess-only found *more* than prod | 9 |
+| candidate | identical to live | legal substat delta | speed |
+| --- | ---: | ---: | ---: |
+| Tesseract-only | 98.4% (492/500) | −12 / 2468 | 8.5% faster |
+| conditional Rapid hybrid | 99.4% (497/500) | −3 / 2468 | 1.0% slower |
 
-The real accuracy delta is **< 1%**: some of the 199 "losses" are cards where prod's rapid is
-itself wrong (tess-only recovered 9 echoes prod missed). Remaining true residual is digit
-misreads + multi-substat drops on a handful of hard/blurry cards.
+**Rejected.** Not because 98.4% is low, but because of *what* the 8 misses were.
+All 8 disagreements from that run:
 
-## Approaches tried and rejected (so we don't re-attempt)
+| card | region | live | tess-only |
+| --- | --- | --- | --- |
+| `29aa306a` | echo2 | `DEF 60` | dropped |
+| `5e637268` | echo5 | `HP 470` | dropped |
+| `a877bff0` | echo2 | `DEF 60` | dropped |
+| `97ead2bb` | echo1 | `HP 430`, `ATK% 7.1%` | both dropped |
+| `1ab8248d` | echo4 | `HP% 8.6%` | dropped |
+| `8d6c11a3` | echo4 | `HP% 8.6%` + `Crit Rate 8.7%` | dropped + **8.1%** |
+| `8fe69e97` | echo3 | `HP% 10.9%` + `Heavy Atk 7.9%` | dropped + **10.9%** |
+| `e24e8a9f` | echo1 | 5 rows | **1 row, wrong value** |
+
+Two things to take from this table:
+
+1. **7 of 8 involve a short name (`HP`/`ATK`/`DEF`) or a short flat value.**
+   Flat HP/ATK/DEF were 335 of 2468 rows (13.6%) in that sample, so this is a
+   structural weakness, not a tail case.
+2. **The last three are silent corruption, not drops.** `process_card` pairs the
+   two strips with `zip(cleaned_names, values_lines[:5])`, so one missing name
+   re-pairs every row below it. That amplifier, not the OCR engine, is what makes
+   a dropped row dangerous.
+
+The stated blocker was that the comparison used live output as the baseline
+rather than human gold labels, so a "loss" could not be distinguished from a
+correction.
+
+## Approaches tried and rejected (do not re-attempt)
 
 | approach | result | why rejected |
 | --- | --- | --- |
-| full-region single `image_to_data` (`geom_anchor`) | −159, name swaps, some cards → `[]` | reading names+values in one block degrades BOTH vs dedicated strips |
-| geometry-pair the two strips via `image_to_data` (`geom_pair_strips`) | −152, Skill↔Liberation swaps | `image_to_data` reads *names* worse than `image_to_string` |
-| full-region values + y-slot align (`hybrid`) | −236 | y-slot alignment fragile |
-| keep rapid, only repair illegal (`geom_repair`) | rapid 597→801 (worse) | doesn't cut RAM at all; rapid stays loaded |
-| **Lagu whole-string legal-set NCC** (`lagu_subs`) | **54.4% identical**, legal-but-WRONG values (`10.5%`→`7.5%`, `ATK% 10.1%`→`ATK 30`) | whole-string NCC can't discriminate similar legal values; silently wrong is worse than dropped |
-| heavier engines (EasyOCR/Paddle/Surya/TrOCR) | n/a | all heavier than RapidOCR → wrong way on the RAM bill |
+| value-driven stat-name inference | 2 flat-ATK regressions | 40/50/60 are legal for both ATK and DEF |
+| full-region single `image_to_data` | −159, name swaps, some cards → `[]` | reading names+values in one block degrades both |
+| geometry-pair the two strips via `image_to_data` | −152, Skill↔Liberation swaps | `image_to_data` reads names worse than `image_to_string` |
+| full-region values + y-slot align | −236 | y-slot alignment fragile |
+| keep rapid, only repair illegal | rapid 597→801 (worse) | rapid stays loaded, so no RAM win at all |
+| Lagu whole-string legal-set NCC on values | 54.4% identical, legal-but-WRONG values | whole-string NCC cannot discriminate similar legal values |
+| heavier engines (EasyOCR/Paddle/Surya/TrOCR) | n/a | all heavier than RapidOCR, wrong direction on RAM |
 
-**Key lesson:** the value reader must be **discriminative** (read the actual digits). That is
-Tesseract. Template/NCC matching against candidates *guesses* and fails on similar values.
+**Key lesson:** a *value* reader must be discriminative (actually read the
+digits). Template/NCC matching over candidate strings guesses and fails on
+similar legal values. This does not apply to a 2-class problem such as
+`ATK` vs `DEF`, where the glyphs share nothing.
 
-## The game fonts (found 2026-06)
+## Game fonts (still relevant)
 
-`C:\Wuthering Waves\2.6.2.0\Fonts` ships every client font:
+`C:\Wuthering Waves\<ver>\Fonts` ships every client font. The English stat-panel
+font is **LaguSansBold.otf**, settled quantitatively by NCC against real glyphs
+(mean 0.61, vs Kanit 0.50 and H7GBK-Heavy 0.46; H7 is the Chinese font). Its
+correct uses are Tesseract fine-tuning and rendering labelled synthetic cells,
+not whole-string template matching.
 
-| file | script |
-| --- | --- |
-| **LaguSansBold.otf** | **Latin — the English stat-panel font** |
-| H7GBK-Heavy.ttf | Chinese (GBK) — the CN client font, NOT English |
-| MotoyaAporoStdW5.otf | Japanese |
-| SourceHanSansCN-VF-2.otf | Chinese (CJK) |
-| SUITE-Bold.otf | Korean |
-| Kanit-Medium.ttf | Thai |
+## Where RapidOCR is still called on this path
 
-Quantitative NCC of each render vs real glyphs (`font_match.py`) settled the English font —
-it is **Lagu, not H7** (H7 is the Chinese font); Lagu wins decisively on the digits:
+Both call sites exist only to repair list desync, in
+`reconcile_echo_substat_rows`:
 
-| font | mean NCC | on values |
-| --- | ---: | --- |
-| **LaguSansBold** | **0.61** | **0.60–0.66** |
-| Kanit-Medium | 0.50 | 0.22–0.46 |
-| H7GBK-Heavy | 0.46 | 0.31–0.42 |
+1. `len(names) != len(values)` → rapid on both strips.
+2. `has_invalid_substat_pair(...)` → rapid on the values strip, consumed by
+   `choose_substat_value`.
 
-The font's correct use is **fine-tuning Tesseract** (a discriminative reader), not whole-string
-template matching (rejected above).
-
-## July 2026 recheck against the current reader
-
-The preserved `benchmark_echo_substats.py` harness reran 500 echo panels from
-100 images against today's RapidOCR-assisted implementation:
-
-| candidate | identical to live | legal substat delta | speed result |
-| --- | ---: | ---: | ---: |
-| Tesseract-only | 98.4% (492/500) | -12 / 2468 | 8.5% faster mean locally |
-| conditional Rapid hybrid | 99.4% (497/500) | -3 / 2468 | 1.0% slower mean locally |
-
-The hybrid's three misses jointly dropped a name and its legal value, so count
-and legality checks could not detect them. These live outputs are still not
-human gold labels, but the result is enough to reject both candidates for a
-production change: Tesseract-only loses too many rows, while hybrid gives up its
-speed advantage without reaching parity. Keep the current mixed reader until a
-gold-labeled set or a more discriminative per-row fallback exists.
-
-## Original recommendation / plan (superseded by the July recheck)
-
-1. ~~**Ship `tess_only` and delete RapidOCR.**~~ Do not ship this based on the
-   proxy regression; the July recheck above supersedes this recommendation. The
-   original proposed implementation was the names wrap-merge + `--psm 6` values +
-   upscaled second read arbitrated by the legal set + deterministic `%`. Remove
-   `Rapid = RapidOCR(...)` from `data.py` and the rapid fallback in `card.py`
-   (`reconcile_echo_substat_rows` / `choose_substat_value`'s rapid arm). Drop `OCR_WORKERS`
-   to fit the freed RAM. **Wins: ~92% RAM cost gone, latency tail gone, < 1% accuracy delta.**
-   This is deployable on the current Docker image (no new deps).
-2. **Fine-tune Tesseract on the game fonts to close the residual + go multilingual.** Render
-   the closed vocab (13 substat names + every legal value) through the same
-   `preprocess_region`, in Lagu, across a few sizes/weights, and `tesstrain`-fine-tune
-   `eng` → `wuwa.traineddata`. Same pipeline with Motoya/SourceHan/SUITE/Kanit gives custom
-   per-language traineddata that beats the generic lang packs (this supersedes approach **C**
-   in [multilingual-echo-investigation.md](multilingual-echo-investigation.md)). GPU does not
-   help tesstrain (CPU); the RTX 5090 only matters if we ever train a custom NN, which the
-   closed-set problem does not warrant.
-
-**Current decision:** keep the live mixed reader. Fine-tuning or a gold-labeled
-evaluation can reopen the deletion proposal later.
-
-## Tooling
-
-`benchmark_echo_substats.py` now preserves the A/B reader, disagreement output,
-legal-row counts, RapidOCR call counts, and per-panel timings. Use
-`--candidate tess_only` or `--candidate hybrid`; benchmark results are written
-under the ignored `benchmarks/echo_substats/` directory.
-
-### Earlier scratch tooling (removed after the investigation)
-
-These untracked harnesses produced the numbers above and were deleted at the end of the
-session; the methodology here is enough to recreate them if needed:
-
-- `prototype_geom_subs.py` — the A/B regression harness: every candidate above, diffed against
-  the live (rapid) `card.py` as ground truth, with `PG_N` / `PG_WORKERS` / `PG_SHOW` knobs and
-  per-echo latency. **Recreate this first** for any future pre-deploy regression.
-- `measure_rapid_fallback.py` — fallback-frequency measurement (the 71% / 17.6% numbers).
-- `diagnose_values.py` — per-config values-strip probe (the psm-6 / upscale discovery).
-- `font_match.py` — quantitative font identification (the Lagu finding).
-
-Note: regression to date is the 400/500/800-card samples (~97.1-97.6% identical, <1% delta,
-0 rapid). A full ~12k (`r2-backup`) run has **not** been completed — it is ~2.5h with real
-RapidOCR as ground truth — so this is validated **locally only**. The tess-only substat work
-is committed to `main` (`64625dc`, unpushed) but **not deployed**, and RapidOCR has **not**
-been removed yet: `data.py` still loads it and `card.py` still calls it (character level,
-weapon, and substat-value fallback). Removing RapidOCR (step 1's payoff) is gated on the full
-regression.
+Neither is a judgement about glyph legibility. Both are consequences of reading
+two independent block-OCR lists and pairing them positionally.

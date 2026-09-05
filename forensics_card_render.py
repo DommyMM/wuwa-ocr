@@ -182,7 +182,6 @@ def analyze(path: Path) -> dict[str, Any] | None:
     """Full two-stage pass on one file. Returns None if it is not a card."""
 
     try:
-        raw = path.read_bytes()
         image = cv2.imread(str(path))
         if image is None or image.shape[:2] != EXPECTED:
             return None
@@ -191,8 +190,11 @@ def analyze(path: Path) -> dict[str, Any] | None:
         if cheap["gap"] is None:
             return None
 
+        # Read raw bytes only once the frame is known to be a card: a corpus
+        # directory also holds multi-hundred-MB db dumps, and reading those into
+        # every worker before the guard is pure waste.
         row: dict[str, Any] = {"file": path.name}
-        row.update(encoder_signature(raw))
+        row.update(encoder_signature(path.read_bytes()))
         row.update(cheap)
 
         # Only pay for the re-encode when the cheap trigger fires.
