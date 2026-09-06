@@ -500,6 +500,54 @@ WATERMARK_UPSCALE = 2
 WATERMARK_UID_CONFIG = "--psm 7 -c tessedit_char_whitelist=0123456789"
 
 
+
+# --- UID confidence guard ------------------------------------------------------
+#
+# A wrong UID is unrecoverable BY THE USER. Dedup is global on
+# (character_id, weapon_id, echo_hash) and uid is sticky on conflict
+# (lb/internal/db/store_builds.go: uid only fills when it was previously '0'), so
+# the first scan's UID is permanent -- re-uploading the same card hits ON CONFLICT
+# and keeps the wrong value. Only lb/cmd/mergeuid can undo it, by hand.
+#
+# The failure that matters is therefore not a blank read, which is visible and
+# handled. It is a wrong but VALID-looking 9-digit number, which nothing downstream
+# can detect: it passes lb's ^\d{9}$ and files the build under a profile that does
+# not exist. One card in the labelled set (truth 503761149) was misread by two
+# different configs into two different plausible UIDs, neither flagging anything.
+#
+# Two reads whose configs differ decorrelate that failure: the primary isolates the
+# UID line and whitelists digits, the second reads the whole strip free-form at 2x.
+#
+# Length arbitrates before agreement does. lb requires ^\d{9}$, so a read of any
+# other length is self-evidently wrong and is discarded rather than counted as a
+# disagreement. That matters because it is the COMMON case: over 600 cards the two
+# reads differed on 3, and in all 3 exactly one read was malformed (a spurious
+# leading digit, a dropped digit, and a 12-digit smear) while the other was correct.
+# Discarding by length resolves every one of those without a third read, and without
+# refusing a card whose good read was simply outvoted by a bad one.
+#
+# What remains after that filter is genuine ambiguity: two well-formed 9-digit reads
+# that disagree, meaning one is a plausible-looking misread and there is no way to
+# tell which. Those write no UID. One card in the labelled set (truth 503761149,
+# read as 503701144 and 593701144) is exactly this, and it is the case the guard
+# exists for. The trade is lopsided in our favour: a refused read costs one
+# re-upload, a silent misread costs a permanently split profile and manual DB surgery.
+WATERMARK_UID_GUARD_UPSCALE = 2
+UID_DIGITS = 9                       # lb enforces ^\d{9}$
+
+
+def _uid_second_opinion(image: np.ndarray) -> int:
+    """Corroborating UID read: whole strip, free-form, deliberately NOT the primary's config."""
+    upscaled = cv2.resize(
+        image, None, fx=WATERMARK_UID_GUARD_UPSCALE, fy=WATERMARK_UID_GUARD_UPSCALE,
+        interpolation=cv2.INTER_CUBIC,
+    )
+    for line in pytesseract.image_to_string(preprocess_region(upscaled)).split("\n"):
+        if match := re.search(r'\d{6,12}', line):
+            return int(match.group(0))
+    return 0
+
+
 def read_watermark(image: np.ndarray) -> dict:
     """Username from the free-form strip, UID from an upscaled digits-only line read."""
     height = image.shape[0]
@@ -514,6 +562,18 @@ def read_watermark(image: np.ndarray) -> dict:
         pytesseract.image_to_string(preprocess_region(upscaled), config=WATERMARK_UID_CONFIG),
     ):
         uid = int(match.group(0))
+
+    corroborating = _uid_second_opinion(image)
+    candidates = {c for c in (uid, corroborating) if len(str(c)) == UID_DIGITS}
+    if len(candidates) == 1:
+        resolved = candidates.pop()
+        if resolved != uid:
+            print(f"UID guard: primary {uid} malformed, using corroborating read {resolved}")
+        uid = resolved
+    else:
+        if candidates:
+            print(f"UID guard: reads disagree ({uid} vs {corroborating}); writing no UID")
+        uid = 0
 
     name_lines = [
         line.strip()
@@ -1125,12 +1185,52 @@ def recognize_character_asset(region_img: np.ndarray) -> dict:
     return parsed
 
 
+# --- Weapon level -------------------------------------------------------------
+#
+# SIFT answers identity; it cannot answer level, and a SIFT accept used to report a
+# hardcoded 90. Measured over 1153 cards with a readable weapon, 6.0% are NOT level
+# 90 (LV.80 x40, LV.70 x14, LV.60, LV.1 ...), so that hardcode was wrong roughly one
+# build in seventeen -- and correcting WEAP_ICON_SUBBOX made it worse, by routing
+# more cards down the accept path and fewer to the OCR fallback that reads the real
+# level. Level is therefore read on its own, independent of the SIFT verdict.
+#
+# The box is the one WEAPON_REGIONS carried before SIFT orphaned it; rendering it
+# over real panels confirms it wraps "LV.xx" cleanly. Read at 2x with psm 7 and a
+# digit whitelist it matched the RapidOCR reference on 800/800 cards with zero
+# misses, at ~144 ms against a ~890 ms echo wall.
+#
+# Only the accept path pays for it. On abstain the existing Rapid panel read already
+# supplies the level -- it is the reference this was validated against -- so there is
+# nothing to gain and a spawn to lose by reading twice.
+WEAPON_LEVEL_BOX = {"x1": 191, "y1": 79, "x2": 269, "y2": 133}
+WEAPON_LEVEL_UPSCALE = 2
+WEAPON_LEVEL_CONFIG = "--psm 7 -c tessedit_char_whitelist=LV.0123456789"
+
+
+def read_weapon_level(region_img: np.ndarray) -> int:
+    """Weapon level from its own box. Returns 0 when unreadable so callers can fall back."""
+    box = WEAPON_LEVEL_BOX
+    raw = region_img[box["y1"]:box["y2"], box["x1"]:box["x2"]]
+    if raw.size == 0:
+        return 0
+    upscaled = cv2.resize(
+        raw, None, fx=WEAPON_LEVEL_UPSCALE, fy=WEAPON_LEVEL_UPSCALE,
+        interpolation=cv2.INTER_CUBIC,
+    )
+    text = pytesseract.image_to_string(
+        preprocess_region(upscaled), config=WEAPON_LEVEL_CONFIG
+    )
+    match = re.search(r'(?i)lv\.?\s*(\d+)', text)
+    return int(match.group(1)) if match else 0
+
+
 def recognize_weapon_asset(region_img: np.ndarray) -> dict:
     """SIFT the weapon icon; OCR the panel on abstain (look-alike icons).
 
     A true blank weapon panel yields ~zero SIFT confidence and unreadable OCR, so
     the result stays empty (name/id "") and the frontend signature-weapon fallback
-    applies. SIFT accept reports level 90 (see recognize_character_asset).
+    applies. A SIFT accept reads the level from its own box (read_weapon_level),
+    falling back to 90 only when that box is unreadable.
     """
     global _WEAPON_FEATURES
     if _WEAPON_FEATURES is None:
@@ -1138,7 +1238,11 @@ def recognize_weapon_asset(region_img: np.ndarray) -> dict:
     icon = _resize_max_side(_subcrop(region_img, WEAP_ICON_SUBBOX), WEAP_SIFT_MAX_SIDE)
     wid, conf, margin = _match_asset(icon, _WEAPON_FEATURES)
     if wid and conf >= WEAP_CONF_FLOOR and margin >= WEAP_MARGIN_FLOOR:
-        return {"name": WEAPON_ID_NAME.get(wid, ""), "id": wid, "level": 90}
+        return {
+            "name": WEAPON_ID_NAME.get(wid, ""),
+            "id": wid,
+            "level": read_weapon_level(region_img) or 90,
+        }
     text = process_ocr("weapon", region_img)
     cleaned = "\n".join(line.strip() for line in text.splitlines() if line.strip())
     return parse_region_text("weapon", cleaned)
