@@ -160,8 +160,7 @@ rejected wrong-format image is never written to the normal R2 namespace.
 | `R2_SECRET_ACCESS_KEY` | — | R2 S3 secret; required when upload is enabled. |
 | `R2_BUCKET_NAME` | — | Destination bucket; required when upload is enabled. |
 | `OMP_THREAD_LIMIT` | `1` in Dockerfile | Keeps each Tesseract subprocess single-threaded while the service parallelizes across regions/workers. |
-| `USE_GPU` | `1` locally, `0` on Railway | Enables RapidOCR CUDA providers in `data.py` when `onnxruntime-gpu` is available. |
-| `RAILWAY_ENVIRONMENT_NAME` | — | Auto-set on Railway; toggles GPU default and is used to log environment context. |
+| `RAILWAY_ENVIRONMENT_NAME` | — | Auto-set on Railway; used to log environment context. |
 
 ## Limits and Errors
 
@@ -210,17 +209,11 @@ py benchmark_uid_ocr.py --all --workers 12 \
 # Render raw UID bands wherever two readers disagree
 py render_uid_review.py benchmarks/uid_ocr/<run>/results.tsv \
   --right tight_up4_fixed_psm7_digits
-
-# Live RapidOCR-assisted substats vs the preserved alternatives
-py benchmark_echo_substats.py --limit 100 --workers 6 --candidate tess_only
-py benchmark_echo_substats.py --limit 100 --workers 6 --candidate hybrid
 ```
 
 `benchmark_uid_ocr.py` accepts the explicit gold-label JSON shape documented in
 `optimize_crops.py`, or a two-column `image-key<TAB>uid` proxy TSV. Pass
-`--labels-are-gold` only after the pixels were reviewed by a human. The echo
-benchmark likewise treats live OCR as a regression baseline, writes every
-disagreement for review, and never calls it ground truth.
+`--labels-are-gold` only after the pixels were reviewed by a human.
 
 The July 2026 corpus pass selected `tight_up4_fixed_psm7_digits` for UID OCR:
 a tight UID-only crop, 4x cubic upscale, grayscale fixed threshold 140,

@@ -1,7 +1,7 @@
 import cv2
 import pytesseract
 import re
-from data import CHARACTER_NAMES, CHARACTER_ID_MAP, WEAPON_NAMES, WEAPON_ID_MAP, MAIN_STAT_NAMES, MAIN_STATS, SUB_STATS, ECHO_SET_IDS, SET_NAME_BY_ID, ECHO_COSTS, ECHO_NAME_MAP, ROVER_GENDER_BY_ID, ROVER_ELEMENT_BY_ID, ICON_TEMPLATES, TEMPLATE_FEATURES, COST_TEMPLATES, Rapid, determine_element
+from data import CHARACTER_NAMES, CHARACTER_ID_MAP, WEAPON_NAMES, WEAPON_ID_MAP, MAIN_STAT_NAMES, MAIN_STATS, SUB_STATS, ECHO_SET_IDS, SET_NAME_BY_ID, ECHO_COSTS, ECHO_NAME_MAP, ROVER_GENDER_BY_ID, ROVER_ELEMENT_BY_ID, ICON_TEMPLATES, TEMPLATE_FEATURES, COST_TEMPLATES, determine_element
 import numpy as np
 from rapidfuzz import fuzz, process
 from typing import Tuple
@@ -108,38 +108,6 @@ ECHO_REGIONS = {
 }
 
 
-def process_ocr(name: str, image: np.ndarray) -> str:
-    """Process image with appropriate OCR engine"""
-    if name == "character":
-        # Parallel hybrid: Tesseract for name accuracy + Rapid for level detection
-        from concurrent.futures import ThreadPoolExecutor
-
-        def run_tesseract():
-            processed_image = preprocess_region(image)
-            return pytesseract.image_to_string(processed_image, config='--psm 7 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz ')
-
-        def run_rapid():
-            result, _ = Rapid(image)
-            return "\n".join(text for _, text, _ in result) if result else ""
-
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            tess_future = executor.submit(run_tesseract)
-            rapid_future = executor.submit(run_rapid)
-            name_text = tess_future.result()
-            rapid_text = rapid_future.result()
-
-        return f"{name_text.strip()}\n{rapid_text.strip()}"
-    elif name == "weapon":
-        # Keep Rapid OCR for weapons
-        result, _ = Rapid(image)
-        if result:
-            return "\n".join(text for _, text, _ in result)
-        return ""
-    else:
-        # Default tesseract with preprocessing for other regions
-        image = preprocess_region(image)
-        return pytesseract.image_to_string(image)
-
 def preprocess_region(image):
     """Lighter preprocessing to preserve text clarity"""
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
@@ -164,7 +132,7 @@ def validate_stat(name: str, valid_names: set) -> str:
 # The two Resonance stats are the only names that wrap, and a band edge can clip the
 # round top of their 'o' ('Rescnance Skill DMG'), after which fuzzy matching prefers
 # 'Crit DMG' on the shared 'DMG' token. 'skill' and 'liberation' occur in no other stat,
-# so they decide the name outright, as merge_wrapped_substat_names already assumes.
+# so they decide the name outright.
 _RESONANCE_BY_FRAGMENT = (
     ("skill", "Resonance Skill DMG Bonus"),
     ("liberation", "Resonance Liberation DMG Bonus"),
@@ -244,78 +212,6 @@ def is_legal_substat_value(value: str, stat_name: str) -> bool:
 
     return any(abs(numeric - float(valid)) <= 0.05 for valid in SUB_STATS[stat_name])
 
-def choose_substat_value(stat_name: str, tess_value: str, rapid_value: str | None) -> str:
-    name_from_tess = validate_substat_name(stat_name, tess_value)
-    if is_legal_substat_value(tess_value, name_from_tess):
-        return tess_value
-
-    if not rapid_value:
-        return tess_value
-
-    name_from_rapid = validate_substat_name(stat_name, rapid_value)
-    if is_legal_substat_value(rapid_value, name_from_rapid):
-        print(f"Value OCR fallback: '{stat_name} {tess_value}' -> '{stat_name} {rapid_value}'")
-        return rapid_value
-
-    return tess_value
-
-def rapid_text_lines(image) -> list[str]:
-    result, _ = Rapid(image)
-    return [text for _, text, _ in result] if result else []
-
-def substat_pair_score(names: list[str], values: list[str]) -> tuple[int, int]:
-    """Score paired OCR rows by valid rows first, then unique stat types."""
-    legal = 0
-    unique: set[str] = set()
-    for name, value in zip(names[:5], values[:5]):
-        stat_name = validate_substat_name(name, value)
-        if is_legal_substat_value(value, stat_name):
-            legal += 1
-            unique.add(stat_name)
-    return legal, len(unique)
-
-def has_invalid_substat_pair(names: list[str], values: list[str]) -> bool:
-    return any(
-        not is_legal_substat_value(value, validate_substat_name(name, value))
-        for name, value in zip(names, values)
-    )
-
-def reconcile_echo_substat_rows(
-    names_img,
-    values_img,
-    names_lines: list[str],
-    tess_values: list[str],
-) -> tuple[list[str], list[str], list[str]]:
-    """Align substat name/value rows without assuming maxed echoes have 5 rows."""
-    names = merge_wrapped_substat_names(names_lines)
-    values = tess_values
-    rapid_values: list[str] = []
-
-    if len(names) != len(values):
-        candidate_names = merge_wrapped_substat_names(rapid_text_lines(names_img))
-        candidate_values = rapid_text_lines(values_img)
-        rapid_values = candidate_values
-        target_count = max(len(names), len(values))
-
-        if len(candidate_names) > len(names) and len(candidate_names) >= target_count:
-            names = candidate_names
-        if len(candidate_values) > len(values) and len(candidate_values) >= len(names):
-            values = candidate_values
-
-        # When Tesseract drops a numeric row and invents a wrapped-name tail,
-        # the count guard above rejects the better Rapid pair because there are
-        # "too many" Tesseract names. Prefer the pair with more legal substat
-        # rows (and then more unique stat types) so flat HP/ATK/DEF rows do not
-        # shift following percent values onto duplicate names.
-        if substat_pair_score(candidate_names, candidate_values) > substat_pair_score(names, values):
-            names = candidate_names
-            values = candidate_values
-
-    if not rapid_values and has_invalid_substat_pair(names, values):
-        rapid_values = rapid_text_lines(values_img)
-
-    return names, values, rapid_values
-
 def format_stat_value(value) -> str:
     try:
         numeric = float(value)
@@ -327,10 +223,6 @@ def format_stat_value(value) -> str:
 
 def _crop_region(image: np.ndarray, box: dict) -> np.ndarray:
     return image[box["y1"]:box["y2"], box["x1"]:box["x2"]]
-
-
-def _tess_lines(image: np.ndarray) -> list[str]:
-    return [l.strip() for l in pytesseract.image_to_string(image).splitlines() if l.strip()]
 
 
 # --- Batched Tesseract ----------------------------------------------------------
@@ -393,12 +285,6 @@ def _main_strip_lines(main_img: np.ndarray) -> list[str]:
     ]
 
 
-def _rapid_main_line(main_img: np.ndarray) -> str:
-    """Rapid OCR of the echo main strip, collapsed to one 'Name Value' line."""
-    lines = rapid_text_lines(main_img)
-    return " ".join(lines[:2]) if len(lines) >= 2 else (lines[0] if lines else "")
-
-
 def _legal_main_values(cost: int) -> dict[str, str]:
     """name -> canonical Lv.25 value ('22.8%') for an echo cost's variable main stats.
 
@@ -430,22 +316,16 @@ def _name_in(candidates: list[str], read: str | None) -> str | None:
     return match[0] if match else None
 
 
-def _tiebreak_main_name(candidates: list[str], tess_name: str | None, rapid_provider=None) -> str | None:
-    """Break a main-stat tie by name: cheap Tesseract read first, then a lazy Rapid read.
+def _tiebreak_main_name(candidates: list[str], tess_name: str | None) -> str | None:
+    """Break a main-stat tie by the Tesseract name read.
 
-    Rapid is the expensive engine, so it is only invoked when the Tesseract name
-    can't resolve the tie (and only when a provider is passed at all).
+    A lazy RapidOCR second opinion used to follow when this failed. A 6000-card gate
+    showed removing it changed 0/30,000 echo main stats, so it is gone.
     """
-    if chosen := _name_in(candidates, tess_name):
-        return chosen
-    if rapid_provider is not None:
-        rapid_line = rapid_provider() if callable(rapid_provider) else rapid_provider
-        if chosen := _name_in(candidates, rapid_line):
-            return chosen
-    return None
+    return _name_in(candidates, tess_name)
 
 
-def resolve_echo_main(cost: int, raw_name: str, raw_value: str, rapid_main=None) -> dict:
+def resolve_echo_main(cost: int, raw_name: str, raw_value: str) -> dict:
     """Resolve an echo's main stat against what its cost actually allows.
 
     The name is read by bare Tesseract off a small, often-soft strip, so on
@@ -454,10 +334,8 @@ def resolve_echo_main(cost: int, raw_name: str, raw_value: str, rapid_main=None)
     the card gets rejected. Every cost has a fixed legal set with known Lv.25 values:
       - a legal-for-cost name is trusted, its value snapped to the +25 canonical;
       - an illegal name is a confirmed misread, recovered from the *value* (the
-        reliable anchor), with the Rapid main read only breaking value ties (e.g. the
+        reliable anchor), with the Tesseract name read breaking value ties (e.g. the
         3-cost 30.0% cluster where the value alone can't separate the mains).
-    `rapid_main` is an optional zero-arg callable returning the Rapid main line; it is
-    invoked lazily, only when a tie actually needs breaking.
     """
     legal = _legal_main_values(cost)
     if not legal:
@@ -488,7 +366,7 @@ def resolve_echo_main(cost: int, raw_name: str, raw_value: str, rapid_main=None)
         if len(near) == 1:
             chosen = near[0]                                          # value alone resolves it (no Rapid)
         elif near:                                                   # genuine tie among present mains
-            chosen = _tiebreak_main_name(near, raw_name, rapid_main) or near[0]
+            chosen = _tiebreak_main_name(near, raw_name) or near[0]
         else:                                                        # value matches nothing: trust the name, no Rapid
             chosen = _tiebreak_main_name(ranked, raw_name) or ranked[0]
     else:                                                            # unreadable strip: default to primary main, no Rapid
@@ -497,23 +375,6 @@ def resolve_echo_main(cost: int, raw_name: str, raw_value: str, rapid_main=None)
     print(f"Main stat recovered: {raw_name!r} {raw_value!r} -> {chosen} {legal[chosen]} (cost {cost}, illegal-for-cost name)")
     return {"name": chosen, "value": legal[chosen]}
 
-
-def parse_echo_substats(lines: list[str]) -> list[dict]:
-    """Validate paired 'Name Value' substat lines into legal {name, value} dicts."""
-    substats = []
-    for i, line in enumerate(lines, 1):
-        print(f"Substat {i}: '{line}'")
-        parts = line.rsplit(' ', 1)
-        if len(parts) != 2:
-            continue
-        stat_name, stat_value = parts
-        name = validate_substat_name(stat_name, stat_value)
-        value = validate_value(stat_value, name)
-        if not is_legal_substat_value(value, name):
-            print(f"Skipping illegal substat value: '{line}' -> {name} {value}")
-            continue
-        substats.append({"name": name, "value": value})
-    return substats
 
 # --- Substat rows: fixed bands, not layout analysis ------------------------------
 #
@@ -535,9 +396,9 @@ def parse_echo_substats(lines: list[str]) -> list[dict]:
 # is monotonic by construction, since a band 2x already read never sees 3x.
 # Names are read on the band's first line only; a
 # wrapped name's continuation lands in the gap and is clipped, and the closed
-# vocabulary resolves "Resonance Liberation" to the full stat regardless. Do NOT run
-# merge_wrapped_substat_names on banded output: it consumes the NEXT line as a
-# continuation, and here the next line is the next row.
+# vocabulary resolves "Resonance Liberation" to the full stat regardless. (The old
+# whole-block reader's wrap merge consumed the NEXT line as a continuation; on banded
+# output the next line is the next row, which is why no merge runs here.)
 #
 # preprocess_region's fixed threshold(140) shreds dim text (one dark card read 390
 # as 3=0), which Rapid survived only because it reads raw pixels. Plain grayscale
@@ -745,7 +606,6 @@ WATERMARK_UPSCALE = 2
 WATERMARK_UID_CONFIG = "--psm 7 -c tessedit_char_whitelist=0123456789"
 
 
-
 # --- UID confidence guard ------------------------------------------------------
 #
 # A wrong UID is unrecoverable BY THE USER. Dedup is global on
@@ -827,61 +687,6 @@ def read_watermark(image: np.ndarray) -> dict:
     name_lines = [line.strip() for line in name_text.splitlines() if line.strip()]
     return {"username": parse_watermark_username(name_lines, uid), "uid": uid}
 
-
-def parse_region_text(name, text):
-    match name:
-        case "character":
-            return parse_character_title(text)
-            
-        case "watermark":
-            lines = text.split('\n')
-            uid = 0
-            for line in lines:
-                if uid_match := re.search(r'\d{6,12}', line):
-                    uid = int(uid_match.group(0))
-                    break
-            return {
-                "username": parse_watermark_username(lines, uid),
-                "uid": uid,
-            }
-
-
-
-        case "weapon":
-            # Match against the known weapon list with a length-sensitive scorer
-            # and a cutoff so unreadable text resolves to "missing" instead of
-            # snapping to the nearest (often long) name like Legend of Drunken
-            # Hero. Real reads score ~92-100 even with OCR noise; garbage stays
-            # well under the cutoff. Empty/below-cutoff -> "" so the frontend can
-            # apply its signature-weapon fallback or flag the weapon as missing.
-            def validate_weapon_name(raw_name: str):
-                if not WEAPON_NAMES or not raw_name:
-                    return None
-                match = process.extractOne(
-                    raw_name, WEAPON_NAMES,
-                    scorer=fuzz.ratio, score_cutoff=WEAPON_NAME_MIN_SCORE,
-                )
-                return match[0] if match else None
-            lines = text.split('\n')
-            raw_name = lines[0].strip() if lines else ""
-            weapon_name = validate_weapon_name(raw_name)
-            # Scan every line for the level: when the name doesn't render, OCR
-            # returns only "LV.xx" and it lands on line 0 (the name slot), so
-            # restricting to lines[1:] would miss it and default to 1.
-            level = 1
-            for line in lines:
-                if "LV." in line:
-                    match = re.search(r'LV\.(\d+)', line)
-                    if match:
-                        level = int(match.group(1))
-                        break
-            return {
-                "name": weapon_name or "",
-                "id": WEAPON_ID_MAP.get(weapon_name, "") if weapon_name else "",
-                "level": level
-            }
-        case _:
-            return text
 
 def get_element_region(image):
     """Extract element region from individual echo image"""
@@ -1165,84 +970,6 @@ def parse_sequence_region(image) -> int:
 
 def _canonical_stat_fragment(line: str) -> str:
     return re.sub(r"[^a-z]", "", line.lower())
-
-def _ensure_dmg_bonus_suffix(name: str) -> str:
-    if re.search(r"\bDMG\s+Bonus$", name, re.IGNORECASE):
-        return name
-    if re.search(r"\bDMG$", name, re.IGNORECASE):
-        return f"{name} Bonus"
-    return f"{name} DMG Bonus"
-
-_CAN_MERGE_DMG_BONUS_CONTINUATIONS = not any(
-    fragment.startswith(("dmg", "bonus"))
-    for fragment in (_canonical_stat_fragment(name) for name in SUB_STATS)
-)
-
-def _line_with_implied_bonus(line: str, fragment: str) -> str:
-    if fragment.endswith("dmg") and not fragment.startswith("crit") and "bonus" not in fragment:
-        return f"{line} Bonus"
-    return line
-
-def clean_echo_substat_name_lines(lines: list[str]) -> list[str]:
-    """Merge OCR-wrapped echo substat names before pairing them with values."""
-    cleaned_names: list[str] = []
-
-    for raw_line in lines:
-        line = re.sub(r"\s+", " ", raw_line.strip())
-        if not line:
-            continue
-
-        fragment = _canonical_stat_fragment(line)
-        is_wrapped_dmg_bonus_line = (
-            _CAN_MERGE_DMG_BONUS_CONTINUATIONS
-            and (
-                fragment.startswith(("dmg", "bonus"))
-                or (len(fragment) <= 8 and fuzz.ratio(fragment, "bonus") >= 75)
-                or (len(fragment) <= 12 and fuzz.ratio(fragment, "dmgbonus") >= 75)
-            )
-        )
-        if cleaned_names and is_wrapped_dmg_bonus_line:
-            cleaned_names[-1] = _ensure_dmg_bonus_suffix(cleaned_names[-1])
-            continue
-
-        cleaned_names.append(_line_with_implied_bonus(line, fragment))
-
-    return cleaned_names
-
-def merge_wrapped_substat_names(lines: list[str]) -> list[str]:
-    """clean_echo_substat_name_lines + absorb GARBAGE wrap tails for the two wrapping stats.
-
-    Only 'Resonance Liberation DMG Bonus' (wraps 'DMG Bonus') and 'Resonance Skill DMG Bonus'
-    (wraps 'Bonus') ever wrap to a second line. clean_echo_substat_name_lines merges CLEAN
-    continuations; when the 2nd line OCRs as garbage (e.g. 'NIAC Rie', 'Brite', 'Do') it does
-    not, leaving an extra name line that breaks name<->value count alignment. Anchor on the
-    incomplete known-wrapper prefix instead of the continuation's content: if a cleaned line is
-    just 'Resonance Liberation' or 'Resonance Skill[ DMG]', absorb the next line whatever it says.
-    """
-    def is_known_substat_name(name: str) -> bool:
-        match = process.extractOne(name, _SUBSTAT_VOCAB, scorer=fuzz.WRatio)
-        return bool(match and match[1] >= 80)
-
-    cleaned = clean_echo_substat_name_lines(lines)
-    out: list[str] = []
-    skip = False
-    for i, name in enumerate(cleaned):
-        if skip:
-            skip = False
-            continue
-        fragment = _canonical_stat_fragment(name)
-        if fragment == "resonanceliberation" and i + 1 < len(cleaned):
-            out.append("Resonance Liberation DMG Bonus")
-            skip = True
-        elif fragment in ("resonanceskill", "resonanceskilldmg") and i + 1 < len(cleaned):
-            out.append("Resonance Skill DMG Bonus")
-            skip = True
-        elif fragment in ("resonanceliberationdmgbonus", "resonanceskilldmgbonus") and i + 1 < len(cleaned) and not is_known_substat_name(cleaned[i + 1]):
-            out.append(name)
-            skip = True
-        else:
-            out.append(name)
-    return out
 
 # --- Character and weapon asset recognition (SIFT, OCR fallback on abstain) ---
 #
@@ -1689,10 +1416,8 @@ def _process_card_inner(image, region: str):
         main_line = " ".join(main_lines[:2]) if len(main_lines) >= 2 else (main_lines[0] if main_lines else "")
         raw_main_name, raw_main_value = _parse_main_line(main_line)
 
-        # --- substats: Tesseract with RapidOCR reconcile/fallback (proven path,
-        # origin de011fe). The tess-only echo path (merge_wrapped_substat_names +
-        # --psm 6 + upscaled repair) drops too many ATK/DEF rows to promote; see
-        # docs/echo-substat-tesseract-only.md. ---
+        # --- substats: fixed-band Tesseract rows (SUBSTAT_ROW_* above; history and
+        # measurements in docs/echo-substat-tesseract-only.md) ---
         names_img = _crop_region(image, ECHO_REGIONS["subs_names"])
         values_img = _crop_region(image, ECHO_REGIONS["subs_values"])
         substats, raw_names, raw_values, subs_path = read_substat_rows(names_img, values_img)
@@ -1725,11 +1450,4 @@ def _process_card_inner(image, region: str):
             }
         }
     else:
-        text = process_ocr(region, image)
-        cleaned_text = "\n".join(line.strip() for line in text.splitlines() if line.strip())
-        result = parse_region_text(region, cleaned_text)
-
-        return {
-            "success": True,
-            "analysis": result
-        }
+        return {"success": False, "error": f"Unsupported region: {region}"}

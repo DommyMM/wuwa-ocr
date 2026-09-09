@@ -3,7 +3,7 @@ test_frontend_split.py — reproduce the frontend's OCR flow locally on a single
 
 Crops every region using the *exact* normalized coords from
 `wuwabuilds/lib/import/regions.ts`, then calls `process_card` (same code path
-the server invokes). For echo regions, also dumps the raw Tesseract and Rapid
+the server invokes). For echo regions, also dumps the raw Tesseract
 OCR output of the `subs_names` / `subs_values` sub-regions so you can see
 exactly what OCR produced before name-cleaning / fuzzy matching.
 
@@ -24,7 +24,6 @@ import pytesseract
 
 from card import (
     ECHO_REGIONS,
-    Rapid,
     preprocess_region,
     process_card,
 )
@@ -58,11 +57,6 @@ def _tess_lines(img: np.ndarray) -> list[str]:
     return [l.strip() for l in pytesseract.image_to_string(img).splitlines() if l.strip()]
 
 
-def _rapid_lines(img: np.ndarray) -> list[str]:
-    result, _ = Rapid(img)
-    return [text for _, text, _ in result] if result else []
-
-
 def debug_echo_subs(echo_img: np.ndarray, out_dir: Path, region: str) -> None:
     """Print raw OCR from the subs_names / subs_values crops inside an echo."""
     names_img = echo_img[
@@ -85,25 +79,17 @@ def debug_echo_subs(echo_img: np.ndarray, out_dir: Path, region: str) -> None:
 
     tess_names = _tess_lines(names_pre)
     tess_values = _tess_lines(values_pre)
-    rapid_names = _rapid_lines(names_img)
-    rapid_values = _rapid_lines(values_img)
 
     print("  -- subs_names (Tesseract) --")
     for i, l in enumerate(tess_names, 1):
         print(f"     [{i}] {l!r}")
-    print("  -- subs_names (Rapid) --")
-    for i, l in enumerate(rapid_names, 1):
-        print(f"     [{i}] {l!r}")
     print("  -- subs_values (Tesseract) --")
     for i, l in enumerate(tess_values, 1):
-        print(f"     [{i}] {l!r}")
-    print("  -- subs_values (Rapid) --")
-    for i, l in enumerate(rapid_values, 1):
         print(f"     [{i}] {l!r}")
 
     # Flag the exact pathology from the railway logs: any name line that is a
     # short suffix of a real substat (e.g. "onus" from "Bonus").
-    short_tails = [l for l in (tess_names + rapid_names) if 1 <= len(l) <= 5]
+    short_tails = [l for l in tess_names if 1 <= len(l) <= 5]
     if short_tails:
         print(f"  !! short/truncated name lines: {short_tails}")
 

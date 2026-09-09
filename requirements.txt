@@ -9,5 +9,4 @@ Pillow
 pytesseract
 pydantic
 rapidfuzz
-rapidocr-onnxruntime
 python-dotenv

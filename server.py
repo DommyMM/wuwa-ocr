@@ -30,7 +30,6 @@ except ImportError:
     pass  # python-dotenv not installed; rely on env vars being set externally
 
 IS_RAILWAY = bool(os.getenv("RAILWAY_ENVIRONMENT_NAME"))
-USE_GPU = os.getenv("USE_GPU", "0" if IS_RAILWAY else "1") == "1"
 
 # One worker per heavyweight region: 5 echoes + forte. Those six fill the pool
 # in a single parallel wave; the remaining light regions (character/weapon SIFT,
@@ -171,13 +170,13 @@ async def lifespan(app: FastAPI):
 
     r2_image_store = R2ImageStore(R2_SETTINGS)
     print(
-        f"Server starting on port {PORT} | railway={IS_RAILWAY} gpu={USE_GPU} "
+        f"Server starting on port {PORT} | railway={IS_RAILWAY} "
         f"workers={MAX_WORKERS} opencv_threads={OPENCV_THREADS} "
         f"r2_upload={R2_SETTINGS.enabled} r2_timeout={R2_SETTINGS.timeout_seconds}s",
         flush=True,
     )
-    # Warm every worker in the background: each worker process loads RapidOCR and
-    # the SIFT templates on its first task (~3-7s cold). Doing it at boot moves
+    # Warm every worker in the background: each worker process imports its modules
+    # and loads the SIFT templates on its first task (~3-7s cold). Doing it at boot moves
     # that cost off the first user's request. Backgrounded (not awaited) so it
     # never blocks the port bind / Railway healthcheck, and a failure is non-fatal.
     loop = asyncio.get_running_loop()
@@ -244,12 +243,12 @@ def process_region_task(task: tuple[str, np.ndarray]) -> dict[str, Any]:
         }
 
 def warm_worker(hold: float = 2.0) -> bool:
-    """Force a worker to load its OCR engines and SIFT templates.
+    """Force a worker to import its modules and load the SIFT templates.
 
     Models load lazily on a worker's first real task; running a throwaway
     recognition here at boot pays that import cost off the user path. Random
-    noise (not black) so SIFT finds keypoints and the echo sweep + RapidOCR +
-    Tesseract paths all execute. Errors are swallowed: the goal is to warm the
+    noise (not black) so SIFT finds keypoints and the echo sweep + Tesseract paths
+    all execute. Errors are swallowed: the goal is to warm the
     process, not to produce a result.
 
     The trailing sleep holds the worker busy so that when MAX_WORKERS of these

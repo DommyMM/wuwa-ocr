@@ -5,36 +5,7 @@ import numpy as np
 import os
 from typing import Dict, List, Set
 from cv2 import SIFT_create, FlannBasedMatcher
-from rapidocr_onnxruntime import RapidOCR
 
-
-def rapid_ocr_kwargs() -> dict:
-    if os.getenv("USE_GPU", "0") != "1":
-        return {}
-
-    try:
-        import onnxruntime as ort
-    except Exception as exc:
-        print(f"RapidOCR GPU requested but onnxruntime import failed: {exc}", flush=True)
-        return {}
-
-    providers = ort.get_available_providers()
-    if "CUDAExecutionProvider" not in providers:
-        print(f"RapidOCR GPU requested but CUDAExecutionProvider is unavailable: {providers}", flush=True)
-        return {}
-
-    print("RapidOCR using CUDAExecutionProvider", flush=True)
-    return {
-        "det_use_cuda": True,
-        "det_model_path": "",
-        "cls_use_cuda": True,
-        "cls_model_path": "",
-        "rec_use_cuda": True,
-        "rec_model_path": "",
-    }
-
-
-Rapid = RapidOCR(lang='en', **rapid_ocr_kwargs())
 
 # Initialize empty defaults
 CHARACTER_NAMES: List[str] = []
