@@ -55,7 +55,8 @@ class RoverMappingTests(unittest.TestCase):
         with (
             patch.object(card, "_CHARACTER_FEATURES", {}),
             patch.object(card, "_match_asset", return_value=("1406", 0.2, 0.0)),
-            patch.object(card, "process_ocr", return_value="Rover: Electro LV.90"),
+            patch.object(card, "_character_title_text", return_value="Rover: Electro LV.90"),
+            patch.object(card, "read_character_level", return_value=0),
             patch.object(card, "_detect_rover_badge_element", return_value="Spectro"),
         ):
             self.assertEqual(
@@ -68,7 +69,8 @@ class RoverMappingTests(unittest.TestCase):
         with (
             patch.object(card, "_CHARACTER_FEATURES", {}),
             patch.object(card, "_match_asset", return_value=("1408", 0.2, 0.0)),
-            patch.object(card, "process_ocr", return_value="Rover LV.90"),
+            patch.object(card, "_character_title_text", return_value="Rover LV.90"),
+            patch.object(card, "read_character_level", return_value=0),
             patch.object(card, "_detect_rover_badge_element", return_value="Aero"),
         ):
             self.assertEqual(

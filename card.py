@@ -1266,9 +1266,11 @@ DATA_DIR = Path(__file__).resolve().parent / "Data"
 # confidence 0.1748 -> 0.1960 and median margin 0.1577 -> 0.1741, with ZERO identity
 # changes against the old box. Character was never broken (the splash is highly
 # distinctive, which is why a bad crop still worked); this is headroom, not a fix.
-CHAR_SPLASH_SUBBOX = (0.10, 0.16, 1.0, 0.9455)        # splash within character region
-CHAR_NAME_SUBBOX = (0.1025, 0.0135, 0.944, 0.1515)    # name strip within character region
-CHAR_ELEMENT_SUBBOX = (0.018, 0.025, 0.105, 0.14)      # element badge left of name strip
+# x fractions carry a 0.32/0.38 factor: the server region widened to keep the LV.
+# pill in frame for long names, and these are rescaled so the pixels are unchanged.
+CHAR_SPLASH_SUBBOX = (0.0842, 0.16, 0.8421, 0.9455)        # splash within character region
+CHAR_NAME_SUBBOX = (0.0863, 0.0135, 0.7949, 0.1515)    # name strip within character region
+CHAR_ELEMENT_SUBBOX = (0.0152, 0.025, 0.0884, 0.14)      # element badge left of name strip
 CHAR_SIFT_MAX_SIDE = 150
 CHAR_CONF_FLOOR = 0.10
 CHAR_MARGIN_FLOOR = 0.04
@@ -1380,10 +1382,87 @@ def _rover_analysis(cid: str | None, element: str | None, level: int = 90) -> di
     return {"name": name, "id": resolved_id, "level": level, "element": element}
 
 
+# --- Character level: the gold LV. pill ---------------------------------------
+#
+# The name strip mixes polarities -- white name on dark, dark "LV.90" on a gold
+# pill -- and psm 7 commits to one per line, so a strip read never sees the badge
+# (0/600 in the A/B). The pill's saturated gold is unique in the strip, so it is
+# located by hue, cropped, INVERTED to light-on-dark and read alone. Its position
+# floats with name length, which is why no fixed box can hold it.
+#
+# The pill is a fixed ~76 px wide and its rightmost fifth is decorative stripes
+# that OCR as a trailing 7 or 1 ("LV.1" read 17). The number occupies the left
+# ~65%, so the right 22% is cropped off before reading: on the twelve hand-checked
+# pills that took a level-1 read from 17 to 1 and changed nothing else (15%, 22%
+# and 30% all gave 12/12). 3x is read before 2x: 2x returned empty on 8/600 pills
+# and misread a 9 as 8 once, 3x read every one; both renders go in one batched
+# spawn. Against the Tesseract+Rapid hybrid: 585/585 agree, and the hybrid's own
+# failures were all clipped pills the wider server region now keeps in frame.
+CHAR_LEVEL_PILL_HSV = (np.array([12, 90, 90]), np.array([38, 255, 255]))
+CHAR_LEVEL_PILL_STRIPE_FRACTION = 0.22
+CHAR_LEVEL_CONFIG = "--psm 7 -c tessedit_char_whitelist=LV.0123456789"
+
+
+def _level_from_text(text: str) -> int:
+    match = re.search(r'(?i)lv\.?\s*(\d{1,2})', text) or re.search(r'\d{1,2}', text)
+    if not match:
+        return 0
+    level = int(match.group(1) if match.lastindex else match.group(0))
+    return level if 1 <= level <= 90 else 0
+
+
+def read_character_level(region_img: np.ndarray) -> int:
+    """Level from the LV. pill. 0 when the pill is absent or unreadable."""
+    height, width = region_img.shape[:2]
+    _, top, _, bottom = CHAR_NAME_SUBBOX
+    strip = region_img[int(height * top):int(height * bottom), :]
+    if strip.size == 0:
+        return 0
+    mask = cv2.inRange(cv2.cvtColor(strip, cv2.COLOR_BGR2HSV), *CHAR_LEVEL_PILL_HSV)
+    mask[:, :int(strip.shape[1] * 0.25)] = 0            # element icon lives at far left
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((5, 15), np.uint8))
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return 0
+    x, y, w, h = cv2.boundingRect(max(contours, key=cv2.contourArea))
+    if w < 20 or h < 8:
+        return 0
+    pad = 3
+    pill = cv2.cvtColor(strip[max(0, y - pad):y + h + pad, max(0, x - pad):x + w + pad], cv2.COLOR_BGR2GRAY)
+    pill = pill[:, :int(pill.shape[1] * (1 - CHAR_LEVEL_PILL_STRIPE_FRACTION))]
+
+    def render(factor: int) -> np.ndarray:
+        up = cv2.resize(pill, None, fx=factor, fy=factor, interpolation=cv2.INTER_CUBIC)
+        _, binary = cv2.threshold(cv2.bitwise_not(up), 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)
+        return binary
+
+    for text in tess_batch([render(3), render(2)], CHAR_LEVEL_CONFIG):
+        if level := _level_from_text(text):
+            return level
+    return 0
+
+
+def _character_title_text(strip: np.ndarray) -> str:
+    """Letters-only Tesseract read of the name strip (its own function so tests can
+    inject a title, as they patched process_ocr before)."""
+    return pytesseract.image_to_string(
+        preprocess_region(strip),
+        config='--psm 7 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz ',
+    )
+
+
 def _read_character_title(region_img: np.ndarray) -> dict:
-    text = process_ocr("character", _subcrop(region_img, CHAR_NAME_SUBBOX))
-    cleaned = "\n".join(line.strip() for line in text.splitlines() if line.strip())
-    return parse_character_title(cleaned)
+    """Name from a letters-only Tesseract read of the strip, level from the pill.
+
+    This was a Tesseract+RapidOCR hybrid whose Rapid half existed to supply the
+    level, since the Tesseract half's whitelist has no digits. The pill reader does
+    that now, so Rapid leaves this path.
+    """
+    text = _character_title_text(_subcrop(region_img, CHAR_NAME_SUBBOX))
+    parsed = parse_character_title("\n".join(line.strip() for line in text.splitlines() if line.strip()))
+    if level := read_character_level(region_img):
+        parsed["level"] = level
+    return parsed
 
 
 def recognize_character_asset(region_img: np.ndarray) -> dict:
@@ -1420,7 +1499,11 @@ def recognize_character_asset(region_img: np.ndarray) -> dict:
         if rover is not None:
             return rover
     if cid and cid not in ROVER_GENDER_BY_ID and conf >= CHAR_CONF_FLOOR and margin >= CHAR_MARGIN_FLOOR:
-        return {"name": CHARACTER_ID_NAME.get(cid, ""), "id": cid, "level": 90}
+        return {
+            "name": CHARACTER_ID_NAME.get(cid, ""),
+            "id": cid,
+            "level": read_character_level(region_img) or 90,
+        }
     if parsed is None:
         parsed = _read_character_title(region_img)
     if "rover" in re.sub(r'[^a-z]', '', parsed.get("name", "").lower()):
@@ -1469,6 +1552,36 @@ def read_weapon_level(region_img: np.ndarray) -> int:
     return int(match.group(1)) if match else 0
 
 
+# The name strip, for the ~12% of panels where the icon SIFT abstains. This is the
+# other box the old WEAPON_REGIONS table carried; rendering it over real panels
+# confirms it wraps the name cleanly. Read at 2x with psm 7 and fuzzy-matched against
+# WEAPON_NAMES it reproduced the RapidOCR name on 875/875 cards (95/95 of the abstain
+# cases), so Rapid leaves this path with no behaviour change. Blank panels (a since-
+# fixed game-side bug rendered no weapon art for Lucy/Lucilla/Sigrika/Rebecca) still
+# resolve to an empty name, which the frontend's signature-weapon fallback keys on.
+WEAPON_NAME_BOX = {"x1": 152, "y1": 25, "x2": 437, "y2": 79}
+WEAPON_NAME_UPSCALE = 2
+WEAPON_NAME_CONFIG = "--psm 7"
+
+
+def read_weapon_name(region_img: np.ndarray) -> str | None:
+    """Weapon name from the strip, resolved against the known list. None when unreadable."""
+    box = WEAPON_NAME_BOX
+    raw = region_img[box["y1"]:box["y2"], box["x1"]:box["x2"]]
+    if raw.size == 0 or not WEAPON_NAMES:
+        return None
+    upscaled = cv2.resize(
+        raw, None, fx=WEAPON_NAME_UPSCALE, fy=WEAPON_NAME_UPSCALE,
+        interpolation=cv2.INTER_CUBIC,
+    )
+    text = pytesseract.image_to_string(preprocess_region(upscaled), config=WEAPON_NAME_CONFIG)
+    first = next((line.strip() for line in text.splitlines() if line.strip()), "")
+    if not first:
+        return None
+    match = process.extractOne(first, WEAPON_NAMES, scorer=fuzz.ratio, score_cutoff=WEAPON_NAME_MIN_SCORE)
+    return match[0] if match else None
+
+
 def recognize_weapon_asset(region_img: np.ndarray) -> dict:
     """SIFT the weapon icon; OCR the panel on abstain (look-alike icons).
 
@@ -1488,9 +1601,14 @@ def recognize_weapon_asset(region_img: np.ndarray) -> dict:
             "id": wid,
             "level": read_weapon_level(region_img) or 90,
         }
-    text = process_ocr("weapon", region_img)
-    cleaned = "\n".join(line.strip() for line in text.splitlines() if line.strip())
-    return parse_region_text("weapon", cleaned)
+    name = read_weapon_name(region_img)
+    # The level pill renders even on a blank-art panel (the game-side bug left only the
+    # icon and name missing), and the old Rapid pass read it there; so does this. The
+    # empty-weapon contract is kept for the frontend's signature-weapon fallback.
+    level = read_weapon_level(region_img)
+    if not name:
+        return {"name": "", "id": "", "level": level or 1}
+    return {"name": name, "id": WEAPON_ID_MAP.get(name, ""), "level": level or 90}
 
 
 # --- Non-English card detection -------------------------------------------------
@@ -1588,10 +1706,10 @@ def _process_card_inner(image, region: str):
             set_id = None
         element_name = SET_NAME_BY_ID.get(set_id) if set_id is not None else None
         print(f"Echo identified: {echo_id} (confidence: {confidence:.2%})")
-        main = resolve_echo_main(
-            ECHO_COSTS.get(echo_id, 0), raw_main_name, raw_main_value,
-            rapid_main=lambda: _rapid_main_line(main_img),
-        )
+        # Ties are broken by the Tesseract name read alone. The Rapid second opinion this
+        # used to take was the last RapidOCR call on the echo path; a 6000-card gate showed
+        # its removal changed 0/30,000 echo main stats.
+        main = resolve_echo_main(ECHO_COSTS.get(echo_id, 0), raw_main_name, raw_main_value)
         print(f"Echo '{echo_id}' -> Set: {element_name} (id {set_id})")
         print(f"Final echo result: main={main}, substats={substats}")
 

@@ -144,7 +144,11 @@ class APIStatus(BaseModel):
 
 
 IMPORT_REGIONS: dict[str, dict[str, float]] = {
-    "character": {"x1": 0.0000, "x2": 0.3200, "y1": 0.0000, "y2": 0.5500},
+    # x2 0.32 -> 0.38: the LV. pill sits right after the name and the longest names
+    # ("Yangyang: Xuanling") push it past 0.32, clipping the number out of the crop.
+    # Nothing else renders in 0.32-0.38 (the forte panel starts at 0.4057). card.py's
+    # CHAR_* sub-boxes are rescaled by 0.32/0.38 so their pixels are unchanged.
+    "character": {"x1": 0.0000, "x2": 0.3800, "y1": 0.0000, "y2": 0.5500},
     "watermark": {"x1": 0.0073, "x2": 0.1304, "y1": 0.0741, "y2": 0.1370},
     "forte": {"x1": 0.4057, "x2": 0.7422, "y1": 0.0222, "y2": 0.5917},
     "sequences": {"x1": 0.0703, "x2": 0.3318, "y1": 0.4787, "y2": 0.5843},
