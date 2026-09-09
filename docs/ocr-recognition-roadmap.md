@@ -59,7 +59,9 @@ located by hue because it floats with name length, inverted, read at 3x then 2x,
 stripes cropped, first two digits (585/585 vs the hybrid, and all 15 of the hybrid's
 own failures rescued once the character region widened to x2 0.38 so long names no
 longer clip the pill). Weapon abstain reads the name strip with Tesseract (875/875
-vs Rapid). The main-strip value tiebreak dropped its Rapid second opinion (0/30,000
+vs Rapid). Note that `lb` forces both levels to 90 inside the damage calc
+(`internal/calc/build_input.go`), so the read levels change what a profile and the
+editor show, not any leaderboard score. The main-strip value tiebreak dropped its Rapid second opinion (0/30,000
 echo main stats changed on the 6000-card gate). RapidOCR is gone from `card.py` and `requirements.txt`.
 
 Known residuals, each a handful of cards in 6000: highlighted max-roll renders (the
@@ -69,6 +71,60 @@ rows where both scales return empty. Non-English cards: the confidence floor dro
 rows whose names were garbage fuzzy-matched onto random stats (838 -> 173 rows on
 354 echoes); detection is unaffected and those cards were already gated from
 auto-submit, but the editor pre-fill shrinks. Input to the multilingual workstream.
+
+## How a recognition change is gated
+
+The bar is the owner's: one percent of cards is hundreds of leaderboard entries, so a
+change is measured on as much of `r2-backup/` as practical, never on a sample of a few
+hundred. The method that carried the 2026-09 commits:
+
+1. Freeze the source trees (`git archive` of the baseline commit and of the candidate)
+   so a later edit cannot leak into a running capture.
+2. Capture every region's analysis per card from each tree with a seeded shuffle of
+   the corpus, so any run's first N files are a prefix of any other's and captures of
+   different sizes still line up. 6000 cards take about 65 minutes at 12 workers on
+   the dev box.
+3. Diff region by region: exact equality on forte, sequences, watermark, weapon id +
+   level and character id + level; echo identity, main + set and the substat set
+   separately. Split English from non-English echoes by the language signal.
+4. Adjudicate every English difference by eye on a rendered contact sheet, bucketed
+   by whether baseline or candidate is right, and hand-verify the ones that look
+   intended (levels, snapped values) rather than trusting the count.
+5. Re-run every disputed case sequentially from BOTH frozen trees before believing
+   the diff. This caught a capture taken minutes before a fix to the same tree: it
+   disagreed with baseline, candidate and the final tree on all 22 re-run cases.
+   Check a capture's mtime against its tree's before using it as a baseline.
+
+Tesseract is deterministic under load here: parallel captures and sequential re-runs
+agree read for read. The one nondeterministic component is FLANN, below.
+
+## Investigated 2026-09, not adopted
+
+**16:9 inputs below 1920 wide.** wuwaflex stores 1280x720 copies of the same cards.
+Accepting any 16:9 image and resizing to 1920 was tried and reverted: text that reads
+at native 1920 does not survive the 720p round trip, so the floor stays at 1920x1080.
+
+**Scraping wuwaflex.** Row metadata cannot establish identity: the UID exists only in
+the image, so scraped rows could not be attributed to a player without running the
+image through this pipeline anyway. Left undecided, not planned.
+
+**Forte level by template matching.** The `LV.1` to `LV.10` digits were matched
+against rendered templates and the scores do not separate the classes; the Phase 2/3
+notes below that propose templates or a tiny classifier for forte are superseded.
+Forte stays on Tesseract, now one batched spawn for the five nodes, 6000/6000
+identical across the gates.
+
+**Otsu thresholding** in the shared preprocess: see the Shipped section; rejected on
+forte and echo losses.
+
+## Known flake: FLANN echo identity at confidence ~0.03
+
+`match_icon` uses a FLANN kd-tree, whose randomised build makes the confidence of a
+near-tie wobble between runs (0.0575 vs 0.069 on the same crop). At confidence below
+about 0.07 the winner can flip between two runs: two flips per 30,000 echoes on every
+6000-card gate, always at the bottom of the confidence range, never at a confident
+match. Treat a lone identity diff at that confidence as noise in a gate; the real fix
+is a deterministic matcher or a confidence floor that abstains there.
 
 ## Attempted but not adopted — Tesseract-only echo substat OCR (first attempt)
 
@@ -349,7 +405,7 @@ decode the backend needs anyway.
 | watermark username | Tesseract | Leave free-form and Unicode-capable for now. |
 | character level | Optional Tesseract digits/template | Detect the gold LV badge by HSV in the header. Parse only plausible 1-90 values; default/null is acceptable when unreadable. |
 | sequences | HSV pixel ratio | Existing method is already deterministic. |
-| forte | small fixed classifier or digit templates | Five `LV.X/10` regions, classes 1-10. |
+| forte | Tesseract, one batched spawn (templates tried 2026-09, not separable) | Five `LV.X/10` regions, classes 1-10. |
 | echo icon | SIFT | Existing method. |
 | echo cost | template match | Existing method. |
 | echo element | HSV histogram, SIFT fallback within same hue cluster (`data.py` `determine_element`) | Existing method. Grayscale elements (ER, Tidebreaking) and same-hue pairs (e.g. Gust/Windward, Pact/Rite, Trailblazing/Chromatic/Flamewing, Midnight/Dream/Thread) resolve via SIFT. |
@@ -544,8 +600,8 @@ The optimization pass should answer:
   weapon, UID, and echo correctness.
 - Which main-stat-name crop is easiest to classify without reading the value?
 - Which substat row crop best isolates one row for a future row model?
-- Which forte digit crop isolates level text reliably enough for template or
-  tiny-classifier recognition?
+- (Forte: settled on batched Tesseract; template matching was tried in 2026-09 and
+  the digit classes do not separate.)
 
 The RTX 5090 is most useful after the crop sweep, for training/evaluating the
 main-stat, forte, and substat classifiers. The sweep itself is mostly CPU-bound
@@ -655,7 +711,8 @@ low-confidence count.
 
 Train only the small models that still need it after the crop sweep:
 
-- Forte: 5 independent 1-10 digit/level classifiers, or template matching.
+- Forte: no model needed; batched Tesseract is 6000/6000 on the gates and the
+  template route was measured and dropped in 2026-09.
 - Main stat name: around 10 classes.
 - Substat rows: either one tuple class for each legal `(name, value)` pair, or
   two heads: 13-way stat name plus legal value/tier.

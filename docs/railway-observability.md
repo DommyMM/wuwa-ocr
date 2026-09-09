@@ -185,6 +185,8 @@ PSS 91 MB; each worker RSS 500–531 MB / PSS 353–384 MB, of which ~340 MB pri
 ~152 MB shared (inherited from the parent's eager `data.py` import). The private share
 far exceeds the ~213 MB load footprint, so most of it is retained runtime allocation.
 A Windows dev-box RSS measurement understated production by more than half.
+These numbers predate the RapidOCR removal (cc16477), which was ~67 MB of each
+worker's private share; re-measure after that deploys before sizing `OCR_WORKERS`.
 
 Two gotchas: `railway logs` only spans the current deployment, so a before/after
 across a deploy cannot be pulled after the fact; and Tesseract spawn+model-load is
