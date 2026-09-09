@@ -2,7 +2,8 @@
 
 Superseded. This file is kept only so the two failed attempts are not repeated.
 The live design discussion moved to a row-anchored, value-first formulation; see
-[ocr-recognition-roadmap.md](ocr-recognition-roadmap.md).
+[ocr-recognition-roadmap.md](ocr-recognition-roadmap.md). **That formulation is
+Attempt 3 below, and it shipped (2026-09).**
 
 The benchmark artifacts (`benchmarks/echo_substats/`, gitignored) and the
 scratch harnesses (`benchmark_echo_substats.py`, `prototype_geom_subs.py`,
@@ -84,6 +85,41 @@ The stated blocker was that the comparison used live output as the baseline
 rather than human gold labels, so a "loss" could not be distinguished from a
 correction.
 
+## Attempt 3 (2026-09) — shipped
+
+The row-anchored formulation, implemented as `read_substat_rows` in `card.py`.
+The premise both earlier attempts missed: the drop is a *detection* failure. The
+same ~78 rows per 1500 echoes vanish under fast, standard and best tessdata alike,
+and the grid is deterministic to the pixel (34.0 px pitch, 15.5 px first row, zero
+variance over 2392 gaps), so the fix is to never ask Tesseract to find rows at all.
+
+What it took to pass a 6000-card gate against the live path, every difference
+adjudicated:
+
+- five fixed bands, `--psm 7` each, names and values read as separate batches
+- values at 2x + digit whitelist; 3x retry only when the 2x read is not a legal
+  roll (2x returns nothing for `21%`, 3x returns nothing for `9.2%`; 2x doubles
+  digits on some bands where 3x is right, and vice versa — so a legal read is
+  never replaced)
+- the row after a wrapping stat re-read on a 10 px top, keeping whichever margin
+  scores higher against the vocabulary: the spilled `DMG Bonus` fragment reads as
+  `[1]` at the full band, and a tight band clips a high-sitting `DEF` to `[3`;
+  both score ~0 while the real name scores ~100
+- a name must score >= 65 (plain ratio) against the stat it resolves to; WRatio
+  scores the fragment `ne` at 90 against `Energy Regen`, plain ratio does not
+- `validate_value` snaps by numeric nearest within 0.15 (a doubled-digit `10.99`
+  had been string-matched to `9` and returned as 9%)
+- flat vs percent decided by magnitude, so a dropped `%` glyph is harmless
+- grayscale fallback when fewer than five rows resolve (a dark upload's text is
+  shredded by the fixed threshold; Rapid survived it only because it reads raw
+  pixels); Otsu everywhere was measured and rejected
+
+Result: every non-echo region 6000/6000 identical; English echoes 0.179% differ,
+net +24 rows, the new reader right roughly 3:1 on adjudicated differences and its
+errors almost all visible misses rather than wrong values. Uniform 3x (over-fit to
+the nine bands that failed at 2x) and a uniform 10 px name top (clipped the `o` of
+every `Resonance ...` row) were each tried and reverted on their own gates.
+
 ## Approaches tried and rejected (do not re-attempt)
 
 | approach | result | why rejected |
@@ -109,14 +145,18 @@ font is **LaguSansBold.otf**, settled quantitatively by NCC against real glyphs
 correct uses are Tesseract fine-tuning and rendering labelled synthetic cells,
 not whole-string template matching.
 
-## Where RapidOCR is still called on this path
+## Where RapidOCR was still called on this path (historical)
 
-Both call sites exist only to repair list desync, in
+Before Attempt 3, both call sites existed only to repair list desync, in
 `reconcile_echo_substat_rows`:
 
 1. `len(names) != len(values)` → rapid on both strips.
 2. `has_invalid_substat_pair(...)` → rapid on the values strip, consumed by
    `choose_substat_value`.
 
-Neither is a judgement about glyph legibility. Both are consequences of reading
-two independent block-OCR lists and pairing them positionally.
+Neither was a judgement about glyph legibility. Both were consequences of reading
+two independent block-OCR lists and pairing them positionally — which banding
+removes by construction. As of 2026-09 RapidOCR is not called on the substat path,
+the main-strip tiebreak, the weapon abstain path (Tesseract on the name strip
+matched Rapid 875/875) or the character abstain hybrid (level now comes from the
+`LV.` pill), and it is removed from `card.py`, `data.py` and `requirements.txt`.

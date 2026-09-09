@@ -169,6 +169,28 @@ Do not treat that estimate as total project cost. Pull the dashboard Usage page
 for exact current usage/costs, then compare it with these service metrics to
 identify drivers.
 
+## Per-process memory (PSS)
+
+`railway metrics` reports the service total; the per-worker split needs `/proc`.
+`railway ssh` requires a registered key (`railway ssh keys github` or `... add`),
+and the container has no `ps`, so read `smaps_rollup` directly:
+
+```
+railway ssh 'for d in /proc/[0-9]*; do pid=${d#/proc/}; cmd=$(tr "\0" " " < $d/cmdline 2>/dev/null | cut -c1-50); case "$cmd" in *python*) echo "=== PID $pid | $cmd"; grep -E "^(Rss|Pss|Private_Dirty|Shared_Dirty):" $d/smaps_rollup | tr "\n" " "; echo;; esac; done'
+```
+
+`Pss` divides shared pages among their sharers and is the number to sum; `Private_Dirty`
+is what a worker holds alone. Measured 2026-09-06 with six workers: parent RSS 207 MB /
+PSS 91 MB; each worker RSS 500–531 MB / PSS 353–384 MB, of which ~340 MB private and
+~152 MB shared (inherited from the parent's eager `data.py` import). The private share
+far exceeds the ~213 MB load footprint, so most of it is retained runtime allocation.
+A Windows dev-box RSS measurement understated production by more than half.
+
+Two gotchas: `railway logs` only spans the current deployment, so a before/after
+across a deploy cannot be pulled after the fact; and Tesseract spawn+model-load is
+~78 ms per call on the container (measured on a blank image), not the 15–25 ms a
+Linux `exec` might suggest — model load dominates.
+
 Official docs:
 
 - `https://docs.railway.com/reference/pricing`

@@ -11,6 +11,65 @@ is stable, and most labels come from small finite game-data vocabularies.
 > [echo-main-strip-preprocessing.md](echo-main-strip-preprocessing.md) — including
 > the rejected axes, so they are not re-attempted.
 
+## Shipped 2026-09 — banded substats, batched Tesseract, tessdata_best, RapidOCR removed
+
+Four things landed together, each gated on a 6000-card r2-backup capture diffed
+region by region against the previous tree, with every English substat difference
+adjudicated by eye.
+
+**Production was running `tessdata_fast`.** Debian's `tesseract-ocr-eng` ships the
+4.1 MB integer LSTM; a Windows install ships `tessdata_best` (15.4 MB), which is what
+every number in this repo was ever measured against. On 300 cards the two differ on
+24% of watermark UID reads (fast produced a valid 9-digit UID on 228/300, best on
+300/300; std and best agree 300/300). The Dockerfile now fetches `tessdata_best` by
+pinned commit and checksum. They are indistinguishable on the echo block, which is
+the second finding below.
+
+**Substat line-dropping is layout analysis, not recognition.** Fast, standard and
+best all lose the same ~78 rows per 1500 echoes on a whole-block read. The card
+grid is deterministic to the pixel — 34.0 px pitch, 15.5 px first row, zero variance
+across 2392 gaps and 200 echoes, wrapped and unwrapped alike — so each row is read
+on its own band with `--psm 7`, which cannot drop a row it was handed. The reader
+that survived the gate (`read_substat_rows` in `card.py`): values at 2x with a
+digit whitelist and a 3x retry only when the 2x read is not a legal roll; names at
+the full band with the row after a wrapping stat re-read on a tighter top and the
+more *confident* read kept; a plain-ratio name-confidence floor of 65 (good reads
+score >= 77, spill fragments and corrupted uploads <= 58); numeric snapping within
+0.15; flat-vs-percent decided by value magnitude; grayscale fallback when the
+thresholded pass finds fewer than five rows. Result vs the previous tree: every
+non-echo region 6000/6000 identical; English echoes 0.179% differ with the new
+reader net +24 rows and right roughly 3:1 on adjudicated differences (the previous
+path read `Basic Attack` for `Heavy Attack` and mispaired values; the new one's
+errors are almost all visible misses). RapidOCR no longer runs on the substat path.
+Otsu in `preprocess_region` was measured and rejected: forte's circuit node reads 0
+on most cards, 597 echo losses per 30,000.
+
+**Tesseract spawn cost is real on Linux.** 78 ms per call with best on the Railway
+container (61 ms with fast), 113–145 ms on Windows; the ~5 ms of actual OCR on a
+small crop is noise against it. Tesseract's list-file mode runs N images through one
+process with byte-identical output (6000/6000 on forte) at ~4.5x per read.
+`tess_batch` in `card.py`: forte 5 -> 1 spawn, watermark 3 -> 2, echo bands 10 -> 2.
+The earlier "single-pass" regression came from canvas-stitching and `image_to_data`
+token splits, neither of which list-file mode does.
+
+**Level is read, not assumed.** A SIFT accept used to report level 90. 6.0% of
+weapons and 5.35% of characters are not. Weapon level comes from its own box
+(800/800 vs the Rapid reference). Character level comes from the gold `LV.` pill,
+located by hue because it floats with name length, inverted, read at 3x then 2x,
+stripes cropped, first two digits (585/585 vs the hybrid, and all 15 of the hybrid's
+own failures rescued once the character region widened to x2 0.38 so long names no
+longer clip the pill). Weapon abstain reads the name strip with Tesseract (875/875
+vs Rapid). The main-strip value tiebreak dropped its Rapid second opinion (0/30,000
+echo main stats changed on the 6000-card gate). RapidOCR is gone from `card.py` and `requirements.txt`.
+
+Known residuals, each a handful of cards in 6000: highlighted max-roll renders (the
+value sits in a bright box the fixed threshold blows out), one soft-upload class
+where Rapid's blur tolerance beat Tesseract, `21%` occasionally read as `219`, and
+rows where both scales return empty. Non-English cards: the confidence floor drops
+rows whose names were garbage fuzzy-matched onto random stats (838 -> 173 rows on
+354 echoes); detection is unaffected and those cards were already gated from
+auto-submit, but the editor pre-fill shrinks. Input to the multilingual workstream.
+
 ## Attempted but not adopted — Tesseract-only echo substat OCR (first attempt)
 
 > **Superseded (2026-06).** This documents the *first* Tesseract-only attempt,
@@ -284,7 +343,7 @@ decode the backend needs anyway.
 
 | Region | Target method | Notes |
 |---|---|---|
-| character | SIFT vs `Data/Characters/<id>.webp` | Crop `tight` `(0.032, 0.088, 0.3198, 0.52)` whole-card, i.e. `CHAR_SPLASH_SUBBOX = (0.10, 0.16, 1.0, 0.9455)` within the character region; downscale query+templates to max_side 150. **Widened** from `(0.04, 0.14, 0.30, 0.52)` after an 800-card A/B: accept 97.8% -> 99.2%, median margin 0.1577 -> 0.1741, zero identity changes. The splash has no fixed frame and bleeds past the region's right edge, so this is tuned empirically rather than measured geometrically. ~185 ms (dev). Conf floor ~0.10 → OCR fallback. Splash always renders incl. newest characters; language-independent, so it beats OCR on non-English cards. See Phase 1 status for the 500-card validation. |
+| character | SIFT vs `Data/Characters/<id>.webp` | Crop `tight` `(0.032, 0.088, 0.3198, 0.52)` whole-card, i.e. `CHAR_SPLASH_SUBBOX = (0.0842, 0.16, 0.8421, 0.9455)` within the character region (whose x2 widened 0.32 -> 0.38 to keep the `LV.` pill in frame; the sub-box carries the 0.32/0.38 factor so its pixels are unchanged); downscale query+templates to max_side 150. **Widened** from `(0.04, 0.14, 0.30, 0.52)` after an 800-card A/B: accept 97.8% -> 99.2%, median margin 0.1577 -> 0.1741, zero identity changes. The splash has no fixed frame and bleeds past the region's right edge, so this is tuned empirically rather than measured geometrically. ~185 ms (dev). Conf floor ~0.10 → OCR fallback. Splash always renders incl. newest characters; language-independent, so it beats OCR on non-English cards. See Phase 1 status for the 500-card validation. |
 | weapon | SIFT vs `Data/Weapons/<id>.webp` | Crop `icon` `(0.7646, 0.4204, 0.8250, 0.5278)` whole-card, i.e. `WEAP_ICON_SUBBOX = (0.0456, 0.1806, 0.3098, 0.7176)` within the weapon panel; downscale to max_side 120. **Corrected**: the original spec above was 92x140 (aspect 0.657), offset +20px left / +22px up and clipping 44px off the icon's right edge. Measured by per-pixel variance over 400 panels the icon is 116x116, aspect 1.000, matching the square 256x256 templates. The fix lifts SIFT accept 77.9% -> 88.3% and median margin 0.0754 -> 0.2659 over 1200 cards, with zero identity changes. ~143 ms (dev). Needs conf floor ~0.08 **and** margin floor ~0.03 (several icons look alike). Blank panel → conf ~0 → empty (see "Missing weapon assets"); empty is correct. |
 | watermark UID | Tesseract digits-only | Use `tessedit_char_whitelist=0123456789`. |
 | watermark username | Tesseract | Leave free-form and Unicode-capable for now. |
@@ -296,7 +355,7 @@ decode the backend needs anyway.
 | echo element | HSV histogram, SIFT fallback within same hue cluster (`data.py` `determine_element`) | Existing method. Grayscale elements (ER, Tidebreaking) and same-hue pairs (e.g. Gust/Windward, Pact/Rite, Trailblazing/Chromatic/Flamewing, Midnight/Dream/Thread) resolve via SIFT. |
 | echo main stat name | small classifier or template matcher | Finite class set from `EchoStats.json`. |
 | echo main stat value | derive from cost and stat name | Do not OCR. |
-| echo substat rows | small row classifier | Predict row `(name, value)` or two heads. |
+| echo substat rows | fixed-band Tesseract, shipped 2026-09 | Five bands at the measured 34 px pitch, `--psm 7` per band; see "Shipped 2026-09" above. The row-classifier idea is superseded. |
 
 ### Missing weapon assets
 
@@ -384,9 +443,10 @@ validated on a 500-card `r2-backup` sample (`bench_char_crops.py`,
 local→Railway gap is part of the motivation: SIFT scales ~1x dev→Railway while
 RapidOCR/onnx scales ~2.5x (8-vCPU thread oversubscription), and character OCR
 was the previous import wall (~2 s on Railway). Crop+downscale overhead is ~1 ms,
-negligible. Note: a SIFT accept reports character/weapon **level 90** (not in the
-splash/icon); the abstain→OCR path still reads the true level for the rarer
-non-90 cards.
+negligible. A SIFT accept originally reported character/weapon **level 90**; 6.0% of
+weapons and 5.35% of characters are not, so since 2026-09 level is read from its own
+box (weapon) and the gold `LV.` pill (character) regardless of the SIFT verdict —
+see "Shipped 2026-09".
 
 Assets in tree: `Data/Characters/` (56 splash WebP) and `Data/Weapons/` (118 icon
 WebP), Encore-sourced, committed with the backend.
@@ -411,7 +471,9 @@ WebP), Encore-sourced, committed with the backend.
 
 ### Weapon — validated, needs a margin gate
 
-- Crop **`icon` `(0.752, 0.400, 0.802, 0.530)`**, downscale to **max_side 120**,
+- Crop **`icon` `(0.7646, 0.4204, 0.8250, 0.5278)`** (corrected 2026-09; the original
+  `(0.752, 0.400, 0.802, 0.530)` was 92x140 against a 116x116 square icon — see the
+  Region architecture table), downscale to **max_side 120**,
   SIFT vs `Data/Weapons/<id>.webp`. ~143 ms median (dev).
 - Harder than character: weapon icons are small and several look alike, so real
   matches score lower (~0.10-0.18) and a handful are genuinely ambiguous.
