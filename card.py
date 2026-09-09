@@ -8,7 +8,12 @@ from typing import Tuple
 from cv2 import SIFT_create, FlannBasedMatcher
 from pathlib import Path
 import io
+import os
+import shlex
+import shutil
+import subprocess
 import sys
+import tempfile
 import threading
 
 
@@ -156,36 +161,76 @@ def validate_stat(name: str, valid_names: set) -> str:
     match = process.extractOne(name, list(valid_names))
     return match[0] if match else name
 
+# The two Resonance stats are the only names that wrap, and a band edge can clip the
+# round top of their 'o' ('Rescnance Skill DMG'), after which fuzzy matching prefers
+# 'Crit DMG' on the shared 'DMG' token. 'skill' and 'liberation' occur in no other stat,
+# so they decide the name outright, as merge_wrapped_substat_names already assumes.
+_RESONANCE_BY_FRAGMENT = (
+    ("skill", "Resonance Skill DMG Bonus"),
+    ("liberation", "Resonance Liberation DMG Bonus"),
+)
+
+# A name read must actually resemble the stat it resolves to. The match is CHOSEN
+# with WRatio, which is what lets 'Basic Attack DMG Bon' find its stat, but WRatio
+# also scores the fragment 'ne' at 90 against 'Energy Regen' and 'Bonus' at 90 against
+# 'Basic Attack DMG Bonus', so it cannot be the gate. Plain ratio against the chosen
+# stat can: measured over every good and garbage read seen in the 6000-card gates,
+# good reads score >= 77 and garbage (spill fragments, corrupted uploads) <= 58.
+# Below the floor a read resolves to nothing, turning a silent wrong stat into a
+# visible missing row.
+SUBSTAT_NAME_MATCH_FLOOR = 65
+
+
+def _substat_name_confidence(raw: str, value: str) -> float:
+    """Plain-ratio similarity of a raw name read to the stat it resolves to; 0 if none."""
+    if not raw:
+        return 0.0
+    stat = validate_substat_name(raw, value or "1%")
+    if not stat:
+        return 0.0
+    cleaned = clean_stat_name(raw, value or "1%")
+    if any(key in _canonical_stat_fragment(cleaned) for key, _ in _RESONANCE_BY_FRAGMENT):
+        return 100.0
+    return float(fuzz.ratio(cleaned.lower(), stat.lower()))
+
+
 def validate_substat_name(name: str, value: str) -> str:
     cleaned = clean_stat_name(name, value)
+    fragment = _canonical_stat_fragment(cleaned)
+    for key, stat in _RESONANCE_BY_FRAGMENT:
+        if key in fragment and stat in SUB_STATS:
+            return stat
     matched = validate_stat(cleaned, SUB_STATS.keys())
+    if not matched or fuzz.ratio(cleaned.lower(), matched.lower()) < SUBSTAT_NAME_MATCH_FLOOR:
+        return ""
     base = matched.replace("%", "")
     if base in {"HP", "ATK", "DEF"}:
         return f"{base}%" if "%" in value else base
     return matched
 
+# Snap tolerance for percent stats. They render to one decimal and adjacent legal
+# rolls are >= 0.7 apart, so 0.15 absorbs display rounding (the card shows DEF 11.9%
+# for the 11.8 roll) without ever reaching a neighbour. Flat stats are exact. This
+# replaced a string-similarity match with a 2.0 numeric window, which turned a
+# doubled-digit read of '10.99' into '9%': the fuzzy match picked '9' and 1.99 < 2.
+SUBSTAT_SNAP_TOLERANCE = 0.15
+FLAT_SUBSTATS = ("HP", "ATK", "DEF")
+
+
 def validate_value(value: str, stat_name: str) -> str:
     if not SUB_STATS or stat_name not in SUB_STATS:
         return value
-        
     had_percent = "%" in value
-    clean_value = value.replace('%', '')
-    
     try:
-        valid_values = [str(v) for v in SUB_STATS[stat_name]]
-        match = process.extractOne(clean_value, valid_values)
-        if match:
-            float_value = float(clean_value)
-            matched_value = float(match[0])
-            if abs(float_value - matched_value) > 2.0:
-                closest = min(SUB_STATS[stat_name], key=lambda x: abs(float_value - x))
-                if abs(float_value - closest) <= 1.0:
-                    return f"{closest}%" if had_percent else str(closest)
-            else:
-                return f"{match[0]}%" if had_percent else match[0]
-                
-    except (ValueError, KeyError):
-        pass
+        numeric = float(value.replace('%', '').strip())
+    except ValueError:
+        return value
+    legal = SUB_STATS[stat_name]
+    closest = min(legal, key=lambda x: abs(numeric - x))
+    tolerance = 0.0 if stat_name in FLAT_SUBSTATS else SUBSTAT_SNAP_TOLERANCE
+    if abs(numeric - closest) <= tolerance:
+        snapped = format_stat_value(closest)
+        return f"{snapped}%" if had_percent else snapped
     return value
 
 def is_legal_substat_value(value: str, stat_name: str) -> bool:
@@ -286,6 +331,47 @@ def _crop_region(image: np.ndarray, box: dict) -> np.ndarray:
 
 def _tess_lines(image: np.ndarray) -> list[str]:
     return [l.strip() for l in pytesseract.image_to_string(image).splitlines() if l.strip()]
+
+
+# --- Batched Tesseract ----------------------------------------------------------
+#
+# pytesseract spawns one tesseract process per call and that process reloads the
+# model every time: measured 78 ms per call on the Railway container and 113-145 ms
+# on Windows, with the actual OCR of a small crop under 5 ms of that. The card does
+# ~25 such calls. Tesseract's list-file mode runs N images through ONE process,
+# separating pages with a form feed; output is byte-identical to N separate calls
+# (verified on forte nodes and the echo main strip, see
+# docs/echo-main-strip-preprocessing.md) at ~4.5x. This is the earlier "single-pass"
+# idea WITHOUT canvas-stitching or image_to_data, which is what caused its token-split
+# regression: each image is still its own page, so nothing is joined or re-split.
+#
+# One config per batch, so callers group images by config. /dev/shm is used when
+# present so the temp PNGs never touch disk on Linux.
+_TESS_BATCH_DIR = os.environ.get("TESS_BATCH_DIR") or ("/dev/shm" if os.path.isdir("/dev/shm") else None)
+
+
+def tess_batch(images: list[np.ndarray], config: str = "") -> list[str]:
+    """OCR several images in one Tesseract process. Returns one text per image, in order."""
+    if not images:
+        return []
+    work = tempfile.mkdtemp(prefix="tb_", dir=_TESS_BATCH_DIR)
+    try:
+        paths = []
+        for i, im in enumerate(images):
+            path = os.path.join(work, f"{i}.png")
+            cv2.imwrite(path, im)
+            paths.append(path)
+        listing = os.path.join(work, "list.txt")
+        with open(listing, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(paths) + "\n")
+        cmd = [pytesseract.pytesseract.tesseract_cmd, listing, "stdout", *shlex.split(config)]
+        out = subprocess.run(cmd, capture_output=True, encoding="utf-8", errors="replace", timeout=120).stdout
+        pages = out.split("\f")
+        if len(pages) < len(images):
+            raise RuntimeError(f"tesseract batch returned {len(pages)} pages for {len(images)} images")
+        return [page.strip() for page in pages[:len(images)]]
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
 
 
 def _main_strip_lines(main_img: np.ndarray) -> list[str]:
@@ -429,6 +515,165 @@ def parse_echo_substats(lines: list[str]) -> list[dict]:
         substats.append({"name": name, "value": value})
     return substats
 
+# --- Substat rows: fixed bands, not layout analysis ------------------------------
+#
+# The whole-block read asked Tesseract's page segmentation to find the rows, and it
+# arbitrarily dropped one (typically the row after a wrapped name). That is a
+# DETECTION failure, not recognition: fast, standard and best tessdata all lose the
+# same ~78 rows per 1500 echoes. The card grid is deterministic to the pixel --
+# measured across 2392 row gaps and 200 echoes, the pitch is 34.0 px and the first
+# row centre 15.5 px with ZERO variance, wrapped and unwrapped alike; a wrap spills
+# into the inter-row gap and never shifts a row. So each row is read on its own
+# band with psm 7, which cannot drop a row it was handed.
+#
+# The values band gets a 2x upscale and a digits whitelist (the levers that fixed
+# the watermark and level reads). A band that comes back EMPTY is re-read once at 3x:
+# at 2x, psm 7 returns nothing for "21%" -- the one Crit DMG value with no decimal
+# point, three glyphs wide -- on ~0.7% of cards, and 3x reads those. But 3x is NOT a
+# blanket upgrade: run everywhere it lost 123 "21%" rows in 3929 cards plus new
+# losses on 9.2% / 10.5% / 11.6% that 2x reads fine. Retrying only the empty bands
+# is monotonic by construction, since a band 2x already read never sees 3x.
+# Names are read on the band's first line only; a
+# wrapped name's continuation lands in the gap and is clipped, and the closed
+# vocabulary resolves "Resonance Liberation" to the full stat regardless. Do NOT run
+# merge_wrapped_substat_names on banded output: it consumes the NEXT line as a
+# continuation, and here the next line is the next row.
+#
+# preprocess_region's fixed threshold(140) shreds dim text (one dark card read 390
+# as 3=0), which Rapid survived only because it reads raw pixels. Plain grayscale
+# recovers those cards but costs ~1.2% on bright ones, so it is the FALLBACK, taken
+# only when the thresholded pass finds fewer than five rows; it fires on ~1% of
+# echoes. Measured on 755 echoes with production scoring: 3755 legal rows vs Rapid's
+# 3738, and on every hand-labelled dispute banded produced ZERO wrong values while
+# Rapid produced three legal-but-wrong ones. Misses are visible; wrong numbers
+# silently corrupt CV.
+SUBSTAT_ROW_FIRST = 15.5
+SUBSTAT_ROW_PITCH = 34
+SUBSTAT_ROW_HALF = 14
+# A wrapped stat's continuation ("DMG Bonus") sits in the gap above the NEXT row and
+# reaches into the top 4 px of that row's +-14 band, where psm 7 reads it as '[1]' ->
+# HP and the value is then snapped into HP's legal set (15/58 adjudicated errors). Only
+# the row after a wrapping stat is re-read with this tighter top; applied to every row
+# it clipped the round 'o' of "Resonance ..." itself and dropped ~104 rows in 6000 cards.
+SUBSTAT_NAME_TOP_AFTER_WRAP = 10
+WRAPPING_SUBSTATS = ("Resonance Liberation DMG Bonus", "Resonance Skill DMG Bonus")
+SUBSTAT_ROWS = 5
+SUBSTAT_NAME_CONFIG = "--psm 7"
+SUBSTAT_VALUE_CONFIG = "--psm 7 -c tessedit_char_whitelist=0123456789.%"
+SUBSTAT_VALUE_RETRY_UPSCALE = 3
+
+
+def _substat_band(crop: np.ndarray, row: int, top: int = SUBSTAT_ROW_HALF) -> np.ndarray:
+    centre = SUBSTAT_ROW_FIRST + SUBSTAT_ROW_PITCH * row
+    return crop[max(0, int(centre - top)):int(centre + SUBSTAT_ROW_HALF), :]
+
+
+def _upscale2(image: np.ndarray) -> np.ndarray:
+    return cv2.resize(image, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
+
+
+def _upscale_retry(image: np.ndarray) -> np.ndarray:
+    return cv2.resize(
+        image, None, fx=SUBSTAT_VALUE_RETRY_UPSCALE, fy=SUBSTAT_VALUE_RETRY_UPSCALE,
+        interpolation=cv2.INTER_CUBIC,
+    )
+
+
+def _resolve_substat(raw_name: str, raw_value: str) -> dict | None:
+    """One (name, value) row, or None when it is not a legal roll for that stat.
+
+    Whether a value is the flat or the percent form of HP/ATK/DEF is decided by
+    magnitude, not by whether Tesseract kept the % glyph: the ranges never overlap
+    (flat ATK 30-60, ATK% 6.4-11.6). Every other stat is always a percent. This is
+    what makes the stored value deterministic and a dropped % harmless.
+    """
+    if not raw_name or not raw_value:
+        return None
+    try:
+        # A stray trailing '.' or '%' on the read ('10.17.') must not void the row.
+        numeric = float(raw_value.replace('%', '').strip().rstrip('.'))
+    except ValueError:
+        return None
+    name = validate_substat_name(raw_name, raw_value)
+    base = name.rstrip('%')
+    if base in FLAT_SUBSTATS:
+        name = base if numeric >= 20 else base + "%"
+    value = validate_value(format_stat_value(numeric) + ("" if name in FLAT_SUBSTATS else "%"), name)
+    if not is_legal_substat_value(value, name):
+        return None
+    return {"name": name, "value": value}
+
+
+def _read_value_bands(names: list[str], value_bands: list[np.ndarray], render) -> list[str]:
+    """Values at 2x, then one 3x retry for any row whose 2x read is not a legal roll.
+
+    Each scale has its own failures: 2x doubles digits on some bands ('3390' for 390,
+    '10.99%' for 10.9%) where 3x is right, and 3x misreads others where 2x is right. So
+    a legal 2x read is never replaced, and a 3x read is only taken when it is legal.
+    `render(band, upscale)` is the image Tesseract sees, shared by both paths.
+    """
+    values = tess_batch([render(b, _upscale2) for b in value_bands], SUBSTAT_VALUE_CONFIG)
+    bad = [i for i, (n, v) in enumerate(zip(names, values)) if n and _resolve_substat(n, v) is None]
+    if bad:
+        retry = tess_batch([render(value_bands[i], _upscale_retry) for i in bad], SUBSTAT_VALUE_CONFIG)
+        for i, v in zip(bad, retry):
+            if _resolve_substat(names[i], v) is not None:
+                values[i] = v
+    return values
+
+
+def _legal_substat_rows(names: list[str], values: list[str]) -> list[dict]:
+    rows = [_resolve_substat(n, v) for n, v in zip(names, values)]
+    return [r for r in rows if r is not None]
+
+
+def _reread_after_wrap(names: list[str], values: list[str], names_img: np.ndarray, render) -> list[str]:
+    """Re-read the row after each wrapping stat with a tighter top; keep the more confident read.
+
+    Neither margin is reliable on its own: the full band can hand psm 7 the spilled
+    'DMG Bonus' fragment ('[1]'), and the tight band can clip a row that sits a couple
+    of pixels high ('[3' for DEF). Both fragments score ~0 against any stat while the
+    real name scores ~100, so the read with the higher name confidence wins, and a tie
+    keeps the primary.
+    """
+    after = [k for k in range(1, SUBSTAT_ROWS)
+             if names[k - 1] and validate_substat_name(names[k - 1], values[k - 1] or "1%") in WRAPPING_SUBSTATS]
+    if not after:
+        return names
+    tight = tess_batch(
+        [render(_substat_band(names_img, k, SUBSTAT_NAME_TOP_AFTER_WRAP)) for k in after],
+        SUBSTAT_NAME_CONFIG,
+    )
+    names = list(names)
+    for k, n in zip(after, tight):
+        if _substat_name_confidence(n, values[k]) > _substat_name_confidence(names[k], values[k]):
+            names[k] = n
+    return names
+
+
+def read_substat_rows(names_img: np.ndarray, values_img: np.ndarray) -> tuple[list[dict], list[str], list[str], str]:
+    """Substats by fixed row band. Returns (rows, raw_names, raw_values, path) with path 'B' or 'G'."""
+    name_bands = [_substat_band(names_img, k) for k in range(SUBSTAT_ROWS)]
+    value_bands = [_substat_band(values_img, k) for k in range(SUBSTAT_ROWS)]
+
+    names = tess_batch([preprocess_region(b) for b in name_bands], SUBSTAT_NAME_CONFIG)
+    values = _read_value_bands(names, value_bands, lambda b, up: preprocess_region(up(b)))
+    names = _reread_after_wrap(names, values, names_img, preprocess_region)
+    rows = _legal_substat_rows(names, values)
+    if len(rows) >= SUBSTAT_ROWS:
+        return rows, names, values, "B"
+
+    gray = lambda b: cv2.cvtColor(b, cv2.COLOR_BGR2GRAY)
+    g_names = tess_batch([_upscale2(gray(b)) for b in name_bands], SUBSTAT_NAME_CONFIG)
+    g_values = _read_value_bands(g_names, value_bands, lambda b, up: up(gray(b)))
+    g_names = _reread_after_wrap(g_names, g_values, names_img, lambda b: _upscale2(gray(b)))
+    g_rows = _legal_substat_rows(g_names, g_values)
+    if len(g_rows) > len(rows):
+        print(f"Substats: grayscale fallback {len(rows)} -> {len(g_rows)} rows")
+        return g_rows, g_names, g_values, "G"
+    return rows, names, values, "B"
+
+
 def validate_character_name(raw_name: str) -> str:
     if not CHARACTER_NAMES:
         return raw_name
@@ -536,13 +781,8 @@ WATERMARK_UID_GUARD_UPSCALE = 2
 UID_DIGITS = 9                       # lb enforces ^\d{9}$
 
 
-def _uid_second_opinion(image: np.ndarray) -> int:
-    """Corroborating UID read: whole strip, free-form, deliberately NOT the primary's config."""
-    upscaled = cv2.resize(
-        image, None, fx=WATERMARK_UID_GUARD_UPSCALE, fy=WATERMARK_UID_GUARD_UPSCALE,
-        interpolation=cv2.INTER_CUBIC,
-    )
-    for line in pytesseract.image_to_string(preprocess_region(upscaled)).split("\n"):
+def _uid_in_text(text: str) -> int:
+    for line in text.split("\n"):
         if match := re.search(r'\d{6,12}', line):
             return int(match.group(0))
     return 0
@@ -563,7 +803,16 @@ def read_watermark(image: np.ndarray) -> dict:
     ):
         uid = int(match.group(0))
 
-    corroborating = _uid_second_opinion(image)
+    # The corroborating read (whole strip at 2x) and the username read (whole strip
+    # at 1x) take the same default config, so they share one Tesseract process.
+    guard_text, name_text = tess_batch([
+        preprocess_region(cv2.resize(
+            image, None, fx=WATERMARK_UID_GUARD_UPSCALE, fy=WATERMARK_UID_GUARD_UPSCALE,
+            interpolation=cv2.INTER_CUBIC,
+        )),
+        preprocess_region(image),
+    ])
+    corroborating = _uid_in_text(guard_text)
     candidates = {c for c in (uid, corroborating) if len(str(c)) == UID_DIGITS}
     if len(candidates) == 1:
         resolved = candidates.pop()
@@ -575,11 +824,7 @@ def read_watermark(image: np.ndarray) -> dict:
             print(f"UID guard: reads disagree ({uid} vs {corroborating}); writing no UID")
         uid = 0
 
-    name_lines = [
-        line.strip()
-        for line in pytesseract.image_to_string(preprocess_region(image)).splitlines()
-        if line.strip()
-    ]
+    name_lines = [line.strip() for line in name_text.splitlines() if line.strip()]
     return {"username": parse_watermark_username(name_lines, uid), "uid": uid}
 
 
@@ -1301,9 +1546,10 @@ def _process_card_inner(image, region: str):
         forte_data = {"levels": [0] * 5}
         processed = preprocess_region(image)
 
-        for i, (name, coords) in enumerate(FORTE_REGIONS.items()):
-            region_img = processed[coords["y1"]:coords["y2"], coords["x1"]:coords["x2"]]
-            text = pytesseract.image_to_string(region_img).strip()
+        # One process for all five nodes (tess_batch); output is identical to five
+        # separate calls, at a fifth of the spawn cost.
+        node_crops = [processed[c["y1"]:c["y2"], c["x1"]:c["x2"]] for c in FORTE_REGIONS.values()]
+        for i, text in enumerate(tess_batch(node_crops)):
             match = re.search(r'(?i)lv\.(\d+)(?:/10)?', text)
             if match:
                 forte_data["levels"][i] = int(match.group(1))
@@ -1331,17 +1577,10 @@ def _process_card_inner(image, region: str):
         # docs/echo-substat-tesseract-only.md. ---
         names_img = _crop_region(image, ECHO_REGIONS["subs_names"])
         values_img = _crop_region(image, ECHO_REGIONS["subs_values"])
-        names_lines = _tess_lines(preprocess_region(names_img))
-        tess_values = _tess_lines(preprocess_region(values_img))
-        cleaned_names, values_lines, rapid_values = reconcile_echo_substat_rows(
-            names_img, values_img, names_lines, tess_values,
-        )
-        values = [
-            choose_substat_value(name, value, rapid_values[i] if i < len(rapid_values) else None)
-            for i, (name, value) in enumerate(zip(cleaned_names, values_lines[:5]))
-        ]
-        substats = parse_echo_substats([f"{name} {value}" for name, value in zip(cleaned_names, values)])
-        lang_signal = echo_language_signal(cleaned_names, values)
+        substats, raw_names, raw_values, subs_path = read_substat_rows(names_img, values_img)
+        for i, row in enumerate(substats, 1):
+            print(f"Substat {i}: '{row['name']} {row['value']}'")
+        lang_signal = echo_language_signal(raw_names, raw_values)
 
         # --- identity (SIFT) + cost-aware main resolution ---
         echo_id, confidence, set_id = match_icon(image)
