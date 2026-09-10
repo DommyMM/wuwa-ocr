@@ -149,6 +149,64 @@ hundred. The method that carried the 2026-09 commits:
 Tesseract is deterministic under load here: parallel captures and sequential re-runs
 agree read for read. The one nondeterministic component is FLANN, below.
 
+## Run the gate in the production image, not on the dev box
+
+`docker build` of this repo's Dockerfile reproduces production exactly, and the dev box
+does not. Verified 2026-09-10 by comparing what production logged for the cards it had
+just processed against the same images re-read locally: 129/130 echo regions identical,
+and the one difference was a row Windows read and production dropped. The container
+drops it too, so the image is a faithful stand-in and Windows is not.
+
+`eng.traineddata` is byte-identical everywhere (md5 `4be3f51b55c0074d8c6b1ee5b5100f95`)
+and Tesseract is 5.5.0 on both, so the model is not the cause. What differs is the
+stack around it: **OpenCV 5.0.0 in the image against 4.13.0 locally**, numpy 2.5.3
+against 2.4.4, leptonica 1.84.1 against 1.85.0, and **libjpeg-turbo 2.1.5 against
+3.0.4**, which decodes the JPEG differently at the margin. Nothing in
+`requirements.txt` is pinned, so the image's major versions move on any rebuild; that
+today's build matches production is luck, not a guarantee, and pinning would fix it.
+
+How to run one:
+
+```
+docker build -t wuwa-ocr:local backend/
+docker run --rm -v <r2-backup>:/data:ro -v <scratch>:/work:ro -v <scratch>/out:/out \
+  -e OMP_THREAD_LIMIT=1 -e LIST=/work/list.txt -e OUT=/out/base.json -e N=6000 \
+  -e WORKERS=12 --entrypoint python wuwa-ocr:local /work/capture.py
+```
+
+Mount a candidate `card.py` over `/app/card.py` for the second run instead of
+rebuilding. On the dev box a substat-only pass runs about 200 cards a minute, so a
+6000-card A/B is roughly 45 minutes. Bind-mount paths must be Windows-style; a POSIX
+`$PWD` from Git Bash does not mount.
+
+## Recovered 2026-09: the row under a wrapped name
+
+The row directly under `Resonance Liberation DMG Bonus` or `Resonance Skill DMG Bonus`
+was being dropped: the wrap's second line bleeds into the next name band, which reads
+`RP` or `HP ITN` at zero confidence while its value reads perfectly. It is the class
+RapidOCR used to cover, it is rare (a 1500-echo probe found none; the rate is about one
+in ten thousand), and it needs a corpus of this size to appear at all.
+
+Two causes, both fixed:
+
+- **The passes are complementary and only one was kept.** The thresholded pass loses
+  the post-wrap name to the spill; the grayscale pass loses a value band to noise. Each
+  gets four of five and neither wins on count, so the row was lost. The loser now fills
+  the winner's empty bands. **Only empty bands** -- letting the thresholded pass supply
+  any row it resolved changed seven values on the same 6000-card gate (`HP 390` for
+  `HP 360`, `ATK 40` for `ATK 30`, `DEF 50` for `DEF% 10.9%`), because on the 152
+  echoes where the grayscale pass wins outright the thresholded one is exactly the pass
+  rendering badly. Coherence of the winning pass is what makes its rows trustworthy.
+- **One fixed tighter top was a coin flip.** Which top clears the spill is not
+  monotonic: one card alternates RP / HPT / RPT / RP / HP / RP / HP as the top goes
+  14 / 12 / 11 / 10 / 9 / 8 / 7. A ladder `(12, 10, 9, 8, 7)` is read inside the
+  batched spawn the re-read already costs and the most confident wins; the comparison
+  is strictly greater-than, so a row already reading at confidence 100 cannot move.
+
+Gate, in the production image: 5,995 cards / 29,975 echoes, **8 gains, 0 losses, 0
+value changes, 0 non-English differences**. All eight recovered rows were checked
+against the card; six are the post-wrap flat HP case.
+
 ## Investigated 2026-09, not adopted
 
 **16:9 inputs below 1920 wide.** wuwaflex stores 1280x720 copies of the same cards.
