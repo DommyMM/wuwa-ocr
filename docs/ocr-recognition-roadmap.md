@@ -72,6 +72,57 @@ rows whose names were garbage fuzzy-matched onto random stats (838 -> 173 rows o
 354 echoes); detection is unaffected and those cards were already gated from
 auto-submit, but the editor pre-fill shrinks. Input to the multilingual workstream.
 
+## Pre-deploy check, 2026-09-09
+
+Before the overhaul deployed, the tree that was live (f4f4c65) and HEAD were both run
+over 6000 cards no earlier gate had scanned (the local corpus had grown to 28,597
+images; 21,097 were unseen). Same files, same order, region by region:
+
+| region | identical | differ | what the differences were |
+| --- | ---: | ---: | --- |
+| forte, sequences, watermark | 6000 | 0 | |
+| character | 5710 | 290 | all level-only, 0 identity changes; 16 unusual levels (1, 7, 20, 40, 79, 86, 88) checked by eye, all correct |
+| weapon | 5998 | 2 | both identified -> empty, same cause, fixed below |
+| echo identity + main | 29,998 | 2 | FLANN flips at conf 0.008 and 0.028; both trees agree on re-run |
+| echo substats, English | 29,575 of 29,645 | 70 | 27 gains, 43 regression candidates, adjudicated below |
+
+Of the 43 English candidates: 16 are prod emitting `21` where HEAD emits `21%`; 4 are
+prod's Basic-for-Heavy confusion; 13 are prod wrong and HEAD right (phantom rows,
+mispaired values, wrong names); 2 are a wash (each side missed one row); 1 is a French
+card; 7 are rows HEAD dropped that prod had, every one a visible miss and none a wrong
+value. Of those 7, four are the known residual classes (highlighted max-roll renders,
+`21%`) and three are a **short flat row directly after a wrapped Resonance name** (`HP
+510`, `HP% 6.4%`, `HP% 9.4%` as row 5 under `Resonance Liberation DMG Bonus`), 3 in
+29,645 echoes, noted as the next thing to look at in the post-wrap re-read. Sixteen of
+the 27 gains were checked by eye: all real rows, and all of the class prod dropped
+(flat `HP 390` / `DEF 50` / `DEF 60`, rows after a wrap). Net rows: HEAD +94, prod +59;
+echoes with fewer than five rows 539 -> 528. Non-English echoes lost rows as expected
+(out of scope; those cards are gated from auto-submit).
+
+**Weapon name fallback.** The two weapon differences were dark uploads whose gold name
+text peaks at brightness 127 while the shared preprocess thresholds at 140; SIFT had
+the right icon on both but a hair under its floors (conf 0.068, margin 0.030). The
+name strip is now read twice in one spawn, binarised first and plain grayscale second,
+first resolving render wins. Weapon-only gate over 12,000 cards: 11,998 identical, 2
+rescued, 0 lost, 0 changed.
+
+**Local latency, one process, each region timed alone, 200 cards, p50 ms.** Relative
+only: a Tesseract spawn costs 113-145 ms on Windows against 78 on the container.
+
+| region | live tree | HEAD |
+| --- | ---: | ---: |
+| character | 196 | 324 (pill read on the accept path) |
+| watermark | 505 | 363 |
+| weapon | 342 | 340 |
+| forte | 665 | 162 |
+| echo (each) | 758-833 | 770-860 |
+| slowest region (the fan-out wall) | 938 | 955 |
+| serial sum (CPU per card) | 5781 | 5344 |
+
+The wall is set by the echo regions and did not move; CPU per card fell 8%, and batch
+throughput at equal settings rose from 1.0 to 1.3 cards/s. The GPU is idle by design:
+nothing in the pipeline is GPU work.
+
 ## How a recognition change is gated
 
 The bar is the owner's: one percent of cards is hundreds of leaderboard entries, so a
