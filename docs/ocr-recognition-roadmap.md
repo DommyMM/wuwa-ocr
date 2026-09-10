@@ -207,6 +207,51 @@ Gate, in the production image: 5,995 cards / 29,975 echoes, **8 gains, 0 losses,
 value changes, 0 non-English differences**. All eight recovered rows were checked
 against the card; six are the post-wrap flat HP case.
 
+## Dependencies are pinned, and bumping them is an accuracy change
+
+`requirements.txt` pinned nothing until 2026-09-10, so a rebuild silently moved
+production onto OpenCV 5.0.0 while the dev box stayed on 4.13.0. That is measurable
+rather than theoretical: on one card production dropped a substat row the dev box read.
+The image also carries libjpeg-turbo 2.1.5 against the dev box's 3.0.4, which decodes
+the same JPEG differently before OCR sees it.
+
+Every direct dependency is now pinned to what the image resolved on 2026-09-10, which is
+what production runs and what every accuracy gate was measured against, plus `botocore`,
+the one transitive that visibly drifted (a patch release inside three hours). With those
+13 lines a rebuild reproduces all 37 packages exactly. The Tesseract model is pinned
+separately by commit and sha256 in the Dockerfile.
+
+`opencv-python-headless`, `numpy` and `Pillow` decide the pixels Tesseract is handed, so
+bumping any of them is an accuracy change: gate it in the production image, do not trust
+a green test suite. The remaining 24 transitive packages are unpinned; a full `pip
+freeze` lock would close that, but nothing in it touches the OCR path.
+
+## Open items
+
+Carried forward deliberately, none blocking:
+
+- **Residual misreads**, each a handful per 30,000 echoes: values highlighted as a max
+  roll (the bright box defeats the fixed threshold), `21%` occasionally read as `219`,
+  and rows where both render scales return empty. The lever for all three is fine-tuning
+  tessdata on the game font (LaguSansBold, see the fonts note), not more heuristics.
+- **Non-English cards** pre-fill fewer substat rows in the editor than the old reader
+  did. Detection is unaffected and those cards are already gated out of auto-submit, so
+  this is editor-only. Input to the multilingual workstream.
+- **FLANN echo identity flake** at confidence below ~0.07, two flips per 30,000 echoes,
+  described above. A deterministic matcher or an abstain floor would end it.
+- **Source image linkage**: some builds' `source_image_key` points at the wrong image
+  (one card matched 0/5 rows on every echo), and at least one image in `r2-backup` is
+  entirely black yet still backs a build row. `lb/cmd/sourceimageaudit` and
+  `cmd/sourceimagematch` already exist for this class.
+- **Stored panel order can permute** relative to read order: 44 of 109 disputed panels
+  matched a different echo index better. Anything joining `echoPanels[i]` to `echo{i+1}`
+  must tolerate that.
+- **Latency**: scheduling is exhausted. `OCR_WORKERS=10` cut the second wave from 255 ms
+  to 13 ms and the wall is now one echo at ~790 ms and essentially nothing else, so the
+  next lever has to be inside the echo region itself (the SIFT sweep and the substat and
+  main-stat Tesseract batches).
+- **The 24 unpinned transitive dependencies**, above.
+
 ## Investigated 2026-09, not adopted
 
 **16:9 inputs below 1920 wide.** wuwaflex stores 1280x720 copies of the same cards.

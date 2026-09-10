@@ -3,6 +3,7 @@ uvicorn[standard]==0.52.4
 python-multipart==0.0.32
 slowapi==0.1.10
 boto3==1.43.91
+botocore==1.43.92
 opencv-python-headless==5.0.0.93
 numpy==2.5.3
 Pillow==12.3.0
