@@ -408,6 +408,12 @@ def resolve_echo_main(cost: int, raw_name: str, raw_value: str) -> dict:
 # 3738, and on every hand-labelled dispute banded produced ZERO wrong values while
 # Rapid produced three legal-but-wrong ones. Misses are visible; wrong numbers
 # silently corrupt CV.
+#
+# The two passes fail on DIFFERENT rows, so the loser fills the winner's empty bands
+# (read_substat_rows below). Filling only empty bands is deliberate: letting the
+# thresholded pass supply any row it resolved changed seven values on a 6000-card gate,
+# because on an echo where the grayscale pass wins outright the thresholded one is
+# rendering badly and its rows are legal but wrong ('HP 390' for 'HP 360').
 SUBSTAT_ROW_FIRST = 15.5
 SUBSTAT_ROW_PITCH = 34
 SUBSTAT_ROW_HALF = 14
@@ -416,7 +422,7 @@ SUBSTAT_ROW_HALF = 14
 # HP and the value is then snapped into HP's legal set (15/58 adjudicated errors). Only
 # the row after a wrapping stat is re-read with this tighter top; applied to every row
 # it clipped the round 'o' of "Resonance ..." itself and dropped ~104 rows in 6000 cards.
-SUBSTAT_NAME_TOP_AFTER_WRAP = 10
+SUBSTAT_NAME_TOPS_AFTER_WRAP = (12, 10, 9, 8, 7)
 WRAPPING_SUBSTATS = ("Resonance Liberation DMG Bonus", "Resonance Skill DMG Bonus")
 SUBSTAT_ROWS = 5
 SUBSTAT_NAME_CONFIG = "--psm 7"
@@ -483,9 +489,14 @@ def _read_value_bands(names: list[str], value_bands: list[np.ndarray], render) -
     return values
 
 
+def _substat_bands(names: list[str], values: list[str]) -> list[dict | None]:
+    """One entry per band, None where the band is not a legal row. Position is kept so
+    the two render passes can be merged band by band."""
+    return [_resolve_substat(n, v) for n, v in zip(names, values)]
+
+
 def _legal_substat_rows(names: list[str], values: list[str]) -> list[dict]:
-    rows = [_resolve_substat(n, v) for n, v in zip(names, values)]
-    return [r for r in rows if r is not None]
+    return [r for r in _substat_bands(names, values) if r is not None]
 
 
 def _reread_after_wrap(names: list[str], values: list[str], names_img: np.ndarray, render) -> list[str]:
@@ -501,14 +512,16 @@ def _reread_after_wrap(names: list[str], values: list[str], names_img: np.ndarra
              if names[k - 1] and validate_substat_name(names[k - 1], values[k - 1] or "1%") in WRAPPING_SUBSTATS]
     if not after:
         return names
+    tops = SUBSTAT_NAME_TOPS_AFTER_WRAP
     tight = tess_batch(
-        [render(_substat_band(names_img, k, SUBSTAT_NAME_TOP_AFTER_WRAP)) for k in after],
+        [render(_substat_band(names_img, k, t)) for k in after for t in tops],
         SUBSTAT_NAME_CONFIG,
     )
     names = list(names)
-    for k, n in zip(after, tight):
-        if _substat_name_confidence(n, values[k]) > _substat_name_confidence(names[k], values[k]):
-            names[k] = n
+    for i, k in enumerate(after):
+        for n in tight[i * len(tops):(i + 1) * len(tops)]:
+            if _substat_name_confidence(n, values[k]) > _substat_name_confidence(names[k], values[k]):
+                names[k] = n
     return names
 
 
@@ -520,19 +533,40 @@ def read_substat_rows(names_img: np.ndarray, values_img: np.ndarray) -> tuple[li
     names = tess_batch([preprocess_region(b) for b in name_bands], SUBSTAT_NAME_CONFIG)
     values = _read_value_bands(names, value_bands, lambda b, up: preprocess_region(up(b)))
     names = _reread_after_wrap(names, values, names_img, preprocess_region)
-    rows = _legal_substat_rows(names, values)
-    if len(rows) >= SUBSTAT_ROWS:
-        return rows, names, values, "B"
+    bands = _substat_bands(names, values)
+    if sum(b is not None for b in bands) >= SUBSTAT_ROWS:
+        return [b for b in bands if b], names, values, "B"
 
     gray = lambda b: cv2.cvtColor(b, cv2.COLOR_BGR2GRAY)
     g_names = tess_batch([_upscale2(gray(b)) for b in name_bands], SUBSTAT_NAME_CONFIG)
     g_values = _read_value_bands(g_names, value_bands, lambda b, up: up(gray(b)))
     g_names = _reread_after_wrap(g_names, g_values, names_img, lambda b: _upscale2(gray(b)))
-    g_rows = _legal_substat_rows(g_names, g_values)
-    if len(g_rows) > len(rows):
-        print(f"Substats: grayscale fallback {len(rows)} -> {len(g_rows)} rows")
-        return g_rows, g_names, g_values, "G"
-    return rows, names, values, "B"
+    g_bands = _substat_bands(g_names, g_values)
+
+    # The winner is chosen exactly as before (more resolved rows, thresholded on a tie)
+    # and none of its rows are touched; the loser only fills bands the winner left
+    # empty. The two passes fail on DIFFERENT rows -- one loses a post-wrap name to the
+    # spill, the other loses a value band to noise -- so this recovers rows neither
+    # pass gets alone, while staying strictly additive.
+    if sum(g is not None for g in g_bands) > sum(b is not None for b in bands):
+        won, lost = "G", "B"
+        win_bands, win_names, win_values = g_bands, g_names, g_values
+        fill_bands, fill_names, fill_values = bands, names, values
+    else:
+        won, lost = "B", "G"
+        win_bands, win_names, win_values = bands, names, values
+        fill_bands, fill_names, fill_values = g_bands, g_names, g_values
+
+    merged_names, merged_values, filled = list(win_names), list(win_values), 0
+    for k, (w, l) in enumerate(zip(win_bands, fill_bands)):
+        if w is None and l is not None:
+            win_bands[k] = l
+            merged_names[k], merged_values[k] = fill_names[k], fill_values[k]
+            filled += 1
+    rows = [b for b in win_bands if b]
+    if filled:
+        print(f"Substats: {lost} filled {filled} empty row(s) -> {len(rows)} rows")
+    return rows, merged_names, merged_values, (won + "+" if filled else won)
 
 
 def validate_character_name(raw_name: str) -> str:
