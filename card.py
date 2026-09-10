@@ -1286,6 +1286,13 @@ def read_weapon_level(region_img: np.ndarray) -> int:
 # cases), so Rapid leaves this path with no behaviour change. Blank panels (a since-
 # fixed game-side bug rendered no weapon art for Lucy/Lucilla/Sigrika/Rebecca) still
 # resolve to an empty name, which the frontend's signature-weapon fallback keys on.
+#
+# The strip is read twice in one spawn: the shared threshold(140) preprocess first,
+# which is what the 875/875 was measured on, then plain grayscale. One dark upload in
+# ~7000 cards had gold name text peaking at brightness 127, so the binarised strip
+# read as nothing while grayscale read the exact name; SIFT had the right icon at
+# conf 0.068, under its 0.08 floor. The preprocessed read wins whenever it resolves,
+# so every card it already handled is unchanged.
 WEAPON_NAME_BOX = {"x1": 152, "y1": 25, "x2": 437, "y2": 79}
 WEAPON_NAME_UPSCALE = 2
 WEAPON_NAME_CONFIG = "--psm 7"
@@ -1301,12 +1308,15 @@ def read_weapon_name(region_img: np.ndarray) -> str | None:
         raw, None, fx=WEAPON_NAME_UPSCALE, fy=WEAPON_NAME_UPSCALE,
         interpolation=cv2.INTER_CUBIC,
     )
-    text = pytesseract.image_to_string(preprocess_region(upscaled), config=WEAPON_NAME_CONFIG)
-    first = next((line.strip() for line in text.splitlines() if line.strip()), "")
-    if not first:
-        return None
-    match = process.extractOne(first, WEAPON_NAMES, scorer=fuzz.ratio, score_cutoff=WEAPON_NAME_MIN_SCORE)
-    return match[0] if match else None
+    renders = [preprocess_region(upscaled), cv2.cvtColor(upscaled, cv2.COLOR_BGR2GRAY)]
+    for text in tess_batch(renders, WEAPON_NAME_CONFIG):
+        first = next((line.strip() for line in text.splitlines() if line.strip()), "")
+        if not first:
+            continue
+        match = process.extractOne(first, WEAPON_NAMES, scorer=fuzz.ratio, score_cutoff=WEAPON_NAME_MIN_SCORE)
+        if match:
+            return match[0]
+    return None
 
 
 def recognize_weapon_asset(region_img: np.ndarray) -> dict:
