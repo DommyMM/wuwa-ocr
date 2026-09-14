@@ -10,7 +10,7 @@ from typing import Any, Optional, cast
 from card import process_card
 from r2_storage import ImageIdentity, R2ImageStore, R2Settings, StorageResult, UnsupportedImageType, identify_image
 from issue_reports import MAX_IMAGE_BYTES, handle_issue_report
-from image_integrity import echo_bed_score, validate_image_integrity
+from image_integrity import echo_bed_score, validate_header_dimensions, validate_image_integrity
 from log_events import log_event
 import time
 from collections import defaultdict
@@ -319,10 +319,40 @@ async def rate_limit_middleware(request: Request, call_next):
     response = await call_next(request)
     return response
 
+# Multipart framing (boundaries, the part header) around one 5 MiB image.
+MAX_MULTIPART_BYTES = MAX_IMAGE_BYTES + 64 * 1024
+
+
+def reject_oversized_declaration(request: Request, limit: int) -> None:
+    """Turn away an upload that declares up front that it is too large."""
+
+    declared = request.headers.get("content-length", "")
+    if declared.isdigit() and int(declared) > limit:
+        raise HTTPException(status_code=413, detail="Image exceeds the 5 MiB limit.")
+
+
+async def read_bounded_body(request: Request, limit: int) -> bytes:
+    """Read the raw body, stopping the moment it passes the limit.
+
+    request.body() buffers the whole thing and leaves the caller to check the
+    length afterwards, which makes the limit a report rather than a cap.
+    """
+
+    chunks: list[bytes] = []
+    total = 0
+    async for chunk in request.stream():
+        total += len(chunk)
+        if total > limit:
+            raise HTTPException(status_code=413, detail="Image exceeds the 5 MiB limit.")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
 async def read_upload_image_bytes(request: Request) -> bytes:
     content_type = request.headers.get("content-type", "").lower()
 
     if content_type.startswith("multipart/form-data"):
+        reject_oversized_declaration(request, MAX_MULTIPART_BYTES)
         form = await request.form()
         value = form.get("image")
         if not isinstance(value, UploadFile) and not hasattr(value, "read"):
@@ -336,7 +366,7 @@ async def read_upload_image_bytes(request: Request) -> bytes:
                 if inspect.isawaitable(close_result):
                     await close_result
     else:
-        image_bytes = await request.body()
+        image_bytes = await read_bounded_body(request, MAX_IMAGE_BYTES)
 
     if not image_bytes:
         raise HTTPException(status_code=400, detail="Missing image bytes.")
@@ -528,21 +558,29 @@ async def stream_full_import_image(
         return
     hashed_at = time.perf_counter()
 
+    # The dimension gate runs on the header, before the decode: cv2.imdecode
+    # allocates for whatever the header declares, so checking a decoded image's
+    # shape is a check that arrives after the memory is already spent.
+    integrity = validate_header_dimensions(image_bytes)
+
     decode_started = time.perf_counter()
-    nparr = np.frombuffer(image_bytes, np.uint8)
-    image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+    image = None
+    if integrity is None:
+        nparr = np.frombuffer(image_bytes, np.uint8)
+        image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
     decoded_at = time.perf_counter()
 
-    if image is None:
-        yield ndjson_event({
-            "type": "error",
-            "success": False,
-            "scanId": scan_id,
-            "error": "Failed to decode image.",
-        })
-        return
+    if integrity is None:
+        if image is None:
+            yield ndjson_event({
+                "type": "error",
+                "success": False,
+                "scanId": scan_id,
+                "error": "Failed to decode image.",
+            })
+            return
+        integrity = validate_image_integrity(image)
 
-    integrity = validate_image_integrity(image)
     if not integrity["accepted"]:
         log_event(
             "ocr_import_rejected",

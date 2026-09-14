@@ -20,7 +20,9 @@ from r2_storage import StorageResult
 
 
 def encoded_image(extension: str) -> bytes:
-    image = np.full((64, 96, 3), 127, dtype=np.uint8)
+    # Card-sized, because the ingest path now gates on the header dimensions
+    # before it decodes. A flat image of this size still encodes to a few KiB.
+    image = np.full((1080, 1920, 3), 127, dtype=np.uint8)
     ok, encoded = cv2.imencode(extension, image)
     if not ok:
         raise AssertionError(f"could not encode {extension}")

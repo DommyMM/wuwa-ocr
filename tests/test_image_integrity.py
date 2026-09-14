@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import struct
 import unittest
 from unittest.mock import patch
 
@@ -11,6 +12,8 @@ from image_integrity import (
     CHROME_REJECT_SCORE,
     chrome_score,
     echo_bed_score,
+    read_header_dimensions,
+    validate_header_dimensions,
     validate_image_integrity,
 )
 
@@ -28,6 +31,56 @@ def _card_from_reference() -> np.ndarray:
     full = cv2.resize(ref, (1920, 1080), interpolation=cv2.INTER_LINEAR)
     full = np.clip(full, 0, 255).astype(np.uint8)
     return cv2.cvtColor(full, cv2.COLOR_GRAY2BGR)
+
+
+def _encoded(extension: str, width: int, height: int) -> bytes:
+    ok, encoded = cv2.imencode(extension, np.zeros((height, width, 3), np.uint8))
+    assert ok, f"could not encode {extension}"
+    return encoded.tobytes()
+
+
+def _png_declaring(width: int, height: int) -> bytes:
+    """A small PNG whose IHDR claims a size its pixel data does not have.
+
+    This is the decompression bomb in its actual shape: a few hundred bytes on
+    the wire that ask cv2.imdecode for width * height * 3 of memory.
+    """
+    encoded = _encoded(".png", 4, 4)
+    return encoded[:16] + struct.pack(">II", width, height) + encoded[24:]
+
+
+class HeaderDimensionTests(unittest.TestCase):
+    def test_reads_card_dimensions_without_decoding(self):
+        for extension in (".png", ".jpg"):
+            with self.subTest(extension=extension):
+                encoded = _encoded(extension, 1920, 1080)
+
+                self.assertEqual(read_header_dimensions(encoded), (1920, 1080))
+
+    def test_card_sized_header_proceeds_to_the_decode(self):
+        self.assertIsNone(validate_header_dimensions(_encoded(".png", 1920, 1080)))
+
+    def test_declared_bomb_is_rejected_before_the_decode(self):
+        result = validate_header_dimensions(_png_declaring(60000, 60000))
+
+        self.assertIsNotNone(result)
+        self.assertFalse(result["accepted"])
+        self.assertEqual(result["reasons"], ["wrong_card_dimensions"])
+        self.assertEqual(result["image"]["width"], 60000)
+
+    def test_wrong_sized_card_is_rejected(self):
+        result = validate_header_dimensions(_encoded(".jpg", 1280, 720))
+
+        self.assertFalse(result["accepted"])
+        self.assertEqual(result["reasons"], ["wrong_card_dimensions"])
+
+    def test_unreadable_header_is_rejected(self):
+        for payload in (b"", b"not an image at all", b"\xff\xd8\xff" + b"\x00" * 64):
+            with self.subTest(payload=payload[:8]):
+                result = validate_header_dimensions(payload)
+
+                self.assertFalse(result["accepted"])
+                self.assertEqual(result["reasons"], ["unreadable_image_header"])
 
 
 class PhaseAChromeTests(unittest.TestCase):

@@ -23,6 +23,7 @@ none of that is measured here.
 from __future__ import annotations
 
 import os
+import struct
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +32,11 @@ import numpy as np
 
 EXPECTED_WIDTH = 1920
 EXPECTED_HEIGHT = 1080
+
+WRONG_SIZE_MESSAGE = (
+    "Upload the original 1920x1080 KuroBot build card, not a screenshot or "
+    "another card format."
+)
 
 _ASSETS = Path(__file__).resolve().parent / "assets"
 
@@ -172,6 +178,88 @@ def _result(
     }
 
 
+# --- Phase A, before the decode -----------------------------------------------
+
+_JPEG_MAGIC = b"\xff\xd8\xff"
+_PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+# Frame headers carry the dimensions. The rest of the 0xC0-0xCF block does not:
+# DHT (C4), JPG (C8) and DAC (CC) are ordinary segments.
+_SOF_MARKERS = frozenset(range(0xC0, 0xD0)) - {0xC4, 0xC8, 0xCC}
+
+
+def read_header_dimensions(image_bytes: bytes) -> tuple[int, int] | None:
+    """Width and height straight from the container header, without decoding.
+
+    None means the header could not be read, which callers treat as a reject:
+    decoding it to find out is the exact work this check exists to avoid.
+    """
+
+    if image_bytes.startswith(_PNG_MAGIC):
+        if len(image_bytes) < 24 or image_bytes[12:16] != b"IHDR":
+            return None
+        width, height = struct.unpack(">II", image_bytes[16:24])
+        return int(width), int(height)
+
+    if not image_bytes.startswith(_JPEG_MAGIC):
+        return None
+
+    # Walk the segments to the frame header. Anything unexpected ends the walk
+    # rather than guessing past it: an unparseable card is not a genuine one.
+    offset = 2
+    while offset + 9 <= len(image_bytes):
+        if image_bytes[offset] != 0xFF:
+            return None
+        marker = image_bytes[offset + 1]
+        if marker == 0xFF:  # fill byte ahead of the real marker
+            offset += 1
+            continue
+        if marker in _SOF_MARKERS:
+            height, width = struct.unpack(">HH", image_bytes[offset + 5:offset + 9])
+            return int(width), int(height)
+        if marker == 0xDA:  # start of scan, so there is no frame header ahead
+            return None
+        segment_length = struct.unpack(">H", image_bytes[offset + 2:offset + 4])[0]
+        if segment_length < 2:
+            return None
+        offset += 2 + segment_length
+    return None
+
+
+def validate_header_dimensions(image_bytes: bytes) -> dict[str, Any] | None:
+    """Reject verdict for undecoded bytes, or None to proceed to the decode.
+
+    This is validate_image_integrity's dimension gate hoisted in front of
+    cv2.imdecode. Decoding allocates width * height * 3 bytes before anything
+    inspects the image, and both containers can declare dimensions far out of
+    proportion to their compressed size: a PNG of a few hundred KiB, well
+    inside the 5 MiB upload cap, can declare 60000x60000 and ask for 10 GB.
+    A genuine card is exactly 1920x1080, so the header settles it for the cost
+    of a struct.unpack.
+    """
+
+    dimensions = read_header_dimensions(image_bytes)
+    if dimensions is None:
+        return _result(
+            verdict="reject",
+            reasons=["unreadable_image_header"],
+            width=0,
+            height=0,
+            message=WRONG_SIZE_MESSAGE,
+        )
+
+    width, height = dimensions
+    if width != EXPECTED_WIDTH or height != EXPECTED_HEIGHT:
+        return _result(
+            verdict="reject",
+            reasons=["wrong_card_dimensions"],
+            width=width,
+            height=height,
+            message=WRONG_SIZE_MESSAGE,
+        )
+
+    return None
+
+
 def validate_image_integrity(image: np.ndarray) -> dict[str, Any]:
     """Triage an image before storage or expensive OCR begins.
 
@@ -187,10 +275,7 @@ def validate_image_integrity(image: np.ndarray) -> dict[str, Any]:
             reasons=["wrong_card_dimensions"],
             width=width,
             height=height,
-            message=(
-                "Upload the original 1920x1080 KuroBot build card, not a "
-                "screenshot or another card format."
-            ),
+            message=WRONG_SIZE_MESSAGE,
         )
 
     score = chrome_score(image)

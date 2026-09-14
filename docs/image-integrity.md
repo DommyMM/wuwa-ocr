@@ -5,14 +5,26 @@ training data. It is a deterministic layout check, not a generic AI detector.
 
 ## Production flow
 
-`validate_image_integrity` runs after decode and returns one of two verdicts.
-There is deliberately no `suspect` tier: the only two things that turn a user
-away are a wrong size and a chrome mismatch, both invariants of a genuine card.
+Phase A is split across the decode. `validate_header_dimensions` reads the
+dimensions out of the PNG or JPEG header first; only if they are exactly
+1920x1080 does `cv2.imdecode` run, and `validate_image_integrity` then chrome-
+checks the decoded card. Both return the same verdict shape, and there is
+deliberately no `suspect` tier: the only two things that turn a user away are a
+wrong size and a chrome mismatch, both invariants of a genuine card.
 
 - `ok`: a 1920x1080 card whose fixed chrome matches the template. R2 upload and
   region OCR run concurrently.
-- `reject`: wrong dimensions, or a chrome score at or above `CHROME_REJECT_SCORE`.
-  R2 storage and OCR are both skipped and the client receives a specific message.
+- `reject`: wrong or unreadable header dimensions, or a chrome score at or above
+  `CHROME_REJECT_SCORE`. R2 storage and OCR are both skipped and the client
+  receives a specific message.
+
+The dimension gate sits ahead of the decode because `cv2.imdecode` allocates
+`width * height * 3` for whatever the header declares, and both containers can
+declare dimensions wildly out of proportion to their compressed size: a PNG of a
+few hundred KiB, comfortably inside the 5 MiB upload cap, can claim 60000x60000
+and ask for roughly 10 GB. Checking a decoded image's `shape` is a check that
+arrives after the memory is already spent. `validate_image_integrity` keeps its
+own dimension check so the invariant holds for every caller, not just ingest.
 
 This is Phase A ("is this a KuroBot card at all?"). It rejects wrong-size images,
 screenshots, crops and AI-generated cards, and is blind to progression, language
