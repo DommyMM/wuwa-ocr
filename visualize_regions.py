@@ -1,18 +1,18 @@
 """
-Visualize all OCR crop regions and their internal sub-regions on a card image.
+Visualize all OCR crop regions and their internal sub-regions on a card image
 
 Usage:
   py visualize_regions.py <image_path>
   py visualize_regions.py   (uses first image in r2-backup/)
 
-Press 's' to save as regions_debug.png, any other key to close.
+Press 's' to save as regions_debug.png, any other key to close
 """
 import sys
 import cv2
 import numpy as np
 from pathlib import Path
 
-# ── Outer regions (normalized 0-1, relative to full image) ───────────────────
+# Normalized 0-1 boxes on the full card
 OUTER_REGIONS = {
     'character': (0.0328, 0.0074, 0.3021, 0.0833),
     'watermark':  (0.0073, 0.0741, 0.1304, 0.1370),
@@ -39,11 +39,10 @@ OUTER_COLORS = {
     'echo5':      (80, 180, 255),
 }
 
-# ── Internal echo sub-regions (absolute px within cropped echo image) ─────────
-# from card.py ECHO_REGIONS + get_element_region + match_icon + get_echo_cost
+# Pixel boxes inside the echo crop, from card.py's ECHO_REGIONS, icon crop, get_element_region and get_echo_cost
 ECHO_SUB = {
     'icon':       (0,   0,   188, 182, (200, 200, 200)),
-    'element':    (None, None, None, None, (0, 255, 200)),   # normalized — computed below
+    'element':    (None, None, None, None, (0, 255, 200)),   # normalized, drawn from ECHO_ELEMENT_NORM
     'cost':       (302, 9,   345, 61,  (255, 255, 0)),
     'main':       (195, 66,  366, 148, (100, 200, 255)),
     'subs_names': (36,  228, 290, 400, (180, 255, 100)),
@@ -52,13 +51,13 @@ ECHO_SUB = {
 # element region is normalized within the echo crop
 ECHO_ELEMENT_NORM = (0.654, 0.027, 0.797, 0.148)
 
-# ── Internal weapon sub-regions (absolute px within cropped weapon image) ─────
+# Pixel boxes inside the weapon crop
 WEAPON_SUB = {
     'name':  (152, 25, 437, 79,  (200, 150, 255)),
     'level': (191, 79, 269, 133, (150, 200, 255)),
 }
 
-# ── Internal forte sub-regions (absolute px within cropped forte image) ───────
+# Pixel boxes inside the forte crop
 FORTE_SUB = {
     'normal':  (270, 144, 389, 204, (200, 255, 150)),
     'skill':   (48,  302, 158, 356, (200, 255, 150)),
@@ -67,7 +66,7 @@ FORTE_SUB = {
     'lib':     (386, 544, 518, 601, (200, 255, 150)),
 }
 
-# ── Sequence node centers (absolute px within cropped sequences image) ────────
+# Sequence node (center x, center y, width, height) in pixels inside the sequences crop
 SEQ_NODES = [
     (55,  58, 30, 26),
     (130, 58, 30, 26),
@@ -116,36 +115,30 @@ def main():
         ox2, oy2 = round(x2n * W), round(y2n * H)
         color = OUTER_COLORS[name]
 
-        # Outer box (thick)
         draw_rect(out, ox1, oy1, ox2, oy2, color, thickness=2, text=name)
         print(f'{name:12s}  x={ox1}-{ox2}  y={oy1}-{oy2}  ({ox2-ox1}x{oy2-oy1}px)')
 
-        cw, ch = ox2 - ox1, oy2 - oy1  # crop dimensions
+        cw, ch = ox2 - ox1, oy2 - oy1
 
-        # Echo sub-regions
         if name.startswith('echo'):
             for sub, (sx1, sy1, sx2, sy2, sc) in ECHO_SUB.items():
                 if sx1 is None:
                     continue
                 draw_rect(out, ox1+sx1, oy1+sy1, ox1+sx2, oy1+sy2, sc, text=sub)
-            # element (normalized within echo crop)
             ex1, ey1, ex2, ey2 = ECHO_ELEMENT_NORM
             draw_rect(out,
                       ox1 + round(ex1*cw), oy1 + round(ey1*ch),
                       ox1 + round(ex2*cw), oy1 + round(ey2*ch),
                       (0, 255, 200), text='element')
 
-        # Weapon sub-regions
         elif name == 'weapon':
             for sub, (sx1, sy1, sx2, sy2, sc) in WEAPON_SUB.items():
                 draw_rect(out, ox1+sx1, oy1+sy1, ox1+sx2, oy1+sy2, sc, text=sub)
 
-        # Forte sub-regions
         elif name == 'forte':
             for sub, (sx1, sy1, sx2, sy2, sc) in FORTE_SUB.items():
                 draw_rect(out, ox1+sx1, oy1+sy1, ox1+sx2, oy1+sy2, sc, text=sub)
 
-        # Sequence nodes
         elif name == 'sequences':
             for i, (cx, cy, bw, bh) in enumerate(SEQ_NODES, 1):
                 draw_rect(out,

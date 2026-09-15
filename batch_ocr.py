@@ -1,9 +1,8 @@
 """
-batch_ocr.py — full pipeline OCR on every image in r2-backup/.
+Full-pipeline OCR on every image in r2-backup/
 
-Sends all 10 regions per image to the running server concurrently,
-merges results into one AnalysisData object per image, saves to:
-  ../ocr_results.json   (repo root — accessible by both backend and frontend)
+Sends all 10 regions per image to the running server concurrently and merges them into one AnalysisData per image
+Saves to ../ocr_results.json in the workspace root, which the server's /ocr-results serves to the frontend
 
 Usage:
   py batch_ocr.py
@@ -74,7 +73,7 @@ async def run_all(images, concurrency: int):
 
 
 def merge_results(raw_results):
-    """Group by image name, merge all region results into one AnalysisData dict."""
+    """One AnalysisData dict per image from its successful region results"""
     by_image = {}
     for img_name, region, body in raw_results:
         if img_name not in by_image:
@@ -89,8 +88,7 @@ def merge_results(raw_results):
 
 
 def is_valid(entry):
-    """Skip entries that look like invalid/corrupt images."""
-    # Must have character and at least one echo
+    """Keep only entries with a character id, a watermark UID and at least one echo"""
     has_char  = isinstance(entry.get("character"), dict) and entry["character"].get("id")
     has_echo  = any(isinstance(entry.get(f"echo{i}"), dict) for i in range(1, 6))
     has_water = isinstance(entry.get("watermark"), dict) and entry["watermark"].get("uid")

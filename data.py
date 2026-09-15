@@ -7,7 +7,6 @@ from typing import Dict, List, Set
 from cv2 import SIFT_create, FlannBasedMatcher
 
 
-# Initialize empty defaults
 CHARACTER_NAMES: List[str] = []
 CHARACTER_ID_MAP: Dict[str, str] = {}
 WEAPON_NAMES: List[str] = []
@@ -18,26 +17,25 @@ MAIN_STATS: Dict = {}
 DEFAULT_MAIN_STATS: Dict = {}
 SUB_STATS: Dict = {}
 SUB_STAT_NAMES: Set[str] = set()
-ECHO_NAMES: List[str] = []       # ordered list of English names (for logging/rapidfuzz)
-ECHO_SET_IDS: Dict[str, List[int]] = {}  # CDN id str → legal fetter set ids (authoritative)
-ECHO_ELEMENTS: Dict = {}          # CDN id str → set names, derived from ids (logs/back-compat)
-ECHO_COSTS: Dict[str, int] = {}   # CDN id str → cost (1 | 3 | 4)
-ECHO_NAME_MAP: Dict[str, str] = {} # CDN id str → English name (for display in response)
+ECHO_NAMES: List[str] = []       # English names in load order, only counted in the load log
+ECHO_SET_IDS: Dict[str, List[int]] = {}  # echo id to legal set ids, authoritative
+ECHO_ELEMENTS: Dict = {}          # echo id to set names derived from the ids, unused outside this module
+ECHO_COSTS: Dict[str, int] = {}   # echo id to cost (1, 3 or 4)
+ECHO_NAME_MAP: Dict[str, str] = {} # echo id to English name for logs and the response
 ICON_TEMPLATES: Dict[str, np.ndarray] = {}
 TEMPLATE_FEATURES = {}
 ELEMENT_TEMPLATES: Dict[str, np.ndarray] = {}
 ELEMENT_FEATURES = {}
 COST_TEMPLATES: Dict[int, np.ndarray] = {}
 
-# Hecate's in-game resonance box allows the 6 base elemental sonata sets on top
-# of its default Empyrean (set 13). Keyed by echo id → legal fetter set ids.
+# Hecate's resonance box adds the six base elemental sets to its default Empyrean (13)
+# Mirrors lb's echoExtraFetterIDs
 ECHO_SET_ID_OVERRIDES: Dict[str, List[int]] = {
     '60000855': [13, 1, 2, 3, 4, 5, 6],
 }
 
-# id → sonata-set name, for human-readable logs/response only. Detection and
-# storage are id-native; this is the single inverse of the frontend FETTER_MAP
-# (wuwabuilds/lib/echo.ts) — copy new sets from there when they ship.
+# Set names for logs and the response only, since detection and storage use ids
+# Copy of the frontend's FETTER_MAP, so new sets come from there when they ship
 SET_NAME_BY_ID: Dict[int, str] = {
     1: 'Glacio', 2: 'Fusion', 3: 'Electro', 4: 'Aero',
     5: 'Spectro', 6: 'Havoc', 7: 'Healing', 8: 'ER',
@@ -50,21 +48,19 @@ SET_NAME_BY_ID: Dict[int, str] = {
     33: 'Feathered', 34: 'EvilPurge', 35: 'Nether',
 }
 
-# Rover gender is not a field anywhere in the synced data, when a new Rover element
-# ships, add its two ids here and the element pairing derives from
-# Characters.json at load (ROVER_ELEMENT_BY_ID).
+# Synced data has no Rover gender field, so a new Rover element adds its two ids here
+# Its element is filled from Characters.json at load (ROVER_ELEMENT_BY_ID)
 ROVER_GENDER_BY_ID: Dict[str, str] = {
     '1406': 'M', '1501': 'M', '1605': 'M', '1309': 'M',
     '1408': 'F', '1502': 'F', '1604': 'F', '1310': 'F',
 }
-ROVER_ELEMENT_BY_ID: Dict[str, str] = {}  # id → element, from Characters.json
+ROVER_ELEMENT_BY_ID: Dict[str, str] = {}  # id to element, from Characters.json
 
-# Paths
 DATA_DIR = Path(__file__).parent / 'Data'
 
 
 def _load_from_local():
-    """Load Characters, Weapons, Echoes from local Data/ files (legacy format)."""
+    """Load Characters, Weapons and Echoes from Data/"""
     global CHARACTER_NAMES, CHARACTER_ID_MAP, WEAPON_NAMES, WEAPON_DATA, WEAPON_ID_MAP, ECHO_NAMES, ECHO_ELEMENTS, ECHO_SET_IDS, ECHO_COSTS, ECHO_NAME_MAP
 
     with open(DATA_DIR / 'Characters.json', 'r', encoding='utf-8') as f:
@@ -76,7 +72,7 @@ def _load_from_local():
             name = c.get('name', '')
             cid = str(c.get('id', '')).strip()
             if name and cid:
-                # Preserve first seen ID for duplicated names (Rover variants are handled in frontend fallback).
+                # First id wins for duplicate names, and card.py resolves Rover's gendered ids
                 CHARACTER_ID_MAP.setdefault(name, cid)
             if cid in ROVER_GENDER_BY_ID:
                 ROVER_ELEMENT_BY_ID[cid] = c.get('element', '')
@@ -89,7 +85,7 @@ def _load_from_local():
                 wid = str(w.get('id', '')).strip()
                 WEAPON_NAMES.append(name)
                 WEAPON_DATA[name] = weapon_type
-                # Preserve first seen ID for duplicated names.
+                # First id wins for duplicate names
                 if name and wid:
                     WEAPON_ID_MAP.setdefault(name, wid)
 
@@ -105,8 +101,6 @@ def _load_from_local():
             ECHO_ELEMENTS[eid] = [SET_NAME_BY_ID.get(s, str(s)) for s in set_ids]
             ECHO_NAME_MAP[eid] = name
 
-    # Mirrors echoExtraFetterIDs in lb/internal/calc/validate.go: Hecate's in-game
-    # resonance box allows the 6 base elemental sets on top of its default Empyrean.
     for eid, set_ids in ECHO_SET_ID_OVERRIDES.items():
         if eid in ECHO_SET_IDS:
             ECHO_SET_IDS[eid] = set_ids
@@ -174,7 +168,7 @@ try:
     if not DATA_DIR.exists():
         raise FileNotFoundError(f"Data directory not found: {DATA_DIR}")
 
-    # Runtime data source is local backend/Data (synced via scripts).
+    # Data/ is generated by the frontend repo's sync scripts
     _load_from_local()
 
     with open(DATA_DIR / 'EchoStats.json', 'r', encoding='utf-8') as f:
@@ -204,10 +198,8 @@ except Exception as e:
     print(f"Working directory: {Path.cwd()}")
     print(f"Data directory exists: {DATA_DIR.exists()}")
 
-# Elements that share a hue cluster — HSV alone can't separate these pairs.
-# Within a cluster, fall back to SIFT. Across clusters, HSV is decisive.
-# Electro (H≈135) is distinct from all clusters; no entry needed.
-# Fetter set ids that share a hue cluster (names in comments, see SET_NAME_BY_ID).
+# Set ids whose badges share a hue, so HSV can't separate them and SIFT decides within a cluster
+# A set in no cluster, like Electro (H≈135), is decided by HSV alone
 _HUE_CLUSTERS = [
     {8, 14, 33},                    # ER, Tidebreaking, Feathered (grayscale)
     {27, 28, 2, 22, 18, 9, 20, 35}, # Trailblazing, Chromatic, Fusion, Flamewing, Flaming, Attack, Crown, Nether (H≈7)
@@ -220,12 +212,12 @@ _HUE_CLUSTERS = [
 ]
 
 def _same_cluster(candidates: list) -> bool:
-    """Return True if all candidates fall within a single hue cluster."""
+    """True when all candidates fall within one hue cluster"""
     cset = set(candidates)
     return any(cset <= cluster for cluster in _HUE_CLUSTERS)
 
 def _template_color_score(image, template) -> float:
-    """Compare an element crop against a resized color template."""
+    """Mean per-channel match of an element crop against a resized color template"""
     tmpl = cv2.resize(template, (image.shape[1], image.shape[0]), interpolation=cv2.INTER_AREA)
     channel_scores = [
         cv2.matchTemplate(image[:, :, ch], tmpl[:, :, ch], cv2.TM_CCOEFF_NORMED).max()
@@ -234,11 +226,9 @@ def _template_color_score(image, template) -> float:
     return float(np.mean(channel_scores))
 
 def determine_element(image, filter_ids):
-    """Match sonata set by badge: HSV histogram first, SIFT fallback only within a
-    hue cluster. Id-native — returns an int fetter set id, or None if undecidable.
+    """Set id from a badge crop by HSV histogram, with SIFT only inside a hue cluster, None when undecidable
 
-    `filter_ids` is either an echo id (str, candidates looked up via ECHO_SET_IDS)
-    or an explicit list of candidate set ids.
+    `filter_ids` is an echo id (candidates from ECHO_SET_IDS) or a list of candidate set ids
     """
     if isinstance(filter_ids, str):
         possible = ECHO_SET_IDS.get(filter_ids, [])
@@ -250,7 +240,6 @@ def determine_element(image, filter_ids):
     if len(possible) == 1:
         return possible[0]
 
-    # HSV histogram match
     hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
     mask = cv2.inRange(hsv, np.array([0, 40, 40]), np.array([180, 255, 255]))
     hist = cv2.calcHist([hsv], [0], mask, [36], [0, 180])
@@ -266,9 +255,8 @@ def determine_element(image, filter_ids):
         t_hsv = cv2.cvtColor(tmpl, cv2.COLOR_BGR2HSV)
         t_mask = cv2.inRange(t_hsv, np.array([0, 40, 40]), np.array([180, 255, 255]))
         if cv2.countNonZero(t_mask) == 0:
-            # Grayscale template (ER, Tidebreaking): HISTCMP_CORREL returns 1.0 for
-            # all-zero histograms regardless of image content — score manually instead.
-            # Use a pixel threshold to tolerate a few background/noise pixels.
+            # Grayscale template (ER, Tidebreaking), scored by hand since HISTCMP_CORREL gives all-zero histograms 1.0
+            # Crop matches when under 3% of pixels (at least 10) are colored, so a little background noise passes
             total_px = image.shape[0] * image.shape[1]
             score = 1.0 if image_colored < max(10, int(total_px * 0.03)) else -1.0
         else:
@@ -283,7 +271,7 @@ def determine_element(image, filter_ids):
     scores.sort(key=lambda x: x[1], reverse=True)
     best, second = scores[0], scores[1] if len(scores) > 1 else None
 
-    # If top two are in the same hue cluster, HSV can't distinguish, use SIFT
+    # Top two in one hue cluster can't be separated by HSV, so SIFT decides
     if second is not None and _same_cluster([best[0], second[0]]):
         sift = SIFT_create()
         flann = FlannBasedMatcher(dict(algorithm=1, trees=5), dict(checks=50))
@@ -291,9 +279,7 @@ def determine_element(image, filter_ids):
         if des1 is not None:
             sift_scores = []
             for sid, (kp2, des2) in ELEMENT_FEATURES.items():
-                # Only arbitrate among the same-cluster candidates that caused the
-                # tie. Cross-cluster candidates that HSV already rejected by a wide
-                # margin (e.g. green Sound vs gold Rite) must not be reachable here
+                # Only same-cluster candidates arbitrate, so a set HSV rejected (green Sound vs gold Rite) can't win
                 if sid not in possible or not _same_cluster([best[0], sid]):
                     continue
                 ml = flann.knnMatch(des1, des2, k=2)
@@ -304,8 +290,8 @@ def determine_element(image, filter_ids):
                 if best_sift[1] > 0:
                     return best_sift[0]
 
-        # Low-detail sonata crops can produce no usable SIFT matches. In that
-        # case, do not let an arbitrary zero-score candidate override HSV.
+        # Low-detail crops can yield no SIFT matches, and a zero-score SIFT pick must not override HSV
+        # Instead color matching decides among same-cluster candidates within 0.02 of HSV's best
         best_score = best[1]
         same_hue_candidates = [
             sid

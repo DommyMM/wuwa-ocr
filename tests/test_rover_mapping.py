@@ -10,8 +10,7 @@ import card
 class RoverMappingTests(unittest.TestCase):
     @staticmethod
     def _synthetic_character_region(foreground_hue: int | None) -> np.ndarray:
-        # The export-card header is a dark, low-saturation purple. Its hue is
-        # close to Electro, so it must not participate in element detection.
+        # Export-card header is a dark, low-saturation purple near Electro's hue, so element detection must ignore it
         hsv = np.full((200, 200, 3), (131, 45, 45), dtype=np.uint8)
 
         if foreground_hue is not None:

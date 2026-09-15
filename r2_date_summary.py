@@ -1,6 +1,6 @@
-"""Summarize local r2-backup images by modified time.
+"""Summarize local r2-backup images by modified time
 
-Run `sync_r2.py --run` first if you want mtimes aligned to R2 LastModified.
+Run `sync_r2.py --run` first so mtimes hold original upload times
 
 Examples:
     py backend\r2_date_summary.py

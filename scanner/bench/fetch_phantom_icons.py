@@ -1,25 +1,11 @@
-"""Download the 38 Phantom echo skins as EXTRA templates for the base echo's id.
+"""Download Phantom echo skins as extra templates under their base echo's id
 
     py bench/fetch_phantom_icons.py
 
-Phantoms are cosmetic: same cost, same legal sonata sets, same stat pools. So the
-phantom FLAG is worthless to an optimizer and we do not try to detect it -- a
-Phantom tile matching its base id is the CORRECT answer.
-
-The reason to hold the art anyway is defensive. A Phantom is a RECOLOR, so its hue
-is shifted away from the base template. In the four Nightmare families whose sets are
-identical to their base (Crownless, Feilian Beringal, Inferno Rider, Thundering Mephis)
-the sonata badge is mute, so identity rests on gradient and hue alone -- and for
-Feilian Beringal gradient is blind (base-vs-Nightmare template NCC = 0.937), leaving
-HUE AS THE ONLY SIGNAL. Feilian Beringal has a phantom skin and its Nightmare does not.
-Comparing that shifted hue against non-phantom templates is exactly how a Phantom base
-gets flipped to a Nightmare.
-
-Registering the phantom art as a second template under the SAME id removes the trap:
-identify.py scores every variant and keeps the best, so the phantom matches phantom art
-and still reports the base id.
-
-Saved as Data/EchoPhantoms/<echo_id>.png (id-native, matching Data/Echoes/<id>.webp).
+Phantoms are cosmetic, so a Phantom tile matching its base id is correct and the flag is never detected
+But a Phantom is a recolor, and Feilian Beringal splits from its Nightmare by hue alone, so its Phantom can flip
+identify.py keeps each id's best-scoring variant, so the phantom matches its own art and still reports the base id
+Saved as Data/EchoPhantoms/<echo_id> with the source's extension, id-native like Data/Echoes
 """
 from __future__ import annotations
 
@@ -29,28 +15,24 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from urllib.request import Request, urlopen
 
-# Wuthery 403s the default urllib agent (same fix as fetch_stat_icons.py).
+# Wuthery 403s the default urllib agent
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0 Safari/537.36"
 CDN_BASE = "https://files.wuthery.com"
 ENCORE_BASE = "https://api.encore.moe/resource/Data"
 
 BACKEND = Path(__file__).resolve().parents[2]
 OUT = BACKEND / "Data" / "EchoPhantoms"
-# The frontend's CDN echo table is the only source carrying phantomIcon; backend
-# Data/Echoes.json is the trimmed (id/name/cost/setIds) mirror.
+# Only the frontend's echo table carries phantomIcon, since backend Data/Echoes.json is a trimmed mirror
 FRONTEND_PUBLIC = BACKEND.parent / "wuwabuilds" / "public"
 CDN_ECHOES = FRONTEND_PUBLIC / "Data" / "Echoes.json"
 
 
 def to_source(raw: str) -> str | Path:
-    """Port of wuwabuilds/lib/echo.ts::toImageUrl -- the paths are NOT uniform.
+    """Port of the frontend's toImageUrl in echo.ts, keep the path forms in step
 
-    Since the image mirror (wuwabuilds scripts/mirror_images_to_public.py) the normal
-    case is a site-relative /assets/ path, whose file already sits in the frontend's
-    public/ dir — read it from disk. The CDN URL forms survive for pre-mirror
-    snapshots: newly-shipped echoes are not on Wuthery yet and carry an absolute
-    encore URL, so blindly prefixing CDN_BASE yields
-    'https://files.wuthery.comhttps://api.encore...'.
+    Site-relative /assets/ paths are already in the frontend's public/ dir, so they read from disk
+    Absolute URLs pass through, since prefixing CDN_BASE onto an encore URL breaks it
+    /d/ and /Game/ forms remain for pre-mirror snapshots
     """
     if raw.startswith("/assets/"):
         return FRONTEND_PUBLIC / raw.lstrip("/")
@@ -76,13 +58,10 @@ def main() -> int:
 
     def get(item: tuple[str, str | Path]) -> str:
         eid, src = item
-        # Keep the source extension: the /assets/ mirror and encore serve .webp,
-        # Wuthery .png. cv2.imdecode reads both, and identify.py globs on the id,
-        # not the suffix.
+        # Keep the source extension, since identify.py globs on the id and cv2.imdecode reads .webp and .png alike
         suffix = src.suffix if isinstance(src, Path) else Path(src).suffix
         dest = OUT / f"{eid}{suffix or '.png'}"
-        # Suffix-agnostic: a skin fetched as .png pre-mirror must not be
-        # re-fetched as .webp — identify.py globs on the id, so both would load.
+        # Check both suffixes, since a .png fetched pre-mirror plus a new .webp would both load as variants
         if any((OUT / f"{eid}{s}").exists() for s in (".png", ".webp")):
             return f"  have  {eid}"
         try:

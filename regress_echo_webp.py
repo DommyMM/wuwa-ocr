@@ -1,7 +1,6 @@
-"""Compare current echo templates against an all-WebP echo template set.
+"""Compare echo identification on the current templates against an all-WebP template set
 
-This exercises the same full-flow echo icon path used by the backend:
-card.match_icon() with cost, badge, and family validation. It does not run OCR.
+Runs the backend's full card.match_icon path (cost, badge and family validation) without OCR
 
 Examples:
     py backend\regress_echo_webp.py --limit 500

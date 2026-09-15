@@ -1,26 +1,9 @@
-"""Stat rows from the detail panel. Names come from icons, never from OCR.
+"""Stat rows from the detail panel, with names from icons and never from OCR
 
-backend/Data/Stats.json maps 20 stats onto 17 unique icons. The ONLY collisions are
-HP/HP%, ATK/ATK% and DEF/DEF% - each flat/percent pair shares an icon. So:
-
-    icon   -> the stat FAMILY   (17 classes, language-independent)
-    number -> the member within the family
-
-The family is fixed BEFORE the value is looked at, and the three ambiguous families
-have disjoint legal sets (HP% 6.4-11.6 vs HP 320-580; ATK% 6.4-11.6 vs ATK 30-60;
-DEF% 8.1-14.7 vs DEF 40-70), so the number alone always resolves the member.
-
-That ordering is the whole point. The Tesseract-only card path regressed because it
-inferred the stat NAME from the VALUE, and flat ATK 40 vs flat DEF 40 are
-indistinguishable that way (docs/ocr-recognition-roadmap.md). ATK and DEF have
-DIFFERENT icons, so that failure is structurally impossible here.
-
-Consequences: stat names need no OCR in any of the 9 WuWa languages, the '%' is never
-read, and main + innate rows are derived from cost (EchoStats.json) rather than read.
-Only the substat NUMBERS are an OCR problem.
-
-Validated 21/21 icons and 15/15 substat values across 3 labelled 4K echoes, including
-two-line name wraps, a flat DEF, and an ATK% substat.
+Data/Stats.json maps 20 stats onto 17 icons, where only HP, ATK and DEF share an icon with their percent form
+Icon fixes the family first, and each pair's flat and percent ranges are disjoint (flat ATK 30-60, ATK% 6.4-11.6)
+Never infer a stat name from its value, since flat ATK 40 and flat DEF 40 look the same that way
+Names need no OCR in any language and '%' is never read, so only substat numbers are OCR'd
 """
 from __future__ import annotations
 
@@ -34,9 +17,7 @@ BACKEND = Path(__file__).resolve().parents[2]
 ICON_DIR = BACKEND / "Data" / "Stats"
 MATCH_SIZE = 48
 
-# A real stat icon matches its template at IoU 0.78-0.94. Non-icon ink swept up by the
-# generous stats box (the "Echo Skill" heading) scores ~0.34. That gap is a chasm, not
-# a tuned threshold.
+# Real stat icons match at IoU 0.78-0.94 and swept-up non-icon ink (the "Echo Skill" heading) at ~0.34
 ICON_IOU_FLOOR = 0.60
 
 _STATS = json.loads((BACKEND / "Data" / "Stats.json").read_text(encoding="utf-8"))
@@ -48,14 +29,10 @@ for _name, _v in _STATS.items():
 _TEMPLATES: dict[str, np.ndarray] | None = None
 
 
-# --- icon matching -----------------------------------------------------------
-
 def _normalize(mask: np.ndarray) -> np.ndarray:
-    """Crop a binary mask to its glyph bbox, then resize.
+    """Crop a binary mask to its glyph bbox, then resize
 
-    Without this, IoU is dominated by however much empty padding the crop happened to
-    include, which collapses the margin between similar glyphs (Heavy Attack and
-    Resonance Skill tied at 0.01 before this was added).
+    Otherwise empty padding dominates IoU and similar glyphs tie (Heavy Attack and Resonance Skill within 0.01)
     """
     ys, xs = np.nonzero(mask)
     if len(ys) == 0:
@@ -78,16 +55,17 @@ def templates() -> dict[str, np.ndarray]:
 
 
 def _mask_query(icon_bgr: np.ndarray) -> np.ndarray:
-    """Binary glyph mask. The panel is semi-transparent over the game world, so the row
-    background is not a fixed colour; Otsu adapts, and matching binary SHAPES rather
-    than pixels makes the result background-independent."""
+    """Binary glyph mask
+
+    Panel is semi-transparent over the game world, so Otsu adapts to the background and shapes match regardless of it
+    """
     gray = cv2.cvtColor(icon_bgr, cv2.COLOR_BGR2GRAY)
     _, th = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)
     return _normalize(th > 96)
 
 
 def classify_icon(icon_bgr: np.ndarray) -> list[tuple[str, float]]:
-    """Rank stat-icon templates by mask IoU, best first."""
+    """Rank stat-icon templates by mask IoU, best first"""
     q = _mask_query(icon_bgr)
     scored = [
         (stem, float(np.sum(q * t) / (np.sum(np.maximum(q, t)) + 1e-9)))
@@ -98,7 +76,7 @@ def classify_icon(icon_bgr: np.ndarray) -> list[tuple[str, float]]:
 
 
 def resolve_stat(icon_stem: str, is_percent: bool) -> str | None:
-    """icon family + percent-ness -> exact stat name."""
+    """Icon family and percent-ness to exact stat name"""
     members = FAMILY.get(icon_stem, [])
     if not members:
         return None
@@ -109,8 +87,6 @@ def resolve_stat(icon_stem: str, is_percent: bool) -> str | None:
             return m
     return members[0]
 
-
-# --- self-locating geometry --------------------------------------------------
 
 def _runs(mask: np.ndarray, min_len: int = 1) -> list[tuple[int, int]]:
     out, start = [], None
@@ -127,23 +103,11 @@ def _runs(mask: np.ndarray, min_len: int = 1) -> list[tuple[int, int]]:
 
 
 def locate_icon_column(stats_bgr: np.ndarray) -> tuple[int, int, list[int]] | None:
-    """Find the stat-icon column by STRUCTURE, not by a hardcoded fraction.
+    """Find the stat-icon column by structure, not a hardcoded fraction
 
-    Hardcoding it as `0.075 * box_width` made every error in the hand-placed stats box
-    propagate into the icon column: a 1% x-shift took accuracy from 7/7 to 1/7, and it
-    failed SILENTLY (still returned 7 rows, 1 correct).
-
-    What does NOT work: filtering connected components by size/squareness. Stat icons
-    are not single components - the Crit DMG glyph is a central star plus FOUR DETACHED
-    arrow accents - so component counting cannot count icons, and any filter loose
-    enough to admit the pieces also admits text glyphs.
-
-    What works: the icon column is separated from the name text by a band of zero ink,
-    so it is simply the FIRST contiguous ink run in the column projection. Fragmented
-    icons are irrelevant; the whole column is one run.
-
-    Requirement on the caller: the stats box must start LEFT of the icons. Generous on
-    the left is free; clipping them is fatal (we then abstain, which is at least loud).
+    Column is the first ink run in the column projection, since a zero-ink gap separates it from the name text
+    Component filters can't count icons, since Crit DMG's glyph is a star plus four detached arrows
+    Stats box must start left of the icons, since clipping them makes this abstain
     """
     h, w = stats_bgr.shape[:2]
     gray = cv2.cvtColor(stats_bgr, cv2.COLOR_BGR2GRAY)
@@ -166,12 +130,9 @@ def locate_icon_column(stats_bgr: np.ndarray) -> tuple[int, int, list[int]] | No
 
 
 def _bands(centers: list[int], h: int) -> list[tuple[int, int]]:
-    """Row bands: centre +/- half the median pitch.
+    """Row bands: centre +/- half the median pitch
 
-    The icon says WHERE a row is, never how tall it is. Using the blob's own extent was
-    a bug: the Heavy Attack glyph is a tall thin arrow whose faint upper chevrons fall
-    below Otsu, so its band came out 42px vs ~57px for every other row, and the value
-    crop inherited that and sliced the digits.
+    Icon gives a row's centre but not its height, since Heavy Attack's faint chevrons made a 42 px band vs ~57 px
     """
     if not centers:
         return []
@@ -183,18 +144,10 @@ def _bands(centers: list[int], h: int) -> list[tuple[int, int]]:
 
 
 def find_rows(stats_bgr: np.ndarray) -> list[dict]:
-    """Every real stat row: band, icon family, match confidence.
+    """Every real stat row: band, icon family, match confidence
 
-    The stats block has VARIABLE HEIGHT. A substat name that wraps to two lines (only
-    'Resonance Liberation DMG Bonus' and 'Resonance Skill DMG Bonus' ever do) makes the
-    block taller and pushes the last row down, so a tight y-box CLIPS the final row on
-    exactly those echoes - which silently turned a Crit Rate row into a bogus Heavy
-    Attack match at IoU 0.34.
-
-    So the caller passes a band extended generously past any wrap (into the "Echo Skill"
-    heading), and rows whose icon does not actually match a template are discarded. That
-    also handles under-levelled echoes with <5 substats, and gives a principled abstain
-    rather than a confident wrong answer.
+    A wrapped Resonance substat name pushes the last row down, so the caller's block reaches past any wrap
+    Rows whose icon matches no template are dropped, which also covers echoes with fewer than 5 substats
     """
     loc = locate_icon_column(stats_bgr)
     if loc is None:
@@ -216,16 +169,10 @@ def find_rows(stats_bgr: np.ndarray) -> list[dict]:
 def value_cells(
     stats_bgr: np.ndarray, rows: list[dict], value_frac: float, pad: int = 6
 ) -> list[np.ndarray | None]:
-    """Crop each row's value from the VALUE's own ink, not from the icon's row band.
+    """Crop each row's value from the value's own ink, not the icon's row band
 
-    The value's vertical position is NOT the icon's. They coincide on a normal row, but
-    when a name wraps to two lines the icon is centred on the taller block while the
-    value stays aligned to the FIRST line - so inheriting the icon band slices the top
-    off the value (7.1% was read as 1770).
-
-    Values therefore locate their own ink runs, and each row claims the run that overlaps
-    its band the most. Rows stay the alignment anchor (a row that finds no value abstains
-    rather than stealing its neighbour's), and the crop is never clipped.
+    A wrapped name centres the icon on two lines but the value sits on the first, so the icon band read 7.1% as 1770
+    Each row claims the ink run overlapping its band most, and a row with none abstains rather than take a neighbour's
     """
     h, w = stats_bgr.shape[:2]
     col = stats_bgr[:, int(w * value_frac):]

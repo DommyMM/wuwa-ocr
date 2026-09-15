@@ -1,9 +1,8 @@
 """
-sync_r2.py — mirror the R2 bucket into local r2-backup/ with true original mtimes.
+Mirror the R2 bucket into local r2-backup/ with original upload mtimes
 
-Downloads only keys missing locally, and stamps each local file with the
-original upload time so date-based backfills can select screenshots by patch
-window without relisting R2.
+Downloads only keys missing locally and stamps each file with its original upload time
+Date-based backfills can then select screenshots by patch window without relisting R2
 
 Usage:
   py sync_r2.py                         # dry run — reports downloads and mtime drift
@@ -24,33 +23,19 @@ BACKEND_DIR = Path(__file__).parent
 WORKSPACE   = BACKEND_DIR.parent
 R2_BACKUP   = WORKSPACE / "r2-backup"
 
-# Frozen table of original upload times for the objects the 2026-07-11
-# source-image migration copied. That copy reset each object's R2 LastModified
-# to the copy date, so the mirror phase stamped the original time into
-# `legacy-last-modified` metadata; this file is the local read-through of it.
-#
-# `coveredThrough` is what makes the table closed rather than open-ended: it
-# records the newest LastModified the table accounts for. Any object newer than
-# that postdates the migration, so it provably carries no legacy metadata and
-# its own LastModified is already the original upload time. That replaces the
-# old per-run "assuming no legacy metadata" guess with a checked invariant, and
-# keeps a normal sync at zero HEAD requests no matter how much the bucket grows.
-# A canonical key at or below the boundary that is missing from the table is
-# therefore an anomaly, not a routine cache miss.
-# Losing this file costs a one-off full sweep, never a wrong answer: the
-# objects themselves remain the source of truth for every value in it.
+# Original upload times for objects the source-image migration copied, since the copy reset their LastModified
+# Local copy of each object's `legacy-last-modified` metadata, so losing it costs one full sweep, never a wrong value
+# `coveredThrough` is the newest LastModified the table covers, so newer objects trust LastModified with no HEAD
+# A canonical key at or below that boundary but missing from the table is an anomaly, not a cache miss
 ORIGINAL_MTIMES = WORKSPACE / "r2-original-mtimes.json"
 
 DRY_RUN        = "--run" not in sys.argv
 RECHECK_LEGACY = "--recheck-legacy" in sys.argv
 WORKERS        = 128
-# utime writes a float that NTFS rounds, so re-reading never matches exactly.
-# A second of slack keeps steady-state runs at zero writes.
+# NTFS rounds the float utime writes, so a second of slack keeps steady-state runs at zero writes
 MTIME_TOLERANCE = 1.0
 
-# Only the migration ever wrote 64-hex keys, so nothing else can carry the
-# metadata. Everything else (db-backups/, reports/, a few date-named strays) is
-# trusted at its own LastModified.
+# Only 64-hex image keys can carry migration metadata, so anything else (db-backups/, reports/) trusts LastModified
 CANONICAL_KEY_RE = re.compile(r"^[a-f0-9]{64}\.(?:jpg|png)$")
 
 ENV_CANDIDATES = [
@@ -83,9 +68,10 @@ def parse_iso(raw: str) -> datetime:
 
 
 def walk_local() -> dict[str, float]:
-    """Key -> current mtime for every file under r2-backup. os.scandir hands back
-    the mtime from the directory entry itself, so this costs one walk instead of
-    a walk plus a stat call per file."""
+    """Key to current mtime for every file under r2-backup
+
+    On Windows os.scandir carries mtime in the directory entry, so the walk needs no stat call per file
+    """
     found: dict[str, float] = {}
     stack = [R2_BACKUP]
     while stack:
@@ -100,15 +86,11 @@ def walk_local() -> dict[str, float]:
 
 
 def load_table() -> tuple[dict[str, str | None], str | None]:
-    """Returns (key -> original ISO time or None, coveredThrough or None).
+    """(key to original ISO time or None, coveredThrough or None)
 
-    A None value is load-bearing: it records a canonical object inside the
-    covered window that was checked and genuinely has no legacy metadata, which
-    is what keeps it from tripping the anomaly branch on every run.
-
-    An unreadable or absent table is not an error. Every value in it is
-    re-derivable from the objects' own metadata, so the caller just falls back
-    to a full sweep."""
+    A None time marks a canonical object checked and found without legacy metadata, so it never trips the anomaly branch
+    An unreadable or absent table means a full sweep, since every value comes from object metadata
+    """
     if ORIGINAL_MTIMES.exists():
         try:
             raw = json.loads(ORIGINAL_MTIMES.read_text(encoding="utf-8"))
@@ -131,15 +113,11 @@ def save_table(times: dict[str, str | None], covered_through: str | None) -> Non
 
 
 def resolve_original_mtimes(s3, bucket: str, objects: list, recheck: bool, dry_run: bool) -> dict[str, float]:
-    """Key -> original upload timestamp, for the keys where it differs from
-    LastModified. Resolution order per key:
+    """Key to original upload timestamp, for keys where it differs from LastModified
 
-      1. in the table            -> its recorded time (a None entry falls
-                                    through to LastModified, already correct)
-      2. not canonical           -> LastModified
-      3. newer than the boundary -> LastModified, with no network call
-      4. anything left           -> a canonical key inside the covered window
-                                    that the table misses; HEAD it and say so
+    A table entry gives its recorded time, and a None entry falls through to LastModified
+    Non-canonical keys and keys newer than the boundary use LastModified with no network call
+    Any other canonical key missing from the table is HEADed, and reported as an anomaly under an existing boundary
     """
     times, covered_through = load_table()
     by_key = {obj["Key"]: obj for obj in objects}
@@ -182,14 +160,11 @@ def resolve_original_mtimes(s3, bucket: str, objects: list, recheck: bool, dry_r
                     failed.append(key)
         if failed:
             print(f"  WARNING: {len(failed)} HEAD requests failed, will retry next run (e.g. {failed[0]})")
-        # A full sweep re-closes the table, so the boundary can advance to the
-        # newest object it now accounts for. An anomaly patch fills a hole
-        # underneath the existing boundary and leaves it where it was.
+        # A full sweep re-closes the table so the boundary advances, while an anomaly patch leaves it in place
         if (recheck or boundary is None) and canonical:
             covered_through = max(obj["LastModified"] for obj in canonical).isoformat()
 
-    # The table only ever changes when a HEAD actually resolved something, so a
-    # steady-state run leaves it untouched on disk.
+    # Saved only when HEAD requests ran, so a steady-state run leaves the file untouched
     if to_head and not dry_run:
         save_table(times, covered_through)
 
@@ -249,9 +224,7 @@ def main():
     def target_mtime(key: str) -> float:
         return original.get(key, by_key[key]["LastModified"].timestamp())
 
-    # Only files whose stamp actually drifted get rewritten. In steady state
-    # that is zero, which keeps the sync from dirtying 26k files' metadata on
-    # every run just to write back the values they already hold.
+    # Only drifted stamps are rewritten, so a steady-state run touches no file metadata
     drifted = [
         key for key, mtime in local.items()
         if key in by_key and abs(mtime - target_mtime(key)) > MTIME_TOLERANCE

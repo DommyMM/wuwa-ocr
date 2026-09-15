@@ -1,11 +1,8 @@
 """
-test_frontend_split.py — reproduce the frontend's OCR flow locally on a single image.
+Reproduce the per-region import OCR flow locally on a single image
 
-Crops every region using the *exact* normalized coords from
-`wuwabuilds/lib/import/regions.ts`, then calls `process_card` (same code path
-the server invokes). For echo regions, also dumps the raw Tesseract
-OCR output of the `subs_names` / `subs_values` sub-regions so you can see
-exactly what OCR produced before name-cleaning / fuzzy matching.
+Crops every region with IMPORT_REGIONS below, then calls `process_card` as the server does
+Echo regions also dump whole-block Tesseract output of the subs_names and subs_values crops before name cleaning
 
 Usage:
   py test_frontend_split.py <image> [region ...]
@@ -28,8 +25,7 @@ from card import (
     process_card,
 )
 
-# Mirrors wuwabuilds/lib/import/regions.ts (frontend crops the card into these
-# regions before POST /api/ocr).
+# Matches server.py's IMPORT_REGIONS except an older and narrower character strip
 IMPORT_REGIONS = {
     "character": {"x1": 0.0328, "x2": 0.3021, "y1": 0.0074, "y2": 0.0833},
     "watermark": {"x1": 0.0073, "x2": 0.1304, "y1": 0.0741, "y2": 0.1370},
@@ -58,7 +54,7 @@ def _tess_lines(img: np.ndarray) -> list[str]:
 
 
 def debug_echo_subs(echo_img: np.ndarray, out_dir: Path, region: str) -> None:
-    """Print raw OCR from the subs_names / subs_values crops inside an echo."""
+    """Save and print raw OCR of the subs_names and subs_values crops inside an echo"""
     names_img = echo_img[
         ECHO_REGIONS["subs_names"]["y1"]:ECHO_REGIONS["subs_names"]["y2"],
         ECHO_REGIONS["subs_names"]["x1"]:ECHO_REGIONS["subs_names"]["x2"],
@@ -71,7 +67,6 @@ def debug_echo_subs(echo_img: np.ndarray, out_dir: Path, region: str) -> None:
     names_pre = preprocess_region(names_img)
     values_pre = preprocess_region(values_img)
 
-    # Save intermediates next to the region crop so you can eyeball them.
     cv2.imwrite(str(out_dir / f"{region}_subs_names.png"), names_img)
     cv2.imwrite(str(out_dir / f"{region}_subs_values.png"), values_img)
     cv2.imwrite(str(out_dir / f"{region}_subs_names_preprocessed.png"), names_pre)
@@ -87,8 +82,7 @@ def debug_echo_subs(echo_img: np.ndarray, out_dir: Path, region: str) -> None:
     for i, l in enumerate(tess_values, 1):
         print(f"     [{i}] {l!r}")
 
-    # Flag the exact pathology from the railway logs: any name line that is a
-    # short suffix of a real substat (e.g. "onus" from "Bonus").
+    # Flags short name lines, the truncated-suffix misread seen in Railway logs ("onus" from "Bonus")
     short_tails = [l for l in tess_names if 1 <= len(l) <= 5]
     if short_tails:
         print(f"  !! short/truncated name lines: {short_tails}")

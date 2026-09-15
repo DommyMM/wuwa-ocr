@@ -1,31 +1,9 @@
-"""
-forensics_card_render.py — detect re-rendered substat rows on build cards.
+"""Detect substat rows re-rendered in an image editor on build cards
 
-Answers a question the existing phases cannot: "were all 25 substat rows drawn
-in the same render pass?" A row that was re-typed in an image editor is brighter
-than its neighbours AND has a lower error level, because it never went through
-the original JPEG quantization. Genuine cards show no such pairing however you
-split them.
-
-This is the confirmation `echo_bed_score` has been waiting for. Phase B is
-observe-only because wrapped substat labels ("Resonance Liberation DMG Bonus")
-break its background-gradient assumption — and those wraps were exactly what the
-2026-08 forgeries used. `ela_delta` ignores background level entirely, so a
-wrapped label does not perturb it.
-
-Validated 2026-08-19 on 2625 cards stratified >=300 per upload month across the
-whole corpus (500/month for 2026-05..08):
-
-  statistic   genuine max   genuine p99.9   the two known forgeries
-  tone_sd          18.48            5.95    10.45 / 11.17
-  gap              41.27            4.67     8.10 / 12.18
-  ela_delta         0.40            0.09     5.04 / 5.29
-  combined          2.00            0.14     40.8 / 64.4
-
-Use `combined` only. `gap` and `tone_sd` are NOT safe alone at corpus scale:
-cards whose substat rows carry highlight/selection bands reach gap=41 while
-being perfectly genuine, and `ela_delta` is what tells "different background"
-apart from "different layer".
+A re-typed row is brighter than its neighbours with a lower error level, since it skipped the original JPEG quantization
+ela_delta ignores background level, so the wrapped labels that break echo_bed_score's gradient don't move it
+Only combined flags, since highlighted substat rows push genuine cards to gap 41 with near-zero ela_delta
+Corpus validation: docs/card-forgery-detection.md
 
 Usage:
   py forensics_card_render.py ../r2-backup --out ../forensics/card_render
@@ -48,20 +26,19 @@ import numpy as np
 from PIL import Image
 
 
-# Panel x-ratios mirror IMPORT_REGIONS in forensics_echo_integrity.py. The row
-# geometry is absolute because every genuine card is exactly 1920x1080; a
-# different size is already rejected upstream by validate_image_integrity.
+# Panel x-ratios mirror forensics_echo_integrity.py's IMPORT_REGIONS
+# Row geometry is absolute pixels, since every genuine card is exactly 1920x1080
 PANEL_X = (0.0125, 0.2057, 0.4016, 0.5969, 0.7911)
 ROW_Y = (886, 920, 954, 988, 1022)
 ROW_H = 16
 LABEL_X0, LABEL_X1 = 34, 265
-TEXT_LEVEL = 110          # a label pixel; below this is panel background
+TEXT_LEVEL = 110          # a label pixel, below this is panel background
 MIN_TEXT_PX = 80          # fewer than this means the slot is empty, not dim
 TOP_N = 40                # fixed pixel count -> independent of glyph count
 MIN_GRP = 3               # smallest believable number of edited rows
 
-# A card must clear BOTH to be worth reporting. GAP_TRIGGER alone fires on
-# 0.08% of genuine cards (2/2625) and exists only to skip the re-encode.
+# GAP_TRIGGER only picks which cards pay the re-encode, and trips on 2/2625 genuine cards
+# COMBINED_FLAG sits between the genuine peak of 2.00 and the two known forgeries at 40.8 and 64.4
 GAP_TRIGGER = 5.0
 COMBINED_FLAG = 5.0
 
@@ -69,13 +46,11 @@ EXPECTED = (1080, 1920)
 
 
 def encoder_signature(raw: bytes) -> dict[str, Any]:
-    """Walk the JPEG markers without decoding. ~1.3 microseconds per card.
+    """Container and JPEG encoder fingerprint from the raw bytes, without decoding
 
-    Escalation signal ONLY, never grounds for rejection: the corpus contains two
-    encoder eras (frontend canvas-recompression before 2026-07, original input
-    bytes after), so a "foreign" signature is often just a stale client.
+    Escalation signal only, never grounds for rejection
+    Corpus mixes frontend canvas re-encodes with original upload bytes, so a foreign signature is often a stale client
     """
-
     if not raw.startswith(b"\xff\xd8"):
         return {"fmt": "PNG" if raw[:8] == b"\x89PNG\r\n\x1a\n" else "other"}
 
@@ -108,8 +83,7 @@ def encoder_signature(raw: bytes) -> dict[str, Any]:
 
 
 def _label_cells(gray: np.ndarray) -> list[tuple[int, int]]:
-    """Yield (y, x0) for each substat label cell that actually holds text."""
-
+    """(y, x0) of each substat label cell that holds text"""
     cells = []
     for ratio in PANEL_X:
         px = int(ratio * EXPECTED[1])
@@ -122,12 +96,10 @@ def _label_cells(gray: np.ndarray) -> list[tuple[int, int]]:
 
 
 def render_consistency(image: np.ndarray, ela: np.ndarray | None = None) -> dict[str, Any]:
-    """Score how uniformly the substat rows were rendered.
+    """Score how uniformly the substat rows were rendered
 
-    `ela` is optional so callers that only want the cheap trigger can skip the
-    re-encode; without it `ela_delta` and `combined` are None.
+    Without `ela` the caller skips the re-encode, and `ela_delta` and `combined` come back None
     """
-
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY).astype(np.float32)
     cells = _label_cells(gray)
     if len(cells) < 2 * MIN_GRP:
@@ -146,16 +118,14 @@ def render_consistency(image: np.ndarray, ela: np.ndarray | None = None) -> dict
     tones = np.array([s[0] for s in scored])
     errs = np.array([s[1] for s in scored])
 
-    # Largest clean split leaving at least MIN_GRP rows either side. A card whose
-    # rows were all drawn together has no such split; a partly re-rendered one
-    # separates into "original" and "redrawn" groups.
+    # Largest tone gap leaving at least MIN_GRP rows each side
+    # A partly re-rendered card splits there into original and redrawn rows, while a single-pass card has no clean split
     gap, delta = 0.0, 0.0
     for k in range(MIN_GRP, len(scored) - MIN_GRP + 1):
         candidate = float(tones[k] - tones[k - 1])
         if candidate > gap:
             gap = candidate
-            # Dim group minus bright group: re-rendered text is bright and has
-            # LOW error level, so a real edit makes this large and positive.
+            # Dim minus bright group error, large on a real edit since redrawn text is bright with low error
             delta = float(errs[:k].mean() - errs[k:].mean())
 
     out = {"cells": len(scored), "gap": round(gap, 3),
@@ -170,8 +140,7 @@ def render_consistency(image: np.ndarray, ela: np.ndarray | None = None) -> dict
 
 
 def error_level(image: np.ndarray, path: str | Path) -> np.ndarray:
-    """Requantize at the genuine pipeline's own settings and diff. ~20 ms."""
-
+    """Per-pixel error after re-encoding at the genuine pipeline's JPEG settings, ~20 ms"""
     buf = BytesIO()
     Image.open(path).convert("RGB").save(buf, "JPEG", quality=80, subsampling=2)
     again = cv2.cvtColor(np.array(Image.open(buf)), cv2.COLOR_RGB2BGR).astype(np.float32)
@@ -179,8 +148,7 @@ def error_level(image: np.ndarray, path: str | Path) -> np.ndarray:
 
 
 def analyze(path: Path) -> dict[str, Any] | None:
-    """Full two-stage pass on one file. Returns None if it is not a card."""
-
+    """Full two-stage pass on one file, None when it isn't a readable card"""
     try:
         image = cv2.imread(str(path))
         if image is None or image.shape[:2] != EXPECTED:
@@ -190,14 +158,11 @@ def analyze(path: Path) -> dict[str, Any] | None:
         if cheap["gap"] is None:
             return None
 
-        # Read raw bytes only once the frame is known to be a card: a corpus
-        # directory also holds multi-hundred-MB db dumps, and reading those into
-        # every worker before the guard is pure waste.
+        # Raw bytes are read only after the card check, since corpus directories also hold multi-hundred-MB db dumps
         row: dict[str, Any] = {"file": path.name}
         row.update(encoder_signature(path.read_bytes()))
         row.update(cheap)
 
-        # Only pay for the re-encode when the cheap trigger fires.
         if cheap["gap"] >= GAP_TRIGGER:
             row.update(render_consistency(image, error_level(image, path)))
         row["flagged"] = bool(row.get("combined") is not None

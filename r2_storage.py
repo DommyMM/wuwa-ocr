@@ -1,4 +1,4 @@
-"""Bounded, content-addressed persistence of OCR inputs in Cloudflare R2."""
+"""Bounded, content-addressed persistence of OCR inputs in Cloudflare R2"""
 
 from __future__ import annotations
 
@@ -29,19 +29,19 @@ StorageStatus = Literal[
 
 
 class UnsupportedImageType(ValueError):
-    """Raised when an OCR input is not a supported JPEG or PNG by magic bytes."""
+    """OCR input magic bytes are neither JPEG nor PNG"""
 
 
 class R2ConfigurationError(ValueError):
-    """Raised when R2 upload is enabled without a complete, valid configuration."""
+    """Invalid R2 settings, or an R2 call without an enabled and configured client"""
 
 
 class ExistingObjectMismatch(RuntimeError):
-    """Raised if a content-addressed key exists with an impossible size mismatch."""
+    """Content-addressed key already holds an object with a different size or digest"""
 
 
 class R2OperationTimeout(TimeoutError):
-    """Raised when an auxiliary R2 operation exceeds the configured deadline."""
+    """Auxiliary R2 operation, such as a report write, exceeded the configured deadline"""
 
 
 @dataclass(frozen=True)
@@ -143,8 +143,7 @@ def _parse_bool(value: str) -> bool:
 
 
 def identify_image(image_bytes: bytes) -> ImageIdentity:
-    """Return the canonical identity for the exact supported input bytes."""
-
+    """Canonical identity of the exact input bytes, which must be JPEG or PNG"""
     if image_bytes.startswith(PNG_MAGIC):
         extension: Literal["jpg", "png"] = "png"
         content_type: Literal["image/jpeg", "image/png"] = "image/png"
@@ -166,7 +165,7 @@ def identify_image(image_bytes: bytes) -> ImageIdentity:
 
 
 class R2ImageStore:
-    """A reused boto3 client with a response-bounded asynchronous facade."""
+    """Reused boto3 client behind an async facade bounded by the response deadline"""
 
     def __init__(self, settings: R2Settings, client: Any | None = None):
         settings.validate()
@@ -183,9 +182,8 @@ class R2ImageStore:
     def _create_client(settings: R2Settings) -> Any:
         import boto3
 
-        # The outer asyncio deadline is authoritative. Matching SDK timeouts and
-        # disabling retries prevents a timed-out to_thread call from occupying a
-        # worker thread for substantially longer in the background.
+        # Outer asyncio deadline is authoritative
+        # SDK timeouts match it with no retries, so a timed-out to_thread call frees its worker thread soon after
         client_config = Config(
             connect_timeout=settings.timeout_seconds,
             read_timeout=settings.timeout_seconds,
@@ -238,8 +236,7 @@ class R2ImageStore:
             )
 
     async def put_json_object(self, key: str, body: bytes) -> None:
-        """Create one JSON object without overwriting an existing report."""
-
+        """Create one JSON object without overwriting an existing report"""
         self._require_client()
         try:
             await asyncio.wait_for(
@@ -295,8 +292,7 @@ class R2ImageStore:
         except ClientError as exc:
             if not _is_precondition_failed(exc):
                 raise
-            # Another identical request won the HEAD→PUT race. Re-read and
-            # validate instead of overwriting a content-addressed object.
+            # Another identical request won the HEAD-to-PUT race, so validate its object instead of overwriting
             existing = self._client.head_object(
                 Bucket=self.settings.bucket_name,
                 Key=identity.key,

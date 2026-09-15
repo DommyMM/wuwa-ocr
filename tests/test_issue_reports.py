@@ -269,8 +269,7 @@ class IssueReportContractTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(payload["reason"], "Invalid issue report metadata.")
 
     async def test_unknown_regions_and_extra_fields_are_kept_not_rejected(self):
-        # A report describing an unexpected client state is exactly the report
-        # worth keeping, so shape drift must not turn into a 400.
+        # A report about unexpected client state is worth keeping, so shape drift must not turn into a 400
         response, _receipt, store = await submit({
             **valid_report(),
             "progress": {**valid_report()["progress"], "echo6": "unknown"},

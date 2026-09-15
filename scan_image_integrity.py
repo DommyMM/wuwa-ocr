@@ -1,12 +1,6 @@
-"""
-scan_image_integrity.py — fast batch review scanner for build-card images.
+"""Fast batch scanner writing a CSV and JSON review queue for build-card images, never deleting files
 
-This combines the practical checks from the exploratory scripts:
-- decode/shape/format inventory
-- JPG size hints
-- position-aware echo row darkness/run outliers
-
-It writes a CSV plus JSON review queue. It intentionally does not delete files.
+Checks decode, shape and format, JPG size, and echo row darkness outliers against per-panel baselines
 
 Usage:
   py scan_image_integrity.py ../r2-backup --out ../forensics/integrity_scan

@@ -1,10 +1,7 @@
-"""Structured JSON logging for Railway.
+"""Structured JSON logging for Railway
 
-Railway parses any JSON log line as a structured log and renders `message`.
-An event without `message` ships as a blank line and matches no log search,
-which once hid every r2_result in production. Routing every event through
-log_event() makes that field structural rather than something each call site
-has to remember to include.
+Railway renders `message` from JSON log lines, so an event without it ships blank and matches no search
+Routing every event through log_event() makes the field required instead of something each call site remembers
 """
 
 from __future__ import annotations
@@ -21,8 +18,7 @@ def log_event(
     level: LogLevel = "info",
     **fields: Any,
 ) -> None:
-    """Emit one structured log line. `message` is required, never optional."""
-
+    """Emit one structured log line"""
     payload: dict[str, Any] = {"event": event, "message": message, "level": level}
     payload.update(fields)
     print(json.dumps(payload, separators=(",", ":"), ensure_ascii=False), flush=True)

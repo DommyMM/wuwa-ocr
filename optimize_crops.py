@@ -1,9 +1,8 @@
 """
-optimize_crops.py - sweep crop geometry for fixed-layout import recognition.
+Sweep crop geometry for fixed-layout import recognition
 
-This is an offline Phase 2 tool. It does not change runtime coordinates. It
-evaluates candidate crop boxes against an explicit gold-label JSON file and
-writes a ranked report under backend/benchmarks/crop_sweeps/.
+Offline only, so runtime coordinates never change
+Scores candidate crop boxes against a gold-label JSON and writes a ranked report under benchmarks/crop_sweeps/
 
 Usage:
   py optimize_crops.py --labels labels.json --task weapon_sift
@@ -52,8 +51,8 @@ BACKEND_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(BACKEND_DIR))
 
 
-# Full-card normalized regions. These mirror the frontend import layout plus
-# the Phase 1 character/weapon recognition crops.
+# Normalized full-card boxes matching server.py's IMPORT_REGIONS, except an older and narrower character strip
+# character_splash, watermark_uid and weapon_icon are this tool's own recognition crops
 FULL_REGIONS: dict[str, tuple[float, float, float, float]] = {
     "character": (0.0328, 0.0074, 0.3021, 0.0833),
     "character_splash": (0.0200, 0.1000, 0.2700, 0.4500),
@@ -68,7 +67,7 @@ FULL_REGIONS: dict[str, tuple[float, float, float, float]] = {
     "echo5": (0.7911, 0.6019, 0.9833, 0.9843),
 }
 
-# Absolute subregions inside the current 368/369 x 413 echo crop.
+# Pixel subregions inside the 368/369 x 413 echo crop of a 1920x1080 card
 ECHO_SUBREGIONS: dict[str, tuple[int, int, int, int]] = {
     "icon": (0, 0, 188, 182),
     "main": (195, 66, 366, 148),
@@ -460,7 +459,7 @@ def crop_for_task(
     if task == "forte_digit":
         if row_index is None:
             raise ValueError("forte_digit requires row")
-        # Forte boxes are absolute inside the forte outer crop.
+        # Forte boxes are pixel offsets inside the forte crop
         h, w = img.shape[:2]
         fx1, fy1, _, _ = norm_to_px(FULL_REGIONS["forte"], w, h)
         sx1, sy1, sx2, sy2 = FORTE_LEVEL_BOXES[row_index]

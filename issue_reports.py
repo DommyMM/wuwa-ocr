@@ -1,4 +1,4 @@
-"""Validated OCR issue-report ingestion and R2 persistence."""
+"""Validated OCR issue-report ingestion and R2 persistence"""
 
 from __future__ import annotations
 
@@ -27,10 +27,11 @@ SCAN_ID_PATTERN = re.compile(
 
 
 class OcrIssueReport(BaseModel):
-    """A report is diagnostic material, so validation only guards what becomes
-    an R2 key or an unbounded write. Unknown fields and unknown progress regions
-    are carried through: a report about an unexpected client state is exactly the
-    report worth keeping."""
+    """Diagnostic material, so validation guards only what becomes an R2 key or an unbounded write
+
+    Unknown top-level fields are dropped rather than rejected, and unknown progress regions are kept
+    A report about unexpected client state is exactly the one worth keeping
+    """
 
     route: Literal["/import"]
     reason: Literal[
@@ -101,8 +102,7 @@ def parse_issue_report_json(raw_report: str) -> OcrIssueReport:
             "Report metadata exceeds the 256 KiB limit.",
         )
     def reject_nonstandard_number(value: str) -> None:
-        # NaN/Infinity would round-trip into R2 as invalid JSON and silently
-        # corrupt the report dataset, so they are refused at the door.
+        # NaN and Infinity would land in R2 as invalid JSON, so they are refused
         raise ValueError(f"Non-standard JSON number: {value}")
 
     try:
@@ -126,8 +126,7 @@ async def read_issue_report_request(
     validate_declared_report_size(request)
 
     try:
-        # max_part_size bounds non-file parts only, so the report JSON is capped
-        # here while the image part stays bounded by the gateway and the read below.
+        # max_part_size caps only non-file parts (report JSON), so the gateway and read_report_image bound the image
         form = await request.form(
             max_files=1,
             max_fields=1,
@@ -223,8 +222,7 @@ async def persist_issue_report(
             "Issue report storage is not configured.",
         )
 
-    # A confirmed key is one this backend already minted and stored, so it is
-    # taken at face value rather than re-confirmed with an extra R2 round-trip.
+    # A confirmed key was already minted and stored by this backend, so it's trusted without another R2 round-trip
     if report.trainingImageKey is not None:
         training_image_key = report.trainingImageKey
         image_storage = "referenced"

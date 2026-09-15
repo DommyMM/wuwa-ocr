@@ -1,19 +1,8 @@
-"""Read one echo: census fields from the tile, substats from the detail panel.
+"""Read one echo: census fields from the tile, substats from the detail panel
 
-Division of labour, and it matters:
-
-  TILE (free, no click)  -> identity, cost, sonata set, level, lock, equipped
-  PANEL (needs a click)  -> substats, and ONLY substats
-
-Because the tile carries everything except substats, the scan can census a whole page of
-24 tiles in ~65 ms and then click only the echoes worth clicking. A 2777/3000 bag holds
-maybe 40 levelled echoes; everything below +5 has no substats and is useless to an
-optimizer. The old plan's "40 minutes for a 2000-echo bag" was a wrong target, not an
-acceptable one.
-
-Main-stat and innate-base values are DERIVED from (cost, stat, level) via EchoStats.json
-and never OCR'd; see the roadmap ("echo main stat value | derive from cost and stat name
-| Do not OCR").
+Tile gives identity, cost, sonata set and level without a click, so only echoes worth substats get clicked
+Main and innate values are never OCR'd since they follow from cost, stat and level via EchoStats.json
+Echo.main, innate, locked and equipped_by aren't filled yet
 """
 from __future__ import annotations
 
@@ -54,12 +43,9 @@ class Echo:
 
 
 def _percent_by_number(family: list[str], num: float) -> bool:
-    """Is this value the percent member of its family?
+    """Whether a value is the percent member of its family
 
-    HP/ATK/DEF each share one icon with their percent form, and the flat and percent
-    legal sets are DISJOINT (HP% 6.4-11.6 vs HP 320-580; ATK% 6.4-11.6 vs ATK 30-60;
-    DEF% 8.1-14.7 vs DEF 40-70). So the number alone decides, and the '%' glyph never
-    has to be read.
+    Flat and percent HP/ATK/DEF share an icon but not legal ranges, so the number decides without reading '%'
     """
     best, best_d = None, 1e9
     for m in family:
@@ -73,11 +59,9 @@ def _percent_by_number(family: list[str], num: float) -> bool:
 
 
 def _snap(name: str, num: float) -> float | None:
-    """Snap a read number onto the stat's closed legal set.
+    """Snap a read number onto the stat's legal set, None when more than 2.0 from every legal value
 
-    Arbitration only. The reader must be DISCRIMINATIVE (actually read the digits); the
-    legal set never guesses a value. A read too far from any legal value is rejected
-    rather than forced, so a bad OCR becomes a gap instead of a confident lie.
+    Snapping only arbitrates, so a bad read becomes a gap instead of a forced legal value
     """
     legal = data.SUB_STATS.get(name)
     if not legal:
@@ -87,7 +71,7 @@ def _snap(name: str, num: float) -> float | None:
 
 
 def read_substats(frame: np.ndarray, reader: ocr.Reader | None = None) -> tuple[list[Substat], list[str]]:
-    """Substats from the detail panel. Rows are icon-anchored, values self-locate."""
+    """Substats from the detail panel, with icon-anchored rows and self-located values"""
     reader = reader or ocr.default_reader()
     block = L.crop(frame, L.PANEL_STATS)
     rows = stats.find_rows(block)
@@ -96,7 +80,7 @@ def read_substats(frame: np.ndarray, reader: ocr.Reader | None = None) -> tuple[
     if len(rows) < 2:
         return [], ["stats block not found (icon column missing?)"]
 
-    # Row 0 is the main stat, row 1 the innate base. Both are derived from cost, not read.
+    # Rows 0 and 1 are main and innate, skipped since they follow from cost
     sub_rows = rows[2:]
     cells = stats.value_cells(block, sub_rows, L.VALUE_FRAC)
     nums = reader.read(cells)
@@ -120,11 +104,10 @@ def read_substats(frame: np.ndarray, reader: ocr.Reader | None = None) -> tuple[
 
 
 def read_echo(frame: np.ndarray, tile_box, reader: ocr.Reader | None = None) -> Echo:
-    """Full record: tile census + panel substats (the panel must already be showing it)."""
+    """Full record: tile census plus panel substats, with the panel already showing this echo"""
     t = tile.census(frame, tile_box)
     subs, warnings = read_substats(frame, reader)
-    # Level comes from the TILE, and deliberately not from `reader`: that one is WinRT by
-    # default, which returns nothing on a level pill. See ocr.level_reader.
+    # Level uses ocr.level_reader rather than `reader`, since the default WinRT returns nothing on a level pill
     level = tile.read_levels(frame, [tile_box], ocr.level_reader())[0]
     return Echo(
         id=t["id"],

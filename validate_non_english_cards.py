@@ -1,8 +1,7 @@
-"""Validate localized build-card candidates through the backend echo parser.
+"""Validate localized build-card candidates through the backend echo parser
 
-This consumes candidate rows produced by ``find_non_english_cards.py`` and
-runs the same frontend echo crops through ``card.process_card``. Results are
-written as JSONL plus a compact summary and failure CSV under forensics.
+Runs candidate rows from ``find_non_english_cards.py`` through ``card.process_card`` on the server's echo crops
+Writes JSONL results, a compact summary and a failure CSV under forensics/
 
 Usage:
   py validate_non_english_cards.py

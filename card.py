@@ -18,8 +18,7 @@ import threading
 
 
 class _ThreadLocalStdout:
-    """Process-wide stdout shim that routes writes to a per-thread buffer when one is active, otherwise to the real stream.
-    """
+    """Stdout shim routing writes to a per-thread buffer while one is pushed, else to the real stream"""
 
     def __init__(self, real):
         self._real = real
@@ -41,36 +40,31 @@ class _ThreadLocalStdout:
         self._real.flush()
 
     def __getattr__(self, name):
-        # Delegate everything else (reconfigure, encoding, isatty, ...) to the real stream.
+        # Delegate everything else (reconfigure, encoding, isatty, ...) to the real stream
         return getattr(self._real, name)
 
 
 _STDOUT = _ThreadLocalStdout(sys.stdout)
 sys.stdout = _STDOUT
 
-# Minimum fuzz.ratio score for a weapon-name OCR read to be trusted. Real reads
-# (even with OCR noise) score ~92-100; unreadable/garbled text stays under ~40.
-# Below this, the weapon is reported as missing rather than guessed.
+# Minimum fuzz.ratio for a weapon-name read, since real reads score ~92-100 and garbled text under ~40
 WEAPON_NAME_MIN_SCORE = 75
 
-# OCR-noise spellings per element; extend when a new Rover element ships.
+# OCR-noise spellings per element, extend when a new Rover element ships
 ROVER_ELEMENT_ALIASES = {
     "Aero": ("aero", "acro"),
     "Spectro": ("spectro", "speetro"),
     "Havoc": ("havoc", "lavoc"),
     "Electro": ("electro", "clectro"),
 }
-# Everything below derives from Characters.json + the hand-kept gender ids in
-# data.py — a new Rover element only needs its two ids added to
-# ROVER_GENDER_BY_ID (plus alias/hue entries above/below if wanted).
+# Derived from Characters.json and data.py's ROVER_GENDER_BY_ID, so a new Rover element only needs its two ids there
 ROVER_IDS_BY_GENDER_ELEMENT = {
     (gender, ROVER_ELEMENT_BY_ID[cid]): cid
     for cid, gender in ROVER_GENDER_BY_ID.items()
     if cid in ROVER_ELEMENT_BY_ID
 }
 ROVER_KNOWN_ELEMENTS = {element for _gender, element in ROVER_IDS_BY_GENDER_ELEMENT}
-# Empirical character-badge hue medians. Rover's badge preserves the element
-# color even though the rest of the export-card header has a purple background.
+# Measured badge hue medians, valid for Rover since its badge keeps element color on the purple header
 ROVER_BADGE_HUE_ANCHORS = {
     "Spectro": 26,
     "Aero": 77,
@@ -96,9 +90,7 @@ SEQUENCE_REGIONS = {
     "S6": {"center": (449, 58), "width": 30, "height": 26}
 }
 
-# Active nodes contain a large pale center. Lossy JPEG cards can push the
-# matching-pixel ratio below the original 0.75 cutoff (the reviewed Chisa S1
-# source measures 0.709), while reviewed inactive nodes remain below 0.58.
+# Active nodes have a large pale center, lossy JPEGs drop it to ~0.71 but inactive nodes stay under 0.58
 SEQUENCE_ACTIVE_GRAY_RATIO = 0.65
 
 ECHO_REGIONS = {
@@ -109,7 +101,7 @@ ECHO_REGIONS = {
 
 
 def preprocess_region(image):
-    """Lighter preprocessing to preserve text clarity"""
+    """Grayscale, denoise, sharpen and binarize at a fixed 140 threshold for Tesseract"""
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     bilateral = cv2.bilateralFilter(gray, d=3, sigmaColor=25, sigmaSpace=25)
     blur = cv2.GaussianBlur(bilateral, (0,0), 3)
@@ -129,28 +121,21 @@ def validate_stat(name: str, valid_names: set) -> str:
     match = process.extractOne(name, list(valid_names))
     return match[0] if match else name
 
-# The two Resonance stats are the only names that wrap, and a band edge can clip the
-# round top of their 'o' ('Rescnance Skill DMG'), after which fuzzy matching prefers
-# 'Crit DMG' on the shared 'DMG' token. 'skill' and 'liberation' occur in no other stat,
-# so they decide the name outright.
+# A band edge can clip the 'o' of a wrapped Resonance name ('Rescnance Skill DMG'), which then fuzzy-matches Crit DMG
+# 'skill' and 'liberation' occur in no other stat, so they decide the name outright
 _RESONANCE_BY_FRAGMENT = (
     ("skill", "Resonance Skill DMG Bonus"),
     ("liberation", "Resonance Liberation DMG Bonus"),
 )
 
-# A name read must actually resemble the stat it resolves to. The match is CHOSEN
-# with WRatio, which is what lets 'Basic Attack DMG Bon' find its stat, but WRatio
-# also scores the fragment 'ne' at 90 against 'Energy Regen' and 'Bonus' at 90 against
-# 'Basic Attack DMG Bonus', so it cannot be the gate. Plain ratio against the chosen
-# stat can: measured over every good and garbage read seen in the 6000-card gates,
-# good reads score >= 77 and garbage (spill fragments, corrupted uploads) <= 58.
-# Below the floor a read resolves to nothing, turning a silent wrong stat into a
-# visible missing row.
+# Plain fuzz.ratio a name read needs against its resolved stat, below which the row resolves to nothing
+# WRatio picks the stat but can't gate it, since it scores fragments like 'ne' at 90 against 'Energy Regen'
+# Over the 6000-card gates, good reads score >= 77 and garbage <= 58
 SUBSTAT_NAME_MATCH_FLOOR = 65
 
 
 def _substat_name_confidence(raw: str, value: str) -> float:
-    """Plain-ratio similarity of a raw name read to the stat it resolves to; 0 if none."""
+    """Plain-ratio similarity of a raw name read to its resolved stat, 0 if none"""
     if not raw:
         return 0.0
     stat = validate_substat_name(raw, value or "1%")
@@ -176,11 +161,8 @@ def validate_substat_name(name: str, value: str) -> str:
         return f"{base}%" if "%" in value else base
     return matched
 
-# Snap tolerance for percent stats. They render to one decimal and adjacent legal
-# rolls are >= 0.7 apart, so 0.15 absorbs display rounding (the card shows DEF 11.9%
-# for the 11.8 roll) without ever reaching a neighbour. Flat stats are exact. This
-# replaced a string-similarity match with a 2.0 numeric window, which turned a
-# doubled-digit read of '10.99' into '9%': the fuzzy match picked '9' and 1.99 < 2.
+# Percent-stat snap tolerance absorbs display rounding (DEF 11.9% for the 11.8 roll) since legal rolls sit >= 0.7 apart
+# Flat stats must match exactly
 SUBSTAT_SNAP_TOLERANCE = 0.15
 FLAT_SUBSTATS = ("HP", "ATK", "DEF")
 
@@ -225,25 +207,14 @@ def _crop_region(image: np.ndarray, box: dict) -> np.ndarray:
     return image[box["y1"]:box["y2"], box["x1"]:box["x2"]]
 
 
-# --- Batched Tesseract ----------------------------------------------------------
-#
-# pytesseract spawns one tesseract process per call and that process reloads the
-# model every time: measured 78 ms per call on the Railway container and 113-145 ms
-# on Windows, with the actual OCR of a small crop under 5 ms of that. The card does
-# ~25 such calls. Tesseract's list-file mode runs N images through ONE process,
-# separating pages with a form feed; output is byte-identical to N separate calls
-# (verified on forte nodes and the echo main strip, see
-# docs/echo-main-strip-preprocessing.md) at ~4.5x. This is the earlier "single-pass"
-# idea WITHOUT canvas-stitching or image_to_data, which is what caused its token-split
-# regression: each image is still its own page, so nothing is joined or re-split.
-#
-# One config per batch, so callers group images by config. /dev/shm is used when
-# present so the temp PNGs never touch disk on Linux.
+# pytesseract spawns a process per call and each reloads the model: ~78ms on Railway for under 5ms of OCR
+# Tesseract's list-file mode runs N images through one process, split by form feeds, identical to N separate calls
+# One config per batch, with temp PNGs in /dev/shm when present so they never touch disk
 _TESS_BATCH_DIR = os.environ.get("TESS_BATCH_DIR") or ("/dev/shm" if os.path.isdir("/dev/shm") else None)
 
 
 def tess_batch(images: list[np.ndarray], config: str = "") -> list[str]:
-    """OCR several images in one Tesseract process. Returns one text per image, in order."""
+    """OCR several images in one Tesseract process, returning one text per image in order"""
     if not images:
         return []
     work = tempfile.mkdtemp(prefix="tb_", dir=_TESS_BATCH_DIR)
@@ -267,12 +238,11 @@ def tess_batch(images: list[np.ndarray], config: str = "") -> list[str]:
 
 
 def _main_strip_lines(main_img: np.ndarray) -> list[str]:
-    """Read the echo main strip on plain grayscale, deliberately skipping preprocess_region.
+    """Read the echo main strip on plain grayscale at 2x, skipping preprocess_region
 
-    Its fixed 140 threshold keeps the bright value row but shreds the dimmer name row, and 
-    psm 3 then returns the whole strip empty, which resolve_echo_main silently turns into HP%
-    Grayscale at 2x/psm 6 measured 99.99% vs 99.60%->7.79% across a softness ladder
-    see docs/echo-main-strip-preprocessing.md for the sweep, the rejected axes, and why this is scoped to this strip only
+    Fixed 140 threshold shreds the dim name row, so psm 3 reads nothing and resolve_echo_main falls to HP%
+    Grayscale held 99.99% across a softness ladder where the threshold fell from 99.60% to 7.79%
+    Sweep and rejected options: docs/echo-main-strip-preprocessing.md
     """
     upscaled = cv2.resize(
         cv2.cvtColor(main_img, cv2.COLOR_BGR2GRAY), None,
@@ -286,17 +256,15 @@ def _main_strip_lines(main_img: np.ndarray) -> list[str]:
 
 
 def _legal_main_values(cost: int) -> dict[str, str]:
-    """name -> canonical Lv.25 value ('22.8%') for an echo cost's variable main stats.
+    """Name to canonical Lv.25 value ('22.8%') for each variable main stat of an echo cost
 
-    The variable main stat (what shows in ECHO_REGIONS['main']) is always a percent
-    stat from MAIN_STATS; the flat innate HP/ATK (DEFAULT_MAIN_STATS) lives in the
-    substat block, not here.
+    Variable mains are always percent stats, while the flat innate HP/ATK sits in the substat block
     """
     return {n: f"{format_stat_value(v[-1])}%" for n, v in MAIN_STATS.get(f"{cost}cost", {}).items()}
 
 
 def _parse_main_line(line: str) -> tuple[str, str]:
-    """Split an echo main OCR line 'Crit DMG 44%' into ('Crit DMG', '44%')."""
+    """Split an echo main OCR line 'Crit DMG 44%' into ('Crit DMG', '44%')"""
     parts = line.rsplit(' ', 1)
     if len(parts) == 2 and re.search(r'\d', parts[1]):
         return parts[0], parts[1]
@@ -317,30 +285,20 @@ def _name_in(candidates: list[str], read: str | None) -> str | None:
 
 
 def _tiebreak_main_name(candidates: list[str], tess_name: str | None) -> str | None:
-    """Break a main-stat tie by the Tesseract name read.
-
-    A lazy RapidOCR second opinion used to follow when this failed. A 6000-card gate
-    showed removing it changed 0/30,000 echo main stats, so it is gone.
-    """
+    """Break a main-stat tie by the Tesseract name read"""
     return _name_in(candidates, tess_name)
 
 
 def resolve_echo_main(cost: int, raw_name: str, raw_value: str) -> dict:
-    """Resolve an echo's main stat against what its cost actually allows.
+    """Resolve an echo's main stat against the legal mains for its cost
 
-    The name is read by bare Tesseract off a small, often-soft strip, so on
-    re-encoded/low-detail uploads it fuzzy-matches to a stat that's illegal for the
-    cost (e.g. Crit DMG on a 1-cost, whose only legal mains are HP%/ATK%/DEF%) and
-    the card gets rejected. Every cost has a fixed legal set with known Lv.25 values:
-      - a legal-for-cost name is trusted, its value snapped to the +25 canonical;
-      - an illegal name is a confirmed misread, recovered from the *value* (the
-        reliable anchor), with the Tesseract name read breaking value ties (e.g. the
-        3-cost 30.0% cluster where the value alone can't separate the mains).
+    A soft strip can fuzzy-match a name illegal for the cost (Crit DMG on a 1-cost), which would reject the card
+    A legal name is trusted and its value snapped to the Lv.25 canonical
+    An illegal name is a misread, so the value decides and the name read breaks ties (the 3-cost 30.0% cluster)
     """
     legal = _legal_main_values(cost)
     if not legal:
-        # Unidentified echo (cost 0): keep the cost-blind validation so identified
-        # echoes improve without regressing the unknown-cost path.
+        # Unidentified echo (cost 0) has no legal set, so validate against every main stat name
         validated = validate_stat(clean_stat_name(raw_name, raw_value), MAIN_STAT_NAMES)
         if validated in ("HP", "ATK", "DEF"):
             validated = f"{validated}%"
@@ -354,7 +312,7 @@ def resolve_echo_main(cost: int, raw_name: str, raw_value: str) -> dict:
             print(f"Main stat snapped: {raw_name!r} {raw_value!r} -> {chosen} {legal[chosen]} (cost {cost})")
         return {"name": chosen, "value": legal[chosen]}
 
-    # Illegal-for-cost name => confirmed misread. Recover from the value.
+    # Illegal-for-cost name is a misread, so recover from the value
     target = None
     if m := re.search(r'\d+(?:\.\d+)?', raw_value or ""):
         target = float(m.group())
@@ -364,64 +322,27 @@ def resolve_echo_main(cost: int, raw_name: str, raw_value: str) -> dict:
         ranked = sorted(legal, key=dist)
         near = [n for n in ranked if dist(n) <= 1.0]
         if len(near) == 1:
-            chosen = near[0]                                          # value alone resolves it (no Rapid)
-        elif near:                                                   # genuine tie among present mains
+            chosen = near[0]                                          # value alone resolves it
+        elif near:                                                   # tie among nearby mains
             chosen = _tiebreak_main_name(near, raw_name) or near[0]
-        else:                                                        # value matches nothing: trust the name, no Rapid
+        else:                                                        # value matches nothing: trust the name
             chosen = _tiebreak_main_name(ranked, raw_name) or ranked[0]
-    else:                                                            # unreadable strip: default to primary main, no Rapid
+    else:                                                            # unreadable value: name read, else primary main
         chosen = _tiebreak_main_name(list(legal), raw_name) or next(iter(legal))
 
     print(f"Main stat recovered: {raw_name!r} {raw_value!r} -> {chosen} {legal[chosen]} (cost {cost}, illegal-for-cost name)")
     return {"name": chosen, "value": legal[chosen]}
 
 
-# --- Substat rows: fixed bands, not layout analysis ------------------------------
-#
-# The whole-block read asked Tesseract's page segmentation to find the rows, and it
-# arbitrarily dropped one (typically the row after a wrapped name). That is a
-# DETECTION failure, not recognition: fast, standard and best tessdata all lose the
-# same ~78 rows per 1500 echoes. The card grid is deterministic to the pixel --
-# measured across 2392 row gaps and 200 echoes, the pitch is 34.0 px and the first
-# row centre 15.5 px with ZERO variance, wrapped and unwrapped alike; a wrap spills
-# into the inter-row gap and never shifts a row. So each row is read on its own
-# band with psm 7, which cannot drop a row it was handed.
-#
-# The values band gets a 2x upscale and a digits whitelist (the levers that fixed
-# the watermark and level reads). A band that comes back EMPTY is re-read once at 3x:
-# at 2x, psm 7 returns nothing for "21%" -- the one Crit DMG value with no decimal
-# point, three glyphs wide -- on ~0.7% of cards, and 3x reads those. But 3x is NOT a
-# blanket upgrade: run everywhere it lost 123 "21%" rows in 3929 cards plus new
-# losses on 9.2% / 10.5% / 11.6% that 2x reads fine. Retrying only the empty bands
-# is monotonic by construction, since a band 2x already read never sees 3x.
-# Names are read on the band's first line only; a
-# wrapped name's continuation lands in the gap and is clipped, and the closed
-# vocabulary resolves "Resonance Liberation" to the full stat regardless. (The old
-# whole-block reader's wrap merge consumed the NEXT line as a continuation; on banded
-# output the next line is the next row, which is why no merge runs here.)
-#
-# preprocess_region's fixed threshold(140) shreds dim text (one dark card read 390
-# as 3=0), which Rapid survived only because it reads raw pixels. Plain grayscale
-# recovers those cards but costs ~1.2% on bright ones, so it is the FALLBACK, taken
-# only when the thresholded pass finds fewer than five rows; it fires on ~1% of
-# echoes. Measured on 755 echoes with production scoring: 3755 legal rows vs Rapid's
-# 3738, and on every hand-labelled dispute banded produced ZERO wrong values while
-# Rapid produced three legal-but-wrong ones. Misses are visible; wrong numbers
-# silently corrupt CV.
-#
-# The two passes fail on DIFFERENT rows, so the loser fills the winner's empty bands
-# (read_substat_rows below). Filling only empty bands is deliberate: letting the
-# thresholded pass supply any row it resolved changed seven values on a 6000-card gate,
-# because on an echo where the grayscale pass wins outright the thresholded one is
-# rendering badly and its rows are legal but wrong ('HP 390' for 'HP 360').
+# Each substat row is read on its own fixed band with psm 7, so page segmentation can never drop a row
+# Grid is pixel-exact (first row at 15.5 px, 34 px pitch) and wrapped names spill into the gap without shifting rows
+# Names use the band's first line, since the closed vocabulary resolves a wrapped name from its first half
+# Measurements and rejected options: docs/echo-substat-tesseract-only.md
 SUBSTAT_ROW_FIRST = 15.5
 SUBSTAT_ROW_PITCH = 34
 SUBSTAT_ROW_HALF = 14
-# A wrapped stat's continuation ("DMG Bonus") sits in the gap above the NEXT row and
-# reaches into the top 4 px of that row's +-14 band, where psm 7 reads it as '[1]' ->
-# HP and the value is then snapped into HP's legal set (15/58 adjudicated errors). Only
-# the row after a wrapping stat is re-read with this tighter top; applied to every row
-# it clipped the round 'o' of "Resonance ..." itself and dropped ~104 rows in 6000 cards.
+# A wrapped stat's spill reaches the top 4 px of the next row's band, where psm 7 reads it as '[1]' and resolves HP
+# Only the row after a wrapping stat gets these tighter tops, since on every row they clip the 'o' of "Resonance"
 SUBSTAT_NAME_TOPS_AFTER_WRAP = (12, 10, 9, 8, 7)
 WRAPPING_SUBSTATS = ("Resonance Liberation DMG Bonus", "Resonance Skill DMG Bonus")
 SUBSTAT_ROWS = 5
@@ -447,17 +368,14 @@ def _upscale_retry(image: np.ndarray) -> np.ndarray:
 
 
 def _resolve_substat(raw_name: str, raw_value: str) -> dict | None:
-    """One (name, value) row, or None when it is not a legal roll for that stat.
+    """One (name, value) row, or None when it is not a legal roll for that stat
 
-    Whether a value is the flat or the percent form of HP/ATK/DEF is decided by
-    magnitude, not by whether Tesseract kept the % glyph: the ranges never overlap
-    (flat ATK 30-60, ATK% 6.4-11.6). Every other stat is always a percent. This is
-    what makes the stored value deterministic and a dropped % harmless.
+    Flat vs percent HP/ATK/DEF is decided by magnitude (flat ATK 30-60, ATK% 6.4-11.6), so a dropped % is harmless
     """
     if not raw_name or not raw_value:
         return None
     try:
-        # A stray trailing '.' or '%' on the read ('10.17.') must not void the row.
+        # A stray trailing '.' or '%' on the read ('10.17.') must not void the row
         numeric = float(raw_value.replace('%', '').strip().rstrip('.'))
     except ValueError:
         return None
@@ -472,12 +390,11 @@ def _resolve_substat(raw_name: str, raw_value: str) -> dict | None:
 
 
 def _read_value_bands(names: list[str], value_bands: list[np.ndarray], render) -> list[str]:
-    """Values at 2x, then one 3x retry for any row whose 2x read is not a legal roll.
+    """Values at 2x, then one 3x retry for any row whose 2x read is not a legal roll
 
-    Each scale has its own failures: 2x doubles digits on some bands ('3390' for 390,
-    '10.99%' for 10.9%) where 3x is right, and 3x misreads others where 2x is right. So
-    a legal 2x read is never replaced, and a 3x read is only taken when it is legal.
-    `render(band, upscale)` is the image Tesseract sees, shared by both paths.
+    Each scale misreads bands the other reads right (2x gives '3390' for 390)
+    A legal 2x read is never replaced, and a 3x read is taken only when legal
+    `render(band, upscale)` is the image Tesseract sees, shared by both passes
     """
     values = tess_batch([render(b, _upscale2) for b in value_bands], SUBSTAT_VALUE_CONFIG)
     bad = [i for i, (n, v) in enumerate(zip(names, values)) if n and _resolve_substat(n, v) is None]
@@ -490,8 +407,7 @@ def _read_value_bands(names: list[str], value_bands: list[np.ndarray], render) -
 
 
 def _substat_bands(names: list[str], values: list[str]) -> list[dict | None]:
-    """One entry per band, None where the band is not a legal row. Position is kept so
-    the two render passes can be merged band by band."""
+    """One entry per band, None where the band isn't a legal row, so two passes can merge band by band"""
     return [_resolve_substat(n, v) for n, v in zip(names, values)]
 
 
@@ -500,13 +416,10 @@ def _legal_substat_rows(names: list[str], values: list[str]) -> list[dict]:
 
 
 def _reread_after_wrap(names: list[str], values: list[str], names_img: np.ndarray, render) -> list[str]:
-    """Re-read the row after each wrapping stat with a tighter top; keep the more confident read.
+    """Re-read the row after each wrapping stat with tighter tops and keep the more confident read
 
-    Neither margin is reliable on its own: the full band can hand psm 7 the spilled
-    'DMG Bonus' fragment ('[1]'), and the tight band can clip a row that sits a couple
-    of pixels high ('[3' for DEF). Both fragments score ~0 against any stat while the
-    real name scores ~100, so the read with the higher name confidence wins, and a tie
-    keeps the primary.
+    Full band can catch the spilled 'DMG Bonus' ('[1]') while a tight band can clip a high row ('[3' for DEF)
+    Fragments score ~0 against any stat and real names ~100, so higher confidence wins and a tie keeps the primary
     """
     after = [k for k in range(1, SUBSTAT_ROWS)
              if names[k - 1] and validate_substat_name(names[k - 1], values[k - 1] or "1%") in WRAPPING_SUBSTATS]
@@ -526,7 +439,12 @@ def _reread_after_wrap(names: list[str], values: list[str], names_img: np.ndarra
 
 
 def read_substat_rows(names_img: np.ndarray, values_img: np.ndarray) -> tuple[list[dict], list[str], list[str], str]:
-    """Substats by fixed row band. Returns (rows, raw_names, raw_values, path) with path 'B' or 'G'."""
+    """Substats by fixed row band, returning (rows, raw_names, raw_values, path)
+
+    Path 'B' is the thresholded pass, and plain grayscale ('G') runs only when it resolves fewer than five rows
+    Grayscale recovers dim cards the threshold shreds but loses ~1.2% on bright ones, so it is only a fallback
+    A trailing '+' means the other pass filled empty bands
+    """
     name_bands = [_substat_band(names_img, k) for k in range(SUBSTAT_ROWS)]
     value_bands = [_substat_band(values_img, k) for k in range(SUBSTAT_ROWS)]
 
@@ -543,11 +461,8 @@ def read_substat_rows(names_img: np.ndarray, values_img: np.ndarray) -> tuple[li
     g_names = _reread_after_wrap(g_names, g_values, names_img, lambda b: _upscale2(gray(b)))
     g_bands = _substat_bands(g_names, g_values)
 
-    # The winner is chosen exactly as before (more resolved rows, thresholded on a tie)
-    # and none of its rows are touched; the loser only fills bands the winner left
-    # empty. The two passes fail on DIFFERENT rows -- one loses a post-wrap name to the
-    # spill, the other loses a value band to noise -- so this recovers rows neither
-    # pass gets alone, while staying strictly additive.
+    # Pass with more resolved rows wins (thresholded on a tie) and the other fills only its empty bands
+    # Letting the loser replace resolved rows swapped in legal but wrong values
     if sum(g is not None for g in g_bands) > sum(b is not None for b in bands):
         won, lost = "G", "B"
         win_bands, win_names, win_values = g_bands, g_names, g_values
@@ -602,7 +517,7 @@ def parse_character_title(text: str) -> dict:
     return {"name": char_name, "id": CHARACTER_ID_MAP.get(char_name, ""), "level": level}
 
 def parse_watermark_username(lines: list[str], uid: int) -> str:
-    """Strip the 'Player ID:' label off the name line, and any UID that bled into it."""
+    """Strip the 'Player ID:' label off the name line, and any UID that bled into it"""
     if not lines:
         return ""
     first_line = lines[0].strip()
@@ -615,62 +530,17 @@ def parse_watermark_username(lines: list[str], uid: int) -> str:
     return username
 
 
-# --- Watermark: the two lines are read separately ------------------------------
-#
-# The strip is "Player ID:<name>" stacked over "UID:<9 digits>". Reading both in one
-# pass forces a single Tesseract config to serve both, which is why the UID could
-# never take the digits-only whitelist the roadmap prescribes: the same call has to
-# stay Unicode-capable for arbitrary usernames.
-#
-# Splitting is also what fixes the documented 9->3 UID misread. That defect is
-# Tesseract under-resolution, NOT a bad crop and NOT bad preprocessing -- the
-# binarised glyphs are plainly legible (a card reading 500019690 returned
-# 500013650) and the crop has generous margin. A 2x upscale before the read is what
-# resolves it. Measured over 600 r2-backup cards with every disagreement
-# hand-labelled, UID error fell 1.7% -> 0.17%, the same 1.2-1.7% per-scan misread
-# rate that had split profiles in the database.
-#
-# Scoped deliberately to this strip. The same upscale DESTROYS forte (77% missed
-# nodes vs 0.4% today), because preprocess_region's fixed threshold(140) is
-# calibrated for native scale and the forte nodes sit on bright diamond artwork. It
-# works here for the same reason it works on the echo main strip: pale text on a
-# dark ground.
+# Watermark's two lines are read separately so the UID line can take a digits-only whitelist and a 2x upscale
+# Upscale fixes Tesseract's 9-to-3 misread (UID errors 1.7% to 0.17% over 600 cards)
+# Scoped to this strip since pale text on dark reads well upscaled, but the same upscale wrecks forte's bright artwork
 WATERMARK_UID_LINE_TOP = 0.46
 WATERMARK_UPSCALE = 2
 WATERMARK_UID_CONFIG = "--psm 7 -c tessedit_char_whitelist=0123456789"
 
 
-# --- UID confidence guard ------------------------------------------------------
-#
-# A wrong UID is unrecoverable BY THE USER. Dedup is global on
-# (character_id, weapon_id, echo_hash) and uid is sticky on conflict
-# (lb/internal/db/store_builds.go: uid only fills when it was previously '0'), so
-# the first scan's UID is permanent -- re-uploading the same card hits ON CONFLICT
-# and keeps the wrong value. Only lb/cmd/mergeuid can undo it, by hand.
-#
-# The failure that matters is therefore not a blank read, which is visible and
-# handled. It is a wrong but VALID-looking 9-digit number, which nothing downstream
-# can detect: it passes lb's ^\d{9}$ and files the build under a profile that does
-# not exist. One card in the labelled set (truth 503761149) was misread by two
-# different configs into two different plausible UIDs, neither flagging anything.
-#
-# Two reads whose configs differ decorrelate that failure: the primary isolates the
-# UID line and whitelists digits, the second reads the whole strip free-form at 2x.
-#
-# Length arbitrates before agreement does. lb requires ^\d{9}$, so a read of any
-# other length is self-evidently wrong and is discarded rather than counted as a
-# disagreement. That matters because it is the COMMON case: over 600 cards the two
-# reads differed on 3, and in all 3 exactly one read was malformed (a spurious
-# leading digit, a dropped digit, and a 12-digit smear) while the other was correct.
-# Discarding by length resolves every one of those without a third read, and without
-# refusing a card whose good read was simply outvoted by a bad one.
-#
-# What remains after that filter is genuine ambiguity: two well-formed 9-digit reads
-# that disagree, meaning one is a plausible-looking misread and there is no way to
-# tell which. Those write no UID. One card in the labelled set (truth 503761149,
-# read as 503701144 and 593701144) is exactly this, and it is the case the guard
-# exists for. The trade is lopsided in our favour: a refused read costs one
-# re-upload, a silent misread costs a permanently split profile and manual DB surgery.
+# A wrong 9-digit UID is permanent because uid is sticky on dedup conflict, so a second read corroborates it
+# Primary read is the UID line with digits only, second is the whole strip free-form at 2x
+# Reads that aren't 9 digits are dropped, and two valid reads that disagree write no UID (a refusal costs one re-upload)
 WATERMARK_UID_GUARD_UPSCALE = 2
 UID_DIGITS = 9                       # lb enforces ^\d{9}$
 
@@ -683,7 +553,7 @@ def _uid_in_text(text: str) -> int:
 
 
 def read_watermark(image: np.ndarray) -> dict:
-    """Username from the free-form strip, UID from an upscaled digits-only line read."""
+    """Username from the free-form strip, UID from an upscaled digits-only line read"""
     height = image.shape[0]
     uid_line = image[int(height * WATERMARK_UID_LINE_TOP):, :]
     upscaled = cv2.resize(
@@ -697,8 +567,7 @@ def read_watermark(image: np.ndarray) -> dict:
     ):
         uid = int(match.group(0))
 
-    # The corroborating read (whole strip at 2x) and the username read (whole strip
-    # at 1x) take the same default config, so they share one Tesseract process.
+    # 2x corroborating read and 1x username read share a config, so they share one Tesseract process
     guard_text, name_text = tess_batch([
         preprocess_region(cv2.resize(
             image, None, fx=WATERMARK_UID_GUARD_UPSCALE, fy=WATERMARK_UID_GUARD_UPSCALE,
@@ -723,13 +592,13 @@ def read_watermark(image: np.ndarray) -> dict:
 
 
 def get_element_region(image):
-    """Extract element region from individual echo image"""
+    """Set badge crop of an echo panel"""
     h, w = image.shape[:2]
     return image[int(h*0.027):int(h*0.148), int(w*0.654):int(w*0.797)]
 
 
 def get_echo_cost(image: np.ndarray) -> int:
-    """Get echo cost from image region"""
+    """Echo cost by template-matching the cost badge, 0 when unsure"""
     cost_img = image[9:61, 302:345]
 
     if not COST_TEMPLATES:
@@ -747,19 +616,15 @@ def get_echo_cost(image: np.ndarray) -> int:
     best_cost, best_score = max(scores, key=lambda item: item[1])
     return best_cost if best_score >= 0.2 else 0
 
-# Minimum SIFT confidence required before the badge may promote a base echo to
-# its rarer Nightmare variant. Calibrated against data: every wrong
-# base->nightmare flip there sat at conf <= 0.28 (wrong-body matches), while clean
-# echoes score 0.3+. Demotions (nightmare->base) are unconditional.
+# SIFT confidence needed before the badge may promote a base echo to its Nightmare variant
+# Wrong base-to-Nightmare flips sat at conf <= 0.28 and clean echoes at 0.3+, while demotions need no floor
 NIGHTMARE_PROMOTE_FLOOR = 0.30
 
 def echo_family_key(template_id: str) -> str:
-    """Group an echo with its Nightmare variant by the shared body name.
+    """Group an echo with its Nightmare variant by the shared body name
 
-    Nightmare echoes are recolors that carry a "Nightmare: " name prefix but the
-    same silhouette as their base, so SIFT can't separate them — the badge does
-    (see validate_echo_family_by_element). Phantom echoes are not handled here:
-    they share the base echo's canonical id, so there is no separate template.
+    Nightmare recolors share the base silhouette, so SIFT can't separate them and the set badge does
+    Phantom echoes share the base echo's id, so they need no handling here
     """
     name = ECHO_NAME_MAP.get(template_id, template_id)
     return re.sub(r'^Nightmare:\s*', '', name).strip().lower()
@@ -785,7 +650,7 @@ def validate_echo_family_by_element(
     element_region: np.ndarray,
     detected_element: int | None,
 ) -> tuple[str, float, int | None]:
-    """Resolve same-body variant confusion using the visible set badge."""
+    """Resolve same-body variant confusion using the visible set badge"""
     variants = _echo_family_index().get(echo_family_key(best_match), [])
     if len(variants) < 2:
         return best_match, best_conf, detected_element
@@ -796,9 +661,7 @@ def validate_echo_family_by_element(
     if len(family_set_ids) < 2:
         return best_match, best_conf, detected_element
 
-    # The badge across the family's combined sets is used only to *select the
-    # variant*. The element shown is recomputed by the caller from the chosen
-    # variant's own legal sets, so a non-flip echo behaves exactly as before.
+    # Combined-family badge only selects the variant, and the caller recomputes the set from that variant's own sets
     badge = determine_element(element_region, family_set_ids)
     candidates = [
         variant
@@ -806,8 +669,7 @@ def validate_echo_family_by_element(
         if badge in ECHO_SET_IDS.get(variant, [])
     ]
     if not candidates:
-        # determine_element only returns a member of family_elements, so every
-        # badge belongs to some variant; this branch is defensive.
+        # determine_element only returns one of family_set_ids, so this is defensive
         return best_match, best_conf, detected_element
 
     conf_of = dict(sorted_matches)
@@ -815,12 +677,8 @@ def validate_echo_family_by_element(
     if chosen == best_match:
         return best_match, best_conf, detected_element
 
-    # Promoting SIFT's pick *to* a Nightmare variant is the risky direction:
-    # Nightmare echoes are rare, and a low-confidence (wrong-body) SIFT match can
-    # land on a family whose colors don't even include the true badge, forcing the
-    # badge onto a bogus Nightmare sonata. Only promote when SIFT identified the
-    # body confidently enough to trust it. Demoting a Nightmare guess back to base
-    # needs no floor — base is the overwhelmingly common reality.
+    # Promoting to Nightmare is the risky direction since a low-confidence wrong-body match can force a bogus set
+    # Demoting back to base needs no floor, since base is the common case
     promoting_to_nightmare = (
         "Nightmare" in ECHO_NAME_MAP.get(chosen, "")
         and "Nightmare" not in ECHO_NAME_MAP.get(best_match, "")
@@ -829,17 +687,13 @@ def validate_echo_family_by_element(
         return best_match, best_conf, detected_element
 
     print(f"Family badge validation: {best_match} -> {chosen} (badge {SET_NAME_BY_ID.get(badge, badge)})")
-    # Reset element so the caller recomputes it from the new identity's own sets.
+    # Reset element so the caller recomputes it from the new identity's own sets
     return chosen, conf_of.get(chosen, best_conf), None
 
 
-# Same-silhouette recolor families (e.g. the six Kernel Puppets) near-tie under
-# SIFT because its descriptors are grayscale gradients, and the badge can't pick
-# a winner when the recolors share a set. Body hue separates them decisively:
-# S>=80/V>=60 drops the shared washed-out silver/gold trim and dark background
-# that dilute the histogram. True recolors score 0.8+ against their own template
-# and <0.35 against siblings, so the floors below only fire on recolor-style
-# ties and leave different-body ties (e.g. Chirpuff vs Gulpuff) to SIFT.
+# Same-silhouette recolors (the six Kernel Puppets) near-tie under grayscale SIFT, but body hue separates them
+# The S>=80/V>=60 mask drops the shared silver/gold trim and dark background
+# Recolors score 0.8+ on their own template and <0.35 on siblings, so these floors leave different-body ties to SIFT
 HUE_ARBITRATION_MIN_SCORE = 0.5
 HUE_ARBITRATION_MIN_MARGIN = 0.2
 
@@ -851,9 +705,9 @@ def _icon_hue_hist(image: np.ndarray):
     return hist
 
 def arbitrate_by_icon_hue(icon_img: np.ndarray, candidates: list[tuple[str, float]]):
-    """Pick among near-tied SIFT candidates by icon hue-histogram similarity.
+    """Pick among near-tied SIFT candidates by icon hue-histogram similarity
 
-    Returns (echo_name, sift_conf, hue_score) when hue is decisive, else None.
+    Returns (echo_name, sift_conf, hue_score) when hue is decisive, else None
     """
     query = _icon_hue_hist(icon_img)
     scored = []
@@ -873,26 +727,19 @@ def arbitrate_by_icon_hue(icon_img: np.ndarray, candidates: list[tuple[str, floa
 
 
 def _identify_icon_core(image: np.ndarray):
-    """SIFT match plus close-match/cost disambiguation before family validation.
+    """SIFT match plus close-match disambiguation, before family validation
 
-    Returns:
-        Tuple of (echo_name, confidence, element, sorted_matches, element_region)
+    Returns (echo_name, confidence, element, sorted_matches, element_region)
     """
     icon_img = image[0:182, 0:188]
     sift = SIFT_create()
     kp1, des1 = sift.detectAndCompute(icon_img, None)
     flann = FlannBasedMatcher(dict(algorithm=1, trees=5), dict(checks=50))
 
-    detected_element = None  # Initialize to avoid duplicate element detection
+    detected_element = None  # set only when close matches read the badge here
 
-    # Cost prefilter: the visible cost badge is cheap to read (template match)
-    # and partitions the ~163 echoes into cost 1/3/4 buckets, so the SIFT sweep
-    # only scores the ~44 templates of the detected cost instead of all of them
-    # (~3.6x fewer FLANN matches, the dominant per-echo cost). get_echo_cost
-    # returns 0 when unsure (match score < 0.2); an unknown cost falls back to
-    # the full sweep, so a missed cost can never drop the true echo. This
-    # replaces the old post-hoc cost tiebreaker: a cost-homogeneous sweep has
-    # nothing left for it to fix.
+    # Cost badge narrows the sweep to ~44 same-cost templates, ~3.6x fewer FLANN matches
+    # An unsure cost (0) sweeps everything, so a missed cost never drops the true echo
     actual_cost = get_echo_cost(image)
     if actual_cost in (1, 3, 4):
         candidate_names = [n for n in TEMPLATE_FEATURES if ECHO_COSTS.get(n, 0) == actual_cost]
@@ -913,17 +760,10 @@ def _identify_icon_core(image: np.ndarray):
     best_match, best_conf = sorted_matches[0]
     element_region = get_element_region(image)
 
-    # When the top SIFT candidates are near-tied, the badge element disambiguates
-    # look-alikes across different bodies (e.g. Chirpuff vs Gulpuff). Same-body
-    # base/Nightmare confusion is resolved later by validate_echo_family_by_element.
+    # On a near tie the badge separates look-alike bodies (Chirpuff vs Gulpuff), while Nightmare variants settle later
     if len(sorted_matches) > 1 and (best_conf - sorted_matches[1][1]) < 0.1:
-        # Soft images (WebP re-encodes, heavy blur) deflate every confidence, so
-        # a fixed conf > 0.1 floor can leave the pool with a single entry and
-        # skip disambiguation exactly when SIFT is least trustworthy. Keep the
-        # historical floor for healthy images, but on a collapsed scale widen
-        # down to 30% of best: still "similar to best", while keeping noise-level
-        # junk out of the pool — a misread badge must never hand the win to a
-        # candidate SIFT scored at noise level.
+        # Soft images deflate every confidence, so on a collapsed scale the floor drops toward 30% of best
+        # Noise-level candidates stay out, so a misread badge can't hand them the win
         close_floor = min(0.1, max(best_conf - 0.1, best_conf * 0.3))
         close_matches = [(name, conf) for name, conf in sorted_matches if conf > close_floor]
         if len(close_matches) >= 2:
@@ -939,9 +779,8 @@ def _identify_icon_core(image: np.ndarray):
                 for name, conf in close_matches
                 if detected_element in ECHO_SET_IDS.get(name, [])
             ]
-            # A badge pointing to exactly one candidate is decisive on its own.
-            # Otherwise arbitrate the survivors (or all close matches when the
-            # badge decided nothing) by icon hue — decisive for recolor ties.
+            # A badge matching exactly one candidate decides alone
+            # Otherwise icon hue arbitrates the badge survivors, or every close match when the badge decided nothing
             if len(element_matches) == 1:
                 best_match, best_conf = element_matches[0]
                 print(f"-> badge {SET_NAME_BY_ID.get(detected_element, detected_element)} -> '{best_match}'")
@@ -955,10 +794,9 @@ def _identify_icon_core(image: np.ndarray):
     return best_match, best_conf, detected_element, sorted_matches, element_region
 
 def match_icon(image: np.ndarray) -> Tuple[str, float, int | None]:
-    """SIFT-based icon matching - returns best match with confidence check and element.
+    """Best echo match with its SIFT confidence and set badge id
 
-    The visible set badge arbitrates same-body variants such as base vs Nightmare
-    echoes, where icon SIFT can prefer the wrong regional variant.
+    Set badge arbitrates same-body variants such as base vs Nightmare
     """
     best_match, best_conf, detected_element, sorted_matches, element_region = _identify_icon_core(image)
     best_match, best_conf, detected_element = validate_echo_family_by_element(
@@ -968,7 +806,6 @@ def match_icon(image: np.ndarray) -> Tuple[str, float, int | None]:
         element_region,
         detected_element,
     )
-    # Only detect element if we haven't already
     if detected_element is None:
         detected_element = determine_element(element_region, best_match)
     return (best_match, best_conf, detected_element)
@@ -1005,30 +842,12 @@ def parse_sequence_region(image) -> int:
 def _canonical_stat_fragment(line: str) -> str:
     return re.sub(r"[^a-z]", "", line.lower())
 
-# --- Character and weapon asset recognition (SIFT, OCR fallback on abstain) ---
-#
-# Server crops a bounding region per field (server.py IMPORT_REGIONS); these
-# sub-boxes locate the SIFT target and the OCR-fallback target WITHIN that region,
-# so they are coupled to those server boxes and must change together:
-#   character region = x[0.00, 0.32] y[0.00, 0.55]            (name strip + splash)
-#   weapon region    = x[0.7542, 0.9828] y[0.3843, 0.5843]    (full weapon panel)
-#
-# Validated on a 500-card r2-backup slice (docs/ocr-recognition-roadmap.md): SIFT
-# is more accurate than OCR (language-independent, reads non-English cards OCR
-# misses) and far cheaper than RapidOCR on Railway. It abstains via conf+margin
-# floors on Rover variants, look-alike weapon icons, and non-card screenshots,
-# falling back to the original OCR path so accuracy never regresses.
+# Character and weapon sub-boxes are fractions of server.py's IMPORT_REGIONS crops and must change with them
+# SIFT abstains below its confidence and margin floors (Rover, look-alike weapons, junk) and falls back to OCR
 DATA_DIR = Path(__file__).resolve().parent / "Data"
 
-# Widened from (0.125, 0.2545, 0.9375, 0.9455) after an 800-card A/B. The splash
-# has no fixed frame -- the art varies per character and bleeds past the region's
-# right edge -- so unlike the weapon icon there is no "correct" box to measure, only
-# a better-performing one. This box raised SIFT accept 97.8% -> 99.2%, median
-# confidence 0.1748 -> 0.1960 and median margin 0.1577 -> 0.1741, with ZERO identity
-# changes against the old box. Character was never broken (the splash is highly
-# distinctive, which is why a bad crop still worked); this is headroom, not a fix.
-# x fractions carry a 0.32/0.38 factor: the server region widened to keep the LV.
-# pill in frame for long names, and these are rescaled so the pixels are unchanged.
+# Splash has no fixed frame, so this box is tuned, not measured (SIFT accept 97.8% to 99.2%, no identity changes)
+# x fractions are scaled by 0.32/0.38 so the pixels stayed put when the server region widened
 CHAR_SPLASH_SUBBOX = (0.0842, 0.16, 0.8421, 0.9455)        # splash within character region
 CHAR_NAME_SUBBOX = (0.0863, 0.0135, 0.7949, 0.1515)    # name strip within character region
 CHAR_ELEMENT_SUBBOX = (0.0152, 0.025, 0.0884, 0.14)      # element badge left of name strip
@@ -1036,15 +855,8 @@ CHAR_SIFT_MAX_SIDE = 150
 CHAR_CONF_FLOOR = 0.10
 CHAR_MARGIN_FLOOR = 0.04
 
-# Measured, not eyeballed: stacking 400 weapon panels and taking per-pixel variance
-# isolates the icon exactly, because the panel frame is identical on every card and
-# the icon is not. The previous box came from the roadmap's crop spec and was
-# 92x140 (aspect 0.657) sitting +20px left and +22px above the icon while clipping
-# 44px off its right edge -- roughly half an icon, matched against square templates.
-# The measured box is 116x116, aspect 1.000, matching the 256x256 Data/Weapons art.
-# Over 1200 cards this lifted SIFT accept 77.9% -> 88.3% and median margin
-# 0.0754 -> 0.2659 (floor 0.03) while changing ZERO identities: it does not alter
-# answers, it stops abstaining on cards it should always have recognized.
+# Measured by per-pixel variance over 400 stacked panels, since the frame never changes and only the icon varies
+# Square box matches the square weapon art (SIFT accept 77.9% to 88.3%, no identity changes)
 WEAP_ICON_SUBBOX = (0.0456, 0.1806, 0.3098, 0.7176)   # square icon within weapon panel
 WEAP_SIFT_MAX_SIDE = 120
 WEAP_CONF_FLOOR = 0.08
@@ -1085,7 +897,7 @@ def _load_asset_features(folder: str, max_side: int) -> dict:
 
 
 def _match_asset(region: np.ndarray, feats: dict) -> tuple:
-    """Top template by SIFT good-match ratio. Returns (id, confidence, margin)."""
+    """Top template by SIFT good-match ratio, returning (id, confidence, margin)"""
     sift = SIFT_create()
     flann = FlannBasedMatcher(dict(algorithm=1, trees=5), dict(checks=50))
     kp1, des1 = sift.detectAndCompute(region, None)
@@ -1143,22 +955,10 @@ def _rover_analysis(cid: str | None, element: str | None, level: int = 90) -> di
     return {"name": name, "id": resolved_id, "level": level, "element": element}
 
 
-# --- Character level: the gold LV. pill ---------------------------------------
-#
-# The name strip mixes polarities -- white name on dark, dark "LV.90" on a gold
-# pill -- and psm 7 commits to one per line, so a strip read never sees the badge
-# (0/600 in the A/B). The pill's saturated gold is unique in the strip, so it is
-# located by hue, cropped, INVERTED to light-on-dark and read alone. Its position
-# floats with name length, which is why no fixed box can hold it.
-#
-# The pill is a fixed ~76 px wide and its rightmost fifth is decorative stripes
-# that OCR as a trailing 7 or 1 ("LV.1" read 17). The number occupies the left
-# ~65%, so the right 22% is cropped off before reading: on the twelve hand-checked
-# pills that took a level-1 read from 17 to 1 and changed nothing else (15%, 22%
-# and 30% all gave 12/12). 3x is read before 2x: 2x returned empty on 8/600 pills
-# and misread a 9 as 8 once, 3x read every one; both renders go in one batched
-# spawn. Against the Tesseract+Rapid hybrid: 585/585 agree, and the hybrid's own
-# failures were all clipped pills the wider server region now keeps in frame.
+# Level is read from the gold LV. pill alone, since psm 7 commits to one polarity per line and misses dark-on-gold text
+# Pill floats with name length, so it is located by hue, cropped and inverted to light-on-dark
+# Its right 22% is decorative stripes that read as a trailing 7 or 1, so it is cropped off
+# 3x reads before 2x, which returned empty on 8/600 pills, and both renders share one batched spawn
 CHAR_LEVEL_PILL_HSV = (np.array([12, 90, 90]), np.array([38, 255, 255]))
 CHAR_LEVEL_PILL_STRIPE_FRACTION = 0.22
 CHAR_LEVEL_CONFIG = "--psm 7 -c tessedit_char_whitelist=LV.0123456789"
@@ -1173,7 +973,7 @@ def _level_from_text(text: str) -> int:
 
 
 def read_character_level(region_img: np.ndarray) -> int:
-    """Level from the LV. pill. 0 when the pill is absent or unreadable."""
+    """Level from the LV. pill, 0 when the pill is absent or unreadable"""
     height, width = region_img.shape[:2]
     _, top, _, bottom = CHAR_NAME_SUBBOX
     strip = region_img[int(height * top):int(height * bottom), :]
@@ -1204,8 +1004,7 @@ def read_character_level(region_img: np.ndarray) -> int:
 
 
 def _character_title_text(strip: np.ndarray) -> str:
-    """Letters-only Tesseract read of the name strip (its own function so tests can
-    inject a title, as they patched process_ocr before)."""
+    """Letters-only Tesseract read of the name strip, separate so tests can inject a title"""
     return pytesseract.image_to_string(
         preprocess_region(strip),
         config='--psm 7 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz ',
@@ -1213,12 +1012,7 @@ def _character_title_text(strip: np.ndarray) -> str:
 
 
 def _read_character_title(region_img: np.ndarray) -> dict:
-    """Name from a letters-only Tesseract read of the strip, level from the pill.
-
-    This was a Tesseract+RapidOCR hybrid whose Rapid half existed to supply the
-    level, since the Tesseract half's whitelist has no digits. The pill reader does
-    that now, so Rapid leaves this path.
-    """
+    """Name from a letters-only Tesseract read of the strip, level from the pill"""
     text = _character_title_text(_subcrop(region_img, CHAR_NAME_SUBBOX))
     parsed = parse_character_title("\n".join(line.strip() for line in text.splitlines() if line.strip()))
     if level := read_character_level(region_img):
@@ -1227,11 +1021,9 @@ def _read_character_title(region_img: np.ndarray) -> dict:
 
 
 def recognize_character_asset(region_img: np.ndarray) -> dict:
-    """SIFT the character splash; OCR the name strip on abstain (Rover, junk).
+    """SIFT the character splash, or OCR the name strip on abstain (Rover, junk)
 
-    Level is not present in the splash, and cards are overwhelmingly Lv.90, so a
-    SIFT accept reports level 90. The abstain path runs the original OCR, which
-    still reads the true level for the rarer non-90 cards.
+    Level comes from the pill, and a non-Rover SIFT accept falls back to 90 when it is unreadable
     """
     global _CHARACTER_FEATURES
     if _CHARACTER_FEATURES is None:
@@ -1240,10 +1032,8 @@ def recognize_character_asset(region_img: np.ndarray) -> dict:
     cid, conf, margin = _match_asset(splash, _CHARACTER_FEATURES)
     parsed = None
     if cid in ROVER_GENDER_BY_ID and conf >= CHAR_CONF_FLOOR:
-        # Newer Rover variants include their element in the title, while older
-        # Spectro/Aero cards may still say only "Rover". An explicit title is
-        # authoritative; the colored badge is the fallback for an unsuffixed or
-        # unreadable title.
+        # Newer Rover titles carry the element while older Spectro/Aero cards say only "Rover"
+        # An explicit title wins and the badge covers an unsuffixed or unreadable title
         parsed = _read_character_title(region_img)
         title_element = parsed.get("element")
         badge_element = _detect_rover_badge_element(region_img)
@@ -1274,30 +1064,15 @@ def recognize_character_asset(region_img: np.ndarray) -> dict:
     return parsed
 
 
-# --- Weapon level -------------------------------------------------------------
-#
-# SIFT answers identity; it cannot answer level, and a SIFT accept used to report a
-# hardcoded 90. Measured over 1153 cards with a readable weapon, 6.0% are NOT level
-# 90 (LV.80 x40, LV.70 x14, LV.60, LV.1 ...), so that hardcode was wrong roughly one
-# build in seventeen -- and correcting WEAP_ICON_SUBBOX made it worse, by routing
-# more cards down the accept path and fewer to the OCR fallback that reads the real
-# level. Level is therefore read on its own, independent of the SIFT verdict.
-#
-# The box is the one WEAPON_REGIONS carried before SIFT orphaned it; rendering it
-# over real panels confirms it wraps "LV.xx" cleanly. Read at 2x with psm 7 and a
-# digit whitelist it matched the RapidOCR reference on 800/800 cards with zero
-# misses, at ~144 ms against a ~890 ms echo wall.
-#
-# Only the accept path pays for it. On abstain the existing Rapid panel read already
-# supplies the level -- it is the reference this was validated against -- so there is
-# nothing to gain and a spawn to lose by reading twice.
+# Weapon level is read from its own box on both paths, since SIFT can't see level and ~6% of weapons aren't level 90
+# 2x, psm 7 and a digit whitelist matched the RapidOCR reference on 800/800 cards
 WEAPON_LEVEL_BOX = {"x1": 191, "y1": 79, "x2": 269, "y2": 133}
 WEAPON_LEVEL_UPSCALE = 2
 WEAPON_LEVEL_CONFIG = "--psm 7 -c tessedit_char_whitelist=LV.0123456789"
 
 
 def read_weapon_level(region_img: np.ndarray) -> int:
-    """Weapon level from its own box. Returns 0 when unreadable so callers can fall back."""
+    """Weapon level from its own box, 0 when unreadable so callers can fall back"""
     box = WEAPON_LEVEL_BOX
     raw = region_img[box["y1"]:box["y2"], box["x1"]:box["x2"]]
     if raw.size == 0:
@@ -1313,27 +1088,16 @@ def read_weapon_level(region_img: np.ndarray) -> int:
     return int(match.group(1)) if match else 0
 
 
-# The name strip, for the ~12% of panels where the icon SIFT abstains. This is the
-# other box the old WEAPON_REGIONS table carried; rendering it over real panels
-# confirms it wraps the name cleanly. Read at 2x with psm 7 and fuzzy-matched against
-# WEAPON_NAMES it reproduced the RapidOCR name on 875/875 cards (95/95 of the abstain
-# cases), so Rapid leaves this path with no behaviour change. Blank panels (a since-
-# fixed game-side bug rendered no weapon art for Lucy/Lucilla/Sigrika/Rebecca) still
-# resolve to an empty name, which the frontend's signature-weapon fallback keys on.
-#
-# The strip is read twice in one spawn: the shared threshold(140) preprocess first,
-# which is what the 875/875 was measured on, then plain grayscale. One dark upload in
-# ~7000 cards had gold name text peaking at brightness 127, so the binarised strip
-# read as nothing while grayscale read the exact name; SIFT had the right icon at
-# conf 0.068, under its 0.08 floor. The preprocessed read wins whenever it resolves,
-# so every card it already handled is unchanged.
+# Name strip for the ~12% of panels where icon SIFT abstains, fuzzy-matched against WEAPON_NAMES
+# Read twice in one spawn: thresholded first, then plain grayscale for dark uploads whose gold text never reaches 140
+# A blank-art panel resolves to no name, which the frontend's signature-weapon fallback keys on
 WEAPON_NAME_BOX = {"x1": 152, "y1": 25, "x2": 437, "y2": 79}
 WEAPON_NAME_UPSCALE = 2
 WEAPON_NAME_CONFIG = "--psm 7"
 
 
 def read_weapon_name(region_img: np.ndarray) -> str | None:
-    """Weapon name from the strip, resolved against the known list. None when unreadable."""
+    """Weapon name from the strip resolved against the known list, None when unreadable"""
     box = WEAPON_NAME_BOX
     raw = region_img[box["y1"]:box["y2"], box["x1"]:box["x2"]]
     if raw.size == 0 or not WEAPON_NAMES:
@@ -1354,12 +1118,10 @@ def read_weapon_name(region_img: np.ndarray) -> str | None:
 
 
 def recognize_weapon_asset(region_img: np.ndarray) -> dict:
-    """SIFT the weapon icon; OCR the panel on abstain (look-alike icons).
+    """SIFT the weapon icon, or OCR the name strip on abstain (look-alike icons)
 
-    A true blank weapon panel yields ~zero SIFT confidence and unreadable OCR, so
-    the result stays empty (name/id "") and the frontend signature-weapon fallback
-    applies. A SIFT accept reads the level from its own box (read_weapon_level),
-    falling back to 90 only when that box is unreadable.
+    A blank panel stays empty (name and id "") so the frontend's signature-weapon fallback applies
+    Level comes from its own box on both paths, falling back to 90, or 1 on a blank panel
     """
     global _WEAPON_FEATURES
     if _WEAPON_FEATURES is None:
@@ -1373,26 +1135,20 @@ def recognize_weapon_asset(region_img: np.ndarray) -> dict:
             "level": read_weapon_level(region_img) or 90,
         }
     name = read_weapon_name(region_img)
-    # The level pill renders even on a blank-art panel (the game-side bug left only the
-    # icon and name missing), and the old Rapid pass read it there; so does this. The
-    # empty-weapon contract is kept for the frontend's signature-weapon fallback.
+    # The level pill renders even on a blank-art panel, so level is read on this path too
     level = read_weapon_level(region_img)
     if not name:
         return {"name": "", "id": "", "level": level or 1}
     return {"name": name, "id": WEAPON_ID_MAP.get(name, ""), "level": level or 90}
 
 
-# --- Non-English card detection -------------------------------------------------
-# On a localized (CN/JP/KR) card the substat VALUES still OCR fine (digits) but the
-# NAMES are unreadable by the English engine and fuzzy-match the English vocabulary
-# poorly. Paired with a "values really are present" gate -- so a wrong screenshot or a
-# non-standard layout is not mislabeled as non-English -- a low name-match rate flags a
-# non-English card. server.py aggregates this per-echo signal across the 5 echoes.
+# Localized cards OCR their substat values fine but their names match the English vocabulary poorly
+# server.py flags a card non-English when enough values are present but few names match
 _SUBSTAT_VOCAB = list(SUB_STATS.keys())
 _NUMERIC_VALUE_RE = re.compile(r"^\d{1,4}(\.\d)?%?$")
 
 def echo_language_signal(cleaned_names: list[str], values: list[str]) -> dict:
-    """Per-echo English-confidence: matched/total substat names + count of real values."""
+    """Per-echo English-confidence: matched/total substat names + count of real values"""
     names = [n for n in cleaned_names if len(n) >= 2]
     name_good = sum(
         1 for n in names
@@ -1402,12 +1158,9 @@ def echo_language_signal(cleaned_names: list[str], values: list[str]) -> dict:
     return {"nameGood": name_good, "nameTotal": len(names), "numValues": num_values}
 
 def process_card(image, region: str):
-    """Recognize one region and return its result plus the lines it logged.
+    """Recognize one region and return its result plus the lines it logged
 
-    All stdout produced during the call (top-level and nested) is captured into a
-    per-thread buffer via _STDOUT and returned under "logs"; server.py emits those
-    in a fixed region order. Capture is thread-safe, so regions can run on a thread
-    pool (one shared process) instead of separate worker processes.
+    Stdout during the call is captured per thread and returned under "logs" for server.py to print in region order
     """
     if image is None:
         return {"success": False, "error": "No image data provided", "logs": []}
@@ -1435,8 +1188,7 @@ def _process_card_inner(image, region: str):
         forte_data = {"levels": [0] * 5}
         processed = preprocess_region(image)
 
-        # One process for all five nodes (tess_batch); output is identical to five
-        # separate calls, at a fifth of the spawn cost.
+        # One Tesseract process for all five nodes
         node_crops = [processed[c["y1"]:c["y2"], c["x1"]:c["x2"]] for c in FORTE_REGIONS.values()]
         for i, text in enumerate(tess_batch(node_crops)):
             match = re.search(r'(?i)lv\.(\d+)(?:/10)?', text)
@@ -1454,14 +1206,12 @@ def _process_card_inner(image, region: str):
     elif region == "watermark":
         return {"success": True, "analysis": read_watermark(image)}
     elif region.startswith("echo"):
-        # --- main stat: raw Tesseract read, resolved against the echo cost below ---
+        # Main stat is read raw here and resolved once the echo's cost is known
         main_img = _crop_region(image, ECHO_REGIONS["main"])
         main_lines = _main_strip_lines(main_img)
         main_line = " ".join(main_lines[:2]) if len(main_lines) >= 2 else (main_lines[0] if main_lines else "")
         raw_main_name, raw_main_value = _parse_main_line(main_line)
 
-        # --- substats: fixed-band Tesseract rows (SUBSTAT_ROW_* above; history and
-        # measurements in docs/echo-substat-tesseract-only.md) ---
         names_img = _crop_region(image, ECHO_REGIONS["subs_names"])
         values_img = _crop_region(image, ECHO_REGIONS["subs_values"])
         substats, raw_names, raw_values, subs_path = read_substat_rows(names_img, values_img)
@@ -1469,15 +1219,11 @@ def _process_card_inner(image, region: str):
             print(f"Substat {i}: '{row['name']} {row['value']}'")
         lang_signal = echo_language_signal(raw_names, raw_values)
 
-        # --- identity (SIFT) + cost-aware main resolution ---
         echo_id, confidence, set_id = match_icon(image)
         if set_id is not None and set_id not in ECHO_SET_IDS.get(echo_id, []):
             set_id = None
         element_name = SET_NAME_BY_ID.get(set_id) if set_id is not None else None
         print(f"Echo identified: {echo_id} (confidence: {confidence:.2%})")
-        # Ties are broken by the Tesseract name read alone. The Rapid second opinion this
-        # used to take was the last RapidOCR call on the echo path; a 6000-card gate showed
-        # its removal changed 0/30,000 echo main stats.
         main = resolve_echo_main(ECHO_COSTS.get(echo_id, 0), raw_main_name, raw_main_value)
         print(f"Echo '{echo_id}' -> Set: {element_name} (id {set_id})")
         print(f"Final echo result: main={main}, substats={substats}")

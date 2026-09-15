@@ -1,9 +1,7 @@
-"""
-review_integrity_gui.py — browser UI for reviewing image-integrity findings.
+"""Local browser UI for reviewing scan_image_integrity.py's review_queue.json
 
-Reads scan_image_integrity.py's review_queue.json and serves a local review app.
-Decisions are written to review_decisions.json next to the queue and delete
-decisions are exported to backend/invalid_images.json for clean_invalid.py.
+Decisions save to review_decisions.json next to the queue
+Delete decisions export to backend/invalid_images.json for clean_invalid.py
 
 Usage:
   py review_integrity_gui.py ../forensics/integrity_scan/review_queue.json ../r2-backup

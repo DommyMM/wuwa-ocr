@@ -1,21 +1,11 @@
-"""THE decisive bench: which engine reads one icon-anchored value cell, fast?
+"""Which engine reads one icon-anchored substat value cell accurately and fast
 
     .bench-venv/Scripts/python.exe bench/bench_values.py samples/bag_4k_01.jpg
 
-Why this is the only OCR question left
---------------------------------------
-Stat NAMES come from the 17 icon templates: 0.3 ms/row, no OCR, and correct in
-all 9 WuWa languages. Rows are anchored on icon blobs, so name/value alignment is
-guaranteed by construction and the wrap problem disappears.
-
-That leaves VALUES. They must be read per-row, not as a batched column: batching
-lets the engine drop a line and shift every row below it, which is precisely the
-drift card.py's reconcile_echo_substat_rows exists to survive. So we pay one OCR
-call per row (~7/echo) and the only thing that matters is per-call cost on a tiny
-crop, in-process.
-
-pytesseract is disqualified on its face: ~154 ms/call, essentially all of it
-subprocess spawn. At 7 rows that is >1 s/echo of pure overhead.
+Stat names come from the 17 icon templates (0.3 ms/row, no OCR), and icon-anchored rows keep names and values aligned
+Values are read one cell per row, since a batched column lets an engine drop a line and shift every row below
+So what matters is the cost of reading 5 tiny substat cells per echo
+Per-call pytesseract is ~154 ms of process spawn, so the Tesseract engine batches cells into one process
 """
 from __future__ import annotations
 
@@ -36,15 +26,10 @@ STATS_BOX = (0.690, 0.415, 0.975, 0.715)
 ICON_FRAC = 0.075
 VALUE_FRAC = 0.74
 
-# Row 0 is the MAIN stat and row 1 the INNATE base stat. Neither needs OCR: the
-# icon gives the stat, and the value is fully determined by (cost, stat, level)
-# via Data/EchoStats.json. The roadmap already mandates this ("echo main stat
-# value | derive from cost and stat name | Do not OCR").
-#
-# So only the SUBSTAT rows are an OCR problem: 5 cells per echo, not 7.
+# Rows 0 and 1 are the main and innate stats, whose values follow from cost, stat and level via Data/EchoStats.json
 SKIP_ROWS = 2
 
-# (stat, true numeric value). The icon supplies the stat; OCR supplies only digits.
+# (stat, true value), the icon supplies the stat and OCR only the digits
 TRUTH = [
     ("Heavy Attack DMG Bonus", 7.9), ("HP%", 10.1), ("Energy Regen", 9.2),
     ("Crit DMG", 21.0), ("ATK", 40.0),
@@ -55,13 +40,9 @@ RUNS = 5
 
 
 def parse_num(lines: list[str]) -> float | None:
-    """Digits only. The '%' is NEVER read.
+    """First number in the read, ignoring '%'
 
-    The stat family (from the icon) already determines whether the value is a
-    percent, and for the three flat/percent families the legal sets are disjoint
-    (HP% 6.4-11.6 vs HP 320-580; ATK% 6.4-11.6 vs ATK 30-60; DEF% 8.1-14.7 vs
-    DEF 40-70), so the NUMBER alone resolves it. Engines that drop the '%' are
-    therefore not wrong in any way the pipeline cares about.
+    Flat and percent legal sets are disjoint (ATK 30-60, ATK% 6.4-11.6), so the number alone picks the member
     """
     blob = "".join(lines).replace(" ", "").replace("%", "")
     m = NUM_RX.search(blob)
@@ -74,8 +55,9 @@ def parse_num(lines: list[str]) -> float | None:
 
 
 def snap(stat: str, num: float | None, legal_by_stat: dict) -> float | None:
-    """Snap a read number to the stat's closed legal set. Arbitration only:
-    the reader must be discriminative, the legal set never *guesses* the value.
+    """Snap a read number to the stat's legal set within 2.0, or pass it through when the stat has none
+
+    Arbitration only, so the reader must discriminate and the legal set never guesses the value
     """
     if num is None:
         return None
@@ -91,7 +73,6 @@ def main() -> None:
     import data
 
     legal = dict(data.SUB_STATS)
-    # Main-stat rows are not substats; allow them through unsnapped.
     truth_stats = [t[0] for t in TRUTH]
     truth_nums = [t[1] for t in TRUTH]
 

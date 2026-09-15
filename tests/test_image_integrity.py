@@ -19,12 +19,9 @@ from image_integrity import (
 
 
 def _card_from_reference() -> np.ndarray:
-    """A 1920x1080 BGR image built from the chrome reference.
+    """1920x1080 BGR card upscaled from the chrome reference, the closest stand-in for a genuine card
 
-    Upscaled back to card size, it is the closest thing to a genuine card we can
-    synthesize without shipping a real screenshot. The resample-then-reblur path
-    inside chrome_score softens it beyond a real card, so it is used only for
-    RELATIVE comparisons (much lower than noise), never an absolute pass.
+    chrome_score's resample and reblur soften it beyond a real card, so it is only for relative comparisons
     """
     ref = image_integrity._CHROME_MEDIAN
     assert ref is not None, "reference asset must be present for these tests"
@@ -40,10 +37,9 @@ def _encoded(extension: str, width: int, height: int) -> bytes:
 
 
 def _png_declaring(width: int, height: int) -> bytes:
-    """A small PNG whose IHDR claims a size its pixel data does not have.
+    """Small PNG whose IHDR claims a size its pixel data doesn't have
 
-    This is the decompression bomb in its actual shape: a few hundred bytes on
-    the wire that ask cv2.imdecode for width * height * 3 of memory.
+    Decompression bomb in its real shape, a tiny payload asking cv2.imdecode for width * height * 3 bytes
     """
     encoded = _encoded(".png", 4, 4)
     return encoded[:16] + struct.pack(">II", width, height) + encoded[24:]
@@ -107,7 +103,7 @@ class PhaseAChromeTests(unittest.TestCase):
 
         self.assertFalse(result["accepted"])
         self.assertIn("wrong_card_dimensions", result["reasons"])
-        # No chrome scoring happens on a wrong-size image.
+        # No chrome scoring happens on a wrong-size image
         self.assertIsNone(result["chromeScore"])
 
     def test_flat_canvas_is_rejected_as_not_a_card(self):
@@ -128,14 +124,14 @@ class PhaseAChromeTests(unittest.TestCase):
         self.assertIn("not_build_card", result["reasons"])
 
     def test_reference_scores_far_below_noise(self):
-        """The scoring function separates a card-shaped image from junk."""
+        """The scoring function separates a card-shaped image from junk"""
         rng = np.random.default_rng(3)
         noise = rng.integers(0, 255, (1080, 1920, 3), dtype=np.uint8)
 
         self.assertLess(chrome_score(_card_from_reference()), chrome_score(noise))
 
     def test_tint_shift_barely_moves_the_score(self):
-        """Per-card median normalization makes the score blind to exposure."""
+        """Per-card median normalization makes the score blind to exposure"""
         card = _card_from_reference()
         base = chrome_score(card)
         shifted = chrome_score(cv2.convertScaleAbs(card, alpha=1.0, beta=15))
@@ -152,7 +148,7 @@ class PhaseAChromeTests(unittest.TestCase):
             self.assertEqual(chrome_score(image), 0.0)
             result = validate_image_integrity(image)
 
-        # Reference gone: Phase A must not crash or reject; only dimensions gate.
+        # With the reference gone, Phase A must neither crash nor reject, so only dimensions gate
         self.assertTrue(result["accepted"])
         self.assertEqual(result["verdict"], "ok")
 
@@ -166,7 +162,7 @@ class PhaseBBedTests(unittest.TestCase):
         self.assertEqual(result["score"], max(result["panels"]))
 
     def test_flat_bed_scores_low(self):
-        """An untampered flat/gradient bed has no pasted cell, so it scores low."""
+        """An untampered flat/gradient bed has no pasted cell, so it scores low"""
         gradient = np.tile(np.linspace(20, 90, 1920, dtype=np.uint8), (1080, 1))
         image = cv2.cvtColor(gradient, cv2.COLOR_GRAY2BGR)
 

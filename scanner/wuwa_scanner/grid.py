@@ -1,19 +1,8 @@
-"""Per-frame grid lattice detection.
+"""Per-frame grid lattice detection
 
-THE GRID SCROLLS SMOOTHLY. It does not snap to rows. So a fixed TILE_ORIGIN is
-only correct at scroll-top, and every frame after a scroll has an arbitrary
-vertical offset. Extrapolating rows from a constant origin silently mis-crops
-every tile (it read the bottom bar of the tile ABOVE as part of the tile below),
-which is exactly how the first echo-identity bench managed to score 0/3 while
-looking like a matcher problem.
-
-Inventory Kamera has the same problem and papers over it: it scrolls a calculated
-number of wheel ticks and scrolls BACK once every ninth page to correct the drift.
-We detect the lattice per frame instead, so scroll amount never needs to be exact.
-
-Columns are fixed (there is no horizontal scroll), so only the row offset is
-detected. The signal is the gold/tan bar along the bottom of every tile: a strong,
-saturated, consistent horizontal band that nothing else in the grid produces.
+Grid scrolls smoothly without snapping to rows, so a fixed TILE_ORIGIN silently mis-crops every tile after a scroll
+Detecting the lattice per frame means scroll distance never needs to be exact
+Columns never scroll, so only the row offset is detected, from the gold bar near the bottom of every tile
 """
 from __future__ import annotations
 
@@ -22,16 +11,14 @@ import numpy as np
 
 from . import layout as L
 
-# Gold bottom-bar of a tile, in HSV. Deliberately loose: we only need the BAND, and
-# it is the only wide saturated-gold horizontal structure in the grid area.
+# Tile's gold bar in HSV, loose since it is the only wide saturated-gold horizontal band in the grid
 GOLD_LO = np.array([12, 55, 130])
 GOLD_HI = np.array([40, 255, 255])
 
-# Region the tiles live in, generous. Excludes the left nav rail and the detail panel.
+# Generous tile region, clear of the left nav rail and the detail panel
 GRID_REGION = (0.06, 0.05, 0.65, 0.95)
 
-# Below this the tile footer (sonata badge + "+25") is occluded by the sort/filter
-# bar, so the row is clickable but NOT censusable. 4K px 1900 / 2160.
+# Below this the sort/filter bar hides a tile's sonata badge and "+25", so the row can be clicked but not censused
 READABLE_BOTTOM = 1900 / 2160
 
 
@@ -49,14 +36,12 @@ def _runs(mask: np.ndarray, min_len: int) -> list[tuple[int, int]]:
     return out
 
 
-# The gold bar is NOT at the very bottom of a tile: it is the gradient strip above
-# the dark footer that holds the sonata badge and "+25". Measured offset from tile
-# top to bar bottom: 303 px on a 392 px tile.
+# Gold bar is the gradient strip above the dark footer, so its bottom sits 303 px into a 392 px tile
 BAR_BOTTOM_FRAC = 303 / 392
 
 
 def detect_bars(frame: np.ndarray) -> list[float]:
-    """Absolute y (proportional) of each visible tile's gold-bar bottom."""
+    """Absolute y (proportional) of each visible tile's gold-bar bottom"""
     h, w = frame.shape[:2]
     gx0, gy0, gx1, gy1 = GRID_REGION
     x0, y0 = int(gx0 * w), int(gy0 * h)
@@ -71,13 +56,9 @@ def detect_bars(frame: np.ndarray) -> list[float]:
 
 
 def detect_lattice(frame: np.ndarray) -> dict:
-    """Per-frame row lattice + the fixed column model.
+    """Per-frame row lattice plus the fixed column model
 
-    Bars are detected, then a REGULAR lattice is fitted through them. Fitting
-    matters: bar detection misses a row here and there (a tile whose art happens to
-    be gold, an odd gradient), and a missing row silently shifts every index below
-    it. The grid is perfectly regular, so we recover the missing rows instead of
-    trusting the raw detections.
+    Bars are fitted to a regular lattice, since a missed bar (gold art, odd gradient) would shift every row below it
     """
     h = frame.shape[0]
     tile_h = L.TILE_H
@@ -87,17 +68,13 @@ def detect_lattice(frame: np.ndarray) -> dict:
     pitch = L.TILE_PITCH_Y
     if len(tops) > 1:
         diffs = np.diff(tops)
-        # Only trust an observed diff as the pitch if it is close to the model;
-        # a missed row shows up as ~2x pitch and must not become the pitch.
+        # Only diffs near the model count toward pitch, since a missed row shows up as ~2x pitch
         near = [d for d in diffs if abs(d - L.TILE_PITCH_Y) < 0.25 * L.TILE_PITCH_Y]
         if near:
             pitch = float(np.median(near))
 
-    # Fit: anchor on the first detected top, then rebuild the lattice on that pitch
-    # and keep only rows fully inside the readable area.
-    # Keep only rows that are FULLY readable: a row scrolled off the top, or one
-    # whose footer is under the sort bar, can still be clicked but cannot be
-    # censused (its sonata badge and "+25" are not on screen).
+    # Anchor on the first detected top, rebuild the lattice on that pitch and keep only fully readable rows
+    # A row scrolled off the top or with its footer under the sort bar can be clicked but not censused
     rows: list[float] = []
     if tops:
         gy0, gy1 = GRID_REGION[1], READABLE_BOTTOM
@@ -123,19 +100,11 @@ def detect_lattice(frame: np.ndarray) -> dict:
 
 
 def tile_box(lattice: dict, row_idx: int, col: int) -> tuple[float, float, float, float] | None:
-    """Proportional box of a tile, using this frame's DETECTED row offset.
+    """Proportional box of a tile at this frame's detected row offset
 
-    The UNSELECTED box is used for every tile, including the selected one, and that is a
-    measured decision rather than an oversight. The selected tile really is bigger (345x425
-    vs 325x392), but it does NOT grow about its centre: hand measurements put it at (330,
-    250) against an unselected column origin of 334, a 4 px x-shift where centred growth
-    would demand 10. Re-boxing the selected tile on a centred model therefore OVERCROPS it,
-    and measurably: identity margin fell 0.367 -> 0.130 and 0.142 -> 0.009 on the two
-    selected tiles we have. The unselected box reads them correctly (cost included), because
-    the 292x292 art is tolerant of a ~10 px shift.
-
-    If a selected-tile model is ever needed, RE-MEASURE the anchor first -- do not derive it
-    from the size delta.
+    Every tile gets the unselected box, since the larger selected tile shifts 4 px where centred growth would give 10
+    Re-boxing it on a centred model overcropped it (identity margin 0.367 to 0.130), while the art absorbs the shift
+    A selected-tile model needs a re-measured anchor, not one derived from the size delta
     """
     rows = lattice["row_tops"]
     if not (0 <= row_idx < len(rows)):
@@ -145,34 +114,19 @@ def tile_box(lattice: dict, row_idx: int, col: int) -> tuple[float, float, float
     return (x0, y0, x0 + L.TILE_W, y0 + L.TILE_H)
 
 
-# --- selection ---------------------------------------------------------------
-# The selected tile is ringed by GOLD BEZELS ON ITS CORNERS. Scoring the whole border
-# by brightness does NOT work: several echoes have bright golden ARTWORK that outscores
-# the real selection ring (it picked a gold dragon tile over the truly-selected one).
-# Test the CORNERS, and test for the gold HUE rather than for brightness.
+# Selection is gold corner bezels, tested by hue since bright golden art beat a whole-border brightness test
 SELECT_LO = np.array([15, 60, 140])
 SELECT_HI = np.array([40, 255, 255])
 
-# The gap this floor sits in, measured over all five fixtures: a real selection scores
-# 28.0-44.0 on its WEAKEST corner, and every non-selected tile scores 0.0 on its weakest.
+# Over all five fixtures a real selection scores 28-44 on its weakest corner and every other tile 0
 SELECT_FLOOR = 15.0
 
 
 def selection_score(frame: np.ndarray, box) -> float:
-    """Gold coverage of the WEAKEST of the four corners.
+    """Gold coverage of the weakest of the four corners
 
-    Pooling all four corners into one mean was the first version, and a mean lets one
-    very bright corner carry a tile that has no ring at all. Two different things do
-    exactly that:
-
-      * the orange "New" ribbon on a freshly-obtained echo sits in the top-right corner
-        and scored 165.9 there, four times a real selection, with 0.0 on the other three
-      * gold artwork bleeding into one or two corners (bug #7's original culprit, which
-        moving to corners reduced but did not remove): 59.5 / 35.2 / 11.4 / 0.0
-
-    The selection ring is the only thing that lights up ALL FOUR corners, so the minimum
-    is the discriminating statistic and the mean is not. This matters beyond a cosmetic
-    flag: the panel is only trustworthy when it belongs to the tile we think is selected.
+    A mean let one bright corner carry a ringless tile, from the orange "New" ribbon or gold art bleeding in
+    Only the selection ring lights all four corners, and the panel is only trustworthy for the tile picked here
     """
     t = L.crop(frame, box)
     h, w = t.shape[:2]
@@ -189,7 +143,7 @@ def is_selected(frame: np.ndarray, box) -> bool:
 
 
 def find_selected(frame: np.ndarray, lattice: dict):
-    """(row, col, box) of the selected tile, or None. Validated 3/3."""
+    """(row, col, box) of the selected tile, or None"""
     best = None
     for r in range(len(lattice["row_tops"])):
         for c in range(L.GRID_COLS):

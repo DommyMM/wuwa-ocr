@@ -1,24 +1,10 @@
-"""Regression: the two tile fields that are read as GLYPHS rather than icons.
+"""Regression for the tile fields read as glyphs (cost, level) and the selection ring
 
     py bench/bench_fields.py
 
-Cost and level are split out from bench_census.py because they failed for the same
-reason and must be guarded the same way: both are small numerals, and both were
-previously read by a method that was not actually looking at the numeral.
-
-  * cost  was correlated against card.py's diamond-framed templates and scored 2/18
-          on a mixed-cost page, abstaining on every cost-1 tile and answering a
-          cost-3 tile with a confident "4". See glyphs.py.
-  * level was OCR'd with the '+' still in frame, and Tesseract reads '+' as '4', so
-          "+25" came back as 425 on 5 of 18 tiles. See glyphs.level_digits.
-
-THE LABELS ARE HAND-READ FROM THE TILES, never derived from identity. Deriving cost
-from the identified echo would make this regression a tautology: identity is
-prefiltered BY cost, so it would pass by construction while the reader rotted.
-
-PLAN.md bug #8 is the reason cost is measured on every fixture rather than a
-convenient one. A cost reader fitted or tested on a single-cost page reports a proud
-18/18 and then collapses on the first page that disagrees with it.
+Cost and level are small numerals that readers misread while the diamond frame or the '+' was in view (see glyphs.py)
+Labels are hand-read from the tiles, since identity is prefiltered by cost and derived labels would pass by construction
+Cost is measured on every fixture, since a reader checked on a single-cost page scores 18/18 there and fails the next
 """
 from __future__ import annotations
 
@@ -38,8 +24,8 @@ from wuwa_scanner import grid, layout as L, ocr, tile  # noqa: E402
 C4 = [4] * 18
 L25 = [25] * 18
 
-# The one selected tile per frame, hand-read from the gold ring, or None. Guards the
-# "New" ribbon and gold-artwork false positives; see grid.selection_score.
+# Selected tile per frame, hand-read from the gold ring, None when nothing is selected
+# Guards the "New" ribbon and gold-artwork false positives (see grid.selection_score)
 SELECTED = {
     "bag_4k_01.jpg": (0, 0),
     "bag_4k_02.jpg": (0, 1),
@@ -48,15 +34,14 @@ SELECTED = {
     "bag_4k_05_no_selection.jpg": None,
 }
 
-# (fixture, costs, levels), row-major over the 3 censusable rows. Row 3's footer is
-# under the sort bar, so it carries neither field and is not in row_tops.
+# (fixture, costs, levels), row-major over the 3 censusable rows
+# Row 3's footer is under the sort bar, so it carries neither field and is missing from row_tops
 FIXTURES = [
     ("bag_4k_01.jpg", C4, L25),
     ("bag_4k_02.jpg", C4, L25),
     ("bag_4k_03_cost3.jpg",
      [4, 4, 4, 4, 4, 4,  4, 3, 3, 3, 3, 3,  3, 3, 3, 3, 3, 3], L25),
-    # The only fixture with more than one cost AND more than one level. Everything the
-    # other four can prove, they prove about the easy case.
+    # Only fixture with cost-1 tiles and levels other than 25
     ("bag_4k_04_mixed_level.jpg",
      [1, 1, 1, 1, 1, 1,  1, 1, 1, 1, 1, 3,  1, 1, 1, 1, 4, 4],
      [25, 25, 25, 25, 25, 25,  25, 25, 25, 25, 22, 21,  20, 20, 17, 15, 0, 0]),
@@ -114,7 +99,7 @@ def main() -> int:
             else:
                 failures.append(f"  LEVEL {name} r{i // 6}c{i % 6}: read {got}, truth {want}")
 
-        # Exactly one tile may claim selection, and it must be the right one.
+        # Only the labelled tile may claim selection, and none on a frame labelled None
         claims = [(i // 6, i % 6) for i, b in enumerate(bx) if grid.is_selected(img, b)]
         want = SELECTED[name]
         sel_ok = claims == ([want] if want else [])
@@ -134,11 +119,10 @@ def main() -> int:
     print(f"level: {lvl_ok}/{lvl_n}   ({lvl_abstain} abstained)   "
           f"distinct levels {sorted(seen_levels)}")
 
-    # An abstain is survivable for cost (identity just sweeps the full pool) but a WRONG
-    # cost deletes the true echo from that pool, so the two are not graded the same.
     sel_fail = sum(1 for f in failures if f.startswith("  SEL"))
     print(f"selection: {len(FIXTURES) - sel_fail}/{len(FIXTURES)} frames")
 
+    # A cost abstain only widens identity to the full pool but a wrong cost drops the true echo, so only that fails
     wrong_cost = cost_n - cost_ok - cost_abstain
     if wrong_cost or lvl_ok != lvl_n or sel_fail:
         print(f"\nFAIL: {wrong_cost} wrong cost read(s), {lvl_n - lvl_ok} level miss(es), "

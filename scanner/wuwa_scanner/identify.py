@@ -1,41 +1,10 @@
-"""Echo identity from a grid tile. No OCR, no click, language-independent.
+"""Echo identity from grid tile art, with no OCR or click
 
-Three signals, and no Nightmare family is blind to all three
------------------------------------------------------------
-1. SOBEL GRADIENT MAGNITUDE, not grayscale.
-   The tile background is a soft gradient whose colour differs from the CDN template's
-   (Frostbite Coleoid sits on light blue in the tile, dark teal in the template).
-   Grayscale NCC is dominated by that. A smooth background has near-zero gradient while
-   the creature has strong edges, so gradient matching is background-invariant.
-   Grayscale scored 2/3 on the first sample; gradient scored 3/3.
-
-2. HUE, on near-ties.
-   Gradient is background-invariant precisely BECAUSE it discards colour, so
-   same-silhouette bodies collapse into a near-tie (Fleurdelys lost to Leviathan by
-   0.008). A port of card.py::arbitrate_by_icon_hue.
-
-3. The SONATA BADGE, scoped to the candidate's family (see tile.py).
-
-Scoring every Nightmare pair template-against-template shows the coverage is real and
-not luck. Some families are blind to gradient AND hue and are carried entirely by the
-badge (Viridblaze Saurian 0.957/0.908, Baby Viridblaze 0.941/0.930, Dwarf Cassowary
-0.864/0.940, Baby Roseshroom 0.855/0.925). Four families have sets IDENTICAL to their
-base so the badge is mute, and there gradient or hue carries it (Crownless 0.304 grad,
-Thundering Mephis 0.061 grad, Inferno Rider 0.236/0.061, and Feilian Beringal, whose
-gradient is blind at 0.937 and which HUE ALONE separates at -0.106).
-
-Phantoms
---------
-Phantoms are cosmetic -- same cost, same legal sets, same stat pools -- so the flag is
-worthless to an optimizer and a Phantom tile matching its BASE id is the correct answer.
-But a Phantom is a RECOLOR, so its hue is shifted away from the base template, and
-Feilian Beringal is separated from its Nightmare by hue alone. Comparing a phantom's
-shifted hue against non-phantom templates is exactly how a Phantom base flips to a
-Nightmare.
-
-So the phantom art is loaded as a SECOND TEMPLATE UNDER THE SAME ID (Data/EchoPhantoms,
-38 skins). Each id scores best-of-variants: the phantom matches phantom art and still
-reports the base id. This removes the trap instead of detecting it.
+Sobel gradient rather than grayscale, since tile backgrounds differ in colour from the templates' (2/3 vs 3/3)
+Hue breaks near-ties since gradient drops colour, as in card.py's arbitrate_by_icon_hue
+Family-scoped sonata badge covers the rest (see tile.py), and no Nightmare family is blind to all three signals
+Feilian Beringal matches its Nightmare in sets and gradient (0.937), so hue alone separates them
+Phantom art loads as a second template under the base id, so a phantom's shifted hue can't flip a base to Nightmare
 """
 from __future__ import annotations
 
@@ -53,7 +22,7 @@ TPL_DIR = BACKEND / "Data" / "Echoes"
 PHANTOM_DIR = BACKEND / "Data" / "EchoPhantoms"
 
 SIZE = 128
-INNER = 0.85          # centre crop before matching; best margin in the representation sweep
+INNER = 0.85          # centre crop before matching, best margin in the representation sweep
 TIE_MARGIN = 0.10     # below this the gradient has not decided, so ask hue
 HUE_MIN_SCORE = 0.50  # card.py's floors: only fire on a decisive hue win
 HUE_MIN_MARGIN = 0.20
@@ -78,7 +47,7 @@ def _grad_feat(bgr: np.ndarray) -> np.ndarray:
 
 def _hue_feat(bgr: np.ndarray) -> np.ndarray:
     hsv = cv2.cvtColor(_inner(bgr), cv2.COLOR_BGR2HSV)
-    # S>=80 / V>=60 drops washed-out trim and dark background that dilute the histogram.
+    # S>=80 / V>=60 drops washed-out trim and dark background that dilute the histogram
     mask = cv2.inRange(hsv, np.array([0, 80, 60]), np.array([180, 255, 255]))
     h = cv2.calcHist([hsv], [0], mask, [36], [0, 180])
     cv2.normalize(h, h)
@@ -100,8 +69,8 @@ def _load() -> tuple[dict, dict]:
             _GRAD[p.stem] = [_grad_feat(im)]
             _HUE[p.stem] = [_hue_feat(im)]
 
-    # Phantom skins are keyed by the id they re-skin, so they land in that id's variant
-    # list. Encore serves .webp and Wuthery .png, hence the bare glob.
+    # Phantom skins are named by the id they re-skin, so they join that id's variants
+    # Encore serves .webp and Wuthery .png, hence the bare glob
     for p in sorted(PHANTOM_DIR.glob("*")):
         if p.stem not in _GRAD or (im := _read(p)) is None:
             continue
@@ -111,12 +80,10 @@ def _load() -> tuple[dict, dict]:
 
 
 def identify_echo(art_bgr: np.ndarray, cost: int | None = None) -> dict:
-    """Identify an echo from its 292x292 tile art.
+    """Identify an echo from its 292x292 tile art
 
-    `cost` (read from the tile, see tile.read_cost) prefilters the template pool ~4x.
-    It is a speed and margin win, not a correctness requirement: the full 180-template
-    sweep scores the same. An unknown cost falls back to the full sweep, so a missed
-    cost badge can never drop the true echo.
+    Cost 1, 3 or 4 narrows the pool to that cost, which rescues washed-out tiles whose full sweep collapses to noise
+    Any other cost sweeps every template, so a missed cost read never drops the true echo
     """
     grads, hues = _load()
     pool = grads
@@ -126,7 +93,7 @@ def identify_echo(art_bgr: np.ndarray, cost: int | None = None) -> dict:
             pool = filtered
 
     q = _grad_feat(art_bgr)
-    # Best-of-variants: an id is as close as its closest skin (base or phantom).
+    # Best-of-variants: an id is as close as its closest skin (base or phantom)
     ranked = sorted(
         ((max(float((q * t).mean()) for t in variants), k) for k, variants in pool.items()),
         reverse=True,

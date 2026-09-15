@@ -20,8 +20,7 @@ from r2_storage import StorageResult
 
 
 def encoded_image(extension: str) -> bytes:
-    # Card-sized, because the ingest path now gates on the header dimensions
-    # before it decodes. A flat image of this size still encodes to a few KiB.
+    # Card-sized because ingest gates on header dimensions before decoding, and a flat card still encodes to a few KiB
     image = np.full((1080, 1920, 3), 127, dtype=np.uint8)
     ok, encoded = cv2.imencode(extension, image)
     if not ok:
@@ -346,18 +345,16 @@ class StreamContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0]["type"], "error")
         self.assertIn("KuroBot build card", events[0]["error"])
-        # The chrome score / integrity vector must never reach the client.
+        # Integrity vector and chrome score must never reach the client
         self.assertNotIn("integrity", events[0])
         self.assertEqual(store.calls, 0)
         self.assertEqual(recognition_calls, [])
 
     async def test_bed_integrity_is_observed_not_enforced(self):
-        """Phase B (echo-bed) records a high score but never rejects a build.
+        """Echo-bed integrity logs a high score but never rejects a build
 
-        A pasted stat cell scores high, yet the card must still import: wrapped
-        substat names still produce false positives, so the signal is logged for
-        offline hardening and nothing more. The score also must not reach the
-        client, where it would be a forger's tuning oracle.
+        Wrapped substat names still score high like pasted cells, so the signal is only logged
+        Score never reaches the client, since a live score gives cheaters a reference
         """
         store = FakeStore("stored")
         loud_bed = {"score": 9.9, "panels": [1.0, 1.0, 1.0, 9.9, 8.0]}
@@ -387,7 +384,7 @@ class StreamContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(done["type"], "done")
         self.assertTrue(done["success"])
         self.assertEqual(store.calls, 1)
-        # Observed, not enforced, and never leaked to the client.
+        # Observed, not enforced, and never leaked to the client
         self.assertNotIn("integrity", done)
         self.assertNotIn("bed", done)
 

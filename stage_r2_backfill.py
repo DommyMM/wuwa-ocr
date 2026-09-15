@@ -1,9 +1,7 @@
-r"""Stage a date-filtered subset of r2-backup for frontend /bulk-import.
+r"""Stage a date-filtered subset of r2-backup for frontend /bulk-import
 
-The script hardlinks by default, so staging is fast and does not duplicate image
-bytes. It falls back to copying if hardlinks are unavailable.
-
-Run `sync_r2.py --run` first so local mtimes reflect R2 LastModified.
+Hardlinks by default so staging duplicates no image bytes, and copies where hardlinks are unavailable
+Run `sync_r2.py --run` first so local mtimes hold original upload times
 
 Examples:
     py backend\stage_r2_backfill.py --since 2026-06-07T19:00:00-07:00

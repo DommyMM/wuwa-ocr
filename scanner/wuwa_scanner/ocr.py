@@ -1,36 +1,10 @@
-"""The only OCR in the scanner: read a number.
+"""The scanner's only OCR, which reads numbers
 
-Everything else is icon/template matching, so this is all that is language-dependent -
-and digits are identical in all 9 WuWa text languages, so in practice it is not.
-
-Scope, after the design collapsed the problem:
-  * stat NAMES come from the 17 stat icons                -> no OCR
-  * the '%' is implied by the stat family                 -> no OCR
-  * main + innate values derive from cost (EchoStats.json)-> no OCR
-  * echo identity/cost/set/level come from the tile       -> no OCR
-  => 5 substat numbers per echo. That is the entire OCR surface.
-
-Engine bench (5 substat cells/echo, on real 4K captures). Once the crops were correct,
-EVERY engine scored 5/5, so accuracy is not a differentiator and the choice is purely
-speed and packaging:
-
-    WinRT (Windows.Media.Ocr)      24 ms/echo   zero bundle      <- primary
-    EasyOCR rec-only (GPU)        154 ms/echo   ~2 GB torch
-    Tesseract (1 spawn, N images) 213 ms/echo   ~10 MB           <- fallback
-    RapidOCR 3.x rec-only         399 ms/echo   ~50 MB
-    PaddleOCR                     crashes       ~1 GB
-
-Two traps worth remembering:
-  * `pytesseract` costs ~154 ms PER CALL, and that is process spawn reloading
-    eng.traineddata, not recognition. Handing Tesseract all N cells in ONE invocation
-    via a file list is 5-6x faster and still returns N separate results.
-  * Engines must run RECOGNITION-ONLY. The cell is already localised, so letting
-    RapidOCR/Paddle run text DETECTION on a 285x68 crop is waste, and it actively fails
-    (RapidOCR went from 2/7 to 7/7 the moment detection was disabled).
-
-NEVER concatenate the cells into one image to save a call. That lets the engine drop a
-line and shift every row below it, which is exactly the drift that
-card.py::reconcile_echo_substat_rows exists to survive. One cell in, one result out.
+Stat names, '%', identity, cost and set come from icons and templates, so OCR covers substat values and tile levels
+Every engine read 5/5 on correct crops, so WinRT leads for speed (24 ms/echo, no bundle) with Tesseract as fallback
+Tesseract takes all cells in one process via a file list, since each pytesseract call spends ~154 ms on spawn
+Engines run recognition-only since cells are already localised, and RapidOCR with detection read 2/7
+Never concatenate cells into one image, since the engine can drop a line and shift every row below it
 """
 from __future__ import annotations
 
@@ -46,10 +20,10 @@ NUM_RX = re.compile(r"\d+(?:[.,]\d+)?")
 
 
 def _prep(img: np.ndarray, scale: int = 2) -> np.ndarray:
-    """Upscale, grayscale, Otsu. `scale` matters more than it looks: a 285x68 substat
-    value cell reads fine at 2x, but a 43x59 level-digit crop needs 4x before Tesseract
-    will commit to it (89/90 -> 90/90). At 4x every page-segmentation mode agrees, so it
-    is a plateau rather than a tuned constant."""
+    """Upscale, grayscale and Otsu
+
+    Value cells read fine at 2x but level-digit crops need 4x (89/90 at 2x), a plateau where every psm agrees
+    """
     up = cv2.resize(img, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
     gray = cv2.cvtColor(up, cv2.COLOR_BGR2GRAY)
     _, th = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)
@@ -57,7 +31,7 @@ def _prep(img: np.ndarray, scale: int = 2) -> np.ndarray:
 
 
 def parse_number(text: str) -> float | None:
-    """Digits only. The '%' is never read - the stat family already implies it."""
+    """Digits only, since the stat family already implies the '%'"""
     m = NUM_RX.search(text.replace(" ", "").replace("%", ""))
     if not m:
         return None
@@ -68,7 +42,7 @@ def parse_number(text: str) -> float | None:
 
 
 class Reader:
-    """Reads numbers from a batch of value cells. One result per cell, always."""
+    """Reads numbers from a batch of cells, always one result per cell"""
 
     def __init__(self, upscale: int = 2) -> None:
         self.upscale = upscale
@@ -78,11 +52,7 @@ class Reader:
 
 
 class WinRTReader(Reader):
-    """Windows.Media.Ocr. Built into Windows, zero bundle size, ~5 ms/cell.
-
-    Its usual weakness (weak CJK without language packs) is irrelevant here: we only
-    ever read digits.
-    """
+    """Windows.Media.Ocr, built into Windows with zero bundle size at ~5 ms/cell"""
 
     name = "winrt"
 
@@ -108,11 +78,9 @@ class WinRTReader(Reader):
 
 
 class TesseractReader(Reader):
-    """Tesseract via ONE process for N cells (file list), N separate results.
+    """Tesseract reading N cells in one process via a file list, returning N separate results
 
-    Inventory Kamera solves the same spawn problem by pooling 8 warm in-process engines
-    through the C API. `tesserocr` would give us that directly but has no Python 3.13
-    wheel, so this is the dependency-free equivalent.
+    Warm in-process engines would skip the spawn, but tesserocr has no Python 3.13 wheel
     """
 
     name = "tesseract"
@@ -144,7 +112,7 @@ class TesseractReader(Reader):
 
 
 def default_reader() -> Reader:
-    """Substat value cells: WinRT if available (24 ms/echo, zero bundle), else Tesseract."""
+    """Substat value cells: WinRT if available (24 ms/echo, zero bundle), else Tesseract"""
     try:
         return WinRTReader()
     except Exception:
@@ -152,15 +120,9 @@ def default_reader() -> Reader:
 
 
 def level_reader() -> Reader:
-    """Tile level pills. ALWAYS Tesseract, and that is measured, not a preference.
+    """Tile level pills, always Tesseract at 4x
 
-    WinRT scores 5/5 on the panel's 285x68 value cells and 0/18 on the level pill's
-    ~57x41 digit crop, at 2x and at 4x upscale alike -- it returns no lines at all rather
-    than returning them wrongly. Windows.Media.Ocr wants more textual context than one or
-    two digits before it will commit. Tesseract reads the same crops 18/18.
-
-    So the engine choice is per-FIELD, not global, and this function exists to keep a
-    caller from reaching for default_reader() here and silently getting zero levels back.
-    A scan with no levels reads as "nothing is worth clicking".
+    WinRT returns no lines on the one- or two-digit pill at 2x or 4x (0/18) while Tesseract reads 18/18
+    default_reader here would silently return no levels, which reads as nothing worth clicking
     """
     return TesseractReader(upscale=4)

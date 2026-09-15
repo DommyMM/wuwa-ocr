@@ -27,14 +27,12 @@ try:
     from dotenv import load_dotenv
     load_dotenv()
 except ImportError:
-    pass  # python-dotenv not installed; rely on env vars being set externally
+    pass  # python-dotenv not installed, so env vars must be set externally
 
 IS_RAILWAY = bool(os.getenv("RAILWAY_ENVIRONMENT_NAME"))
 
-# One worker per heavyweight region: 5 echoes + forte. Those six fill the pool
-# in a single parallel wave; the remaining light regions (character/weapon SIFT,
-# uid Tesseract, sequences pixel-count) clear in one following wave regardless of
-# worker count, so 6 should be fine. Raise if we get more than one upload per second.
+# One worker per heavy region (5 echoes and forte) so those six run in one wave and light regions follow
+# Raise if uploads regularly exceed one per second
 MAX_WORKERS = int(os.getenv("OCR_WORKERS", "6"))
 OPENCV_THREADS = int(os.getenv("OCR_OPENCV_THREADS", "1"))
 PROCESS_TIMEOUT = int(os.getenv("OCR_TIMEOUT", "60"))
@@ -48,15 +46,11 @@ active_storage_tasks: set[asyncio.Task[StorageResult]] = set()
 consecutive_500s = 0
 MAX_CONSECUTIVE_500S = 3
 
-# Non-English detection thresholds (see card.echo_language_signal). A card is flagged
-# non-English when its echo panels carry real values (so it IS a build card, not a wrong
-# screenshot/odd layout) yet too few substat names match the English vocabulary.
+# Non-English thresholds (see card.echo_language_signal): enough real values to be a build card, just not in English
 NONENGLISH_NAME_MATCH_FLOOR = float(os.getenv("OCR_NONENGLISH_NAME_FLOOR", "0.35"))
 NONENGLISH_MIN_VALUES = int(os.getenv("OCR_NONENGLISH_MIN_VALUES", "15"))
 
-# Phase B observe: only the elevated tail is worth a log line. Genuine cards sit
-# ~1.6 and the labelled pastes start at 3.2; 2.5 captures the suspicious tail
-# (~0.05% of the corpus) without logging every clean upload.
+# Echo-bed score worth logging: genuine cards sit ~1.6, labelled pastes start at 3.2
 BED_OBSERVE_SCORE_FLOOR = float(os.getenv("OCR_BED_OBSERVE_FLOOR", "2.5"))
 
 # Ensure output is flushed for Railway
@@ -143,10 +137,8 @@ class APIStatus(BaseModel):
 
 
 IMPORT_REGIONS: dict[str, dict[str, float]] = {
-    # x2 0.32 -> 0.38: the LV. pill sits right after the name and the longest names
-    # ("Yangyang: Xuanling") push it past 0.32, clipping the number out of the crop.
-    # Nothing else renders in 0.32-0.38 (the forte panel starts at 0.4057). card.py's
-    # CHAR_* sub-boxes are rescaled by 0.32/0.38 so their pixels are unchanged.
+    # x2 reaches 0.38 so the LV. pill after the longest names ("Yangyang: Xuanling") stays in crop
+    # card.py's CHAR_* sub-boxes are fractions of this width
     "character": {"x1": 0.0000, "x2": 0.3800, "y1": 0.0000, "y2": 0.5500},
     "watermark": {"x1": 0.0073, "x2": 0.1304, "y1": 0.0741, "y2": 0.1370},
     "forte": {"x1": 0.4057, "x2": 0.7422, "y1": 0.0222, "y2": 0.5917},
@@ -161,7 +153,7 @@ IMPORT_REGIONS: dict[str, dict[str, float]] = {
 
 REGION_KEYS = tuple(IMPORT_REGIONS.keys())
 
-# Order for the consolidated per-request server-side log block. Region events stil stream to the client in completion order 
+# Region order for the per-request server log, while events still stream to the client in completion order
 LOG_ORDER = ("character", "watermark", "weapon", "forte", "sequences", "echo1", "echo2", "echo3", "echo4", "echo5")
 
 @asynccontextmanager
@@ -175,10 +167,8 @@ async def lifespan(app: FastAPI):
         f"r2_upload={R2_SETTINGS.enabled} r2_timeout={R2_SETTINGS.timeout_seconds}s",
         flush=True,
     )
-    # Warm every worker in the background: each worker process imports its modules
-    # and loads the SIFT templates on its first task (~3-7s cold). Doing it at boot moves
-    # that cost off the first user's request. Backgrounded (not awaited) so it
-    # never blocks the port bind / Railway healthcheck, and a failure is non-fatal.
+    # Warm every worker in the background so the first request skips the ~3-7s module and SIFT template load
+    # Not awaited so a failure is non-fatal and doesn't block the port bind or healthcheck
     loop = asyncio.get_running_loop()
 
     async def _warm():
@@ -204,7 +194,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 def worker_init():
-    """Ensure worker output is flushed."""
+    """Ensure worker output is flushed"""
     if hasattr(sys.stdout, "reconfigure"):
         cast(Any, sys.stdout).reconfigure(line_buffering=True)
     if hasattr(sys.stderr, "reconfigure"):
@@ -243,20 +233,10 @@ def process_region_task(task: tuple[str, np.ndarray]) -> dict[str, Any]:
         }
 
 def warm_worker(hold: float = 2.0) -> bool:
-    """Force a worker to import its modules and load the SIFT templates.
+    """Load a worker's modules and SIFT templates at boot instead of on the first request
 
-    Models load lazily on a worker's first real task; running a throwaway
-    recognition here at boot pays that import cost off the user path. Random
-    noise (not black) so SIFT finds keypoints and the echo sweep + Tesseract paths
-    all execute. Errors are swallowed: the goal is to warm the
-    process, not to produce a result.
-
-    The trailing sleep holds the worker busy so that when MAX_WORKERS of these
-    run concurrently the pool is forced to spawn *every* worker (each paying its
-    model load) instead of reusing one already-warm worker for all the warm
-    tasks. Without it the pool drains the quick tasks on one or two workers and
-    the rest stay cold, so the first real request still eats a ~3s cold load
-    (observed in prod as character:3064ms).
+    Random noise so SIFT finds keypoints and the echo and Tesseract paths all run
+    Trailing sleep keeps the worker busy so the pool spawns all MAX_WORKERS instead of reusing a warm one
     """
     rng = np.random.default_rng(0)
     img = rng.integers(0, 255, (400, 360, 3), dtype=np.uint8)
@@ -319,25 +299,21 @@ async def rate_limit_middleware(request: Request, call_next):
     response = await call_next(request)
     return response
 
-# Multipart framing (boundaries, the part header) around one 5 MiB image.
+# Multipart framing (boundaries, part header) around one 5 MiB image
 MAX_MULTIPART_BYTES = MAX_IMAGE_BYTES + 64 * 1024
 
-
 def reject_oversized_declaration(request: Request, limit: int) -> None:
-    """Turn away an upload that declares up front that it is too large."""
-
+    """Turn away an upload that declares up front it is too large"""
     declared = request.headers.get("content-length", "")
     if declared.isdigit() and int(declared) > limit:
         raise HTTPException(status_code=413, detail="Image exceeds the 5 MiB limit.")
 
 
 async def read_bounded_body(request: Request, limit: int) -> bytes:
-    """Read the raw body, stopping the moment it passes the limit.
+    """Read the raw body, stopping as soon as it passes the limit
 
-    request.body() buffers the whole thing and leaves the caller to check the
-    length afterwards, which makes the limit a report rather than a cap.
+    request.body() buffers everything before any length check, making the limit a report rather than a cap
     """
-
     chunks: list[bytes] = []
     total = 0
     async for chunk in request.stream():
@@ -388,8 +364,7 @@ def ndjson_event(payload: dict[str, Any]) -> str:
 
 
 def new_scan_id() -> str:
-    """Return the one canonical cross-service correlation identifier format."""
-
+    """Cross-service correlation id for one scan"""
     return str(uuid.uuid4())
 
 
@@ -398,8 +373,7 @@ def start_storage_task(
     image_identity: ImageIdentity,
     scan_id: str,
 ) -> asyncio.Task[StorageResult]:
-    """Start and retain storage even if recognition returns an early error."""
-
+    """Start and retain storage even if recognition returns an early error"""
     task = asyncio.create_task(
         r2_image_store.store(image_bytes, image_identity),
         name=f"r2-store-{scan_id}",
@@ -414,14 +388,11 @@ def log_deferred_storage_result(
     image_identity: ImageIdentity,
     task: asyncio.Task[StorageResult],
 ) -> None:
-    """Log the eventual result of an upload that outlived OCR recognition."""
-
+    """Log the eventual result of an upload that outlived OCR recognition"""
     try:
         result = task.result()
     except asyncio.CancelledError:
-        # A cancelled retained upload is the one case that silently strands a
-        # build: the response already handed out the optimistic key, so the row
-        # points at an object nobody will ever write. Never swallow it.
+        # A cancelled upload strands a build whose key was already handed out, so always log it
         log_event(
             "ocr_image_storage_completed",
             "ocr_image_storage_completed r2=cancelled",
@@ -467,11 +438,10 @@ def slow_region_summary(timings: dict[str, Any]) -> str:
     )
 
 def detect_unsupported_language(analysis: dict[str, Any]) -> bool:
-    """Aggregate card.py's per-echo langSignal into a card-level non-English verdict.
+    """Aggregate card.py's per-echo langSignal into a card-level non-English verdict
 
-    Non-English = a real build card (>= NONENGLISH_MIN_VALUES readable values across the
-    echoes) whose substat NAMES match the English vocabulary below NONENGLISH_NAME_MATCH_FLOOR.
-    The value gate keeps wrong screenshots and non-standard layouts from being mislabeled.
+    Needs NONENGLISH_MIN_VALUES readable values so wrong screenshots and odd layouts aren't mislabeled
+    Non-English when the English name match rate falls below NONENGLISH_NAME_MATCH_FLOOR
     """
     good = total = values = 0
     for region in ("echo1", "echo2", "echo3", "echo4", "echo5"):
@@ -491,8 +461,7 @@ def log_import_completed(
     hash_prefix: str,
     storage_result: StorageResult,
 ) -> None:
-    """Emit ordered recognition diagnostics and one structured completion event."""
-
+    """Emit ordered recognition diagnostics and one structured completion event"""
     timings = result.get("timings", {})
     lines = [
         f"  {region}: {entry}"
@@ -558,9 +527,7 @@ async def stream_full_import_image(
         return
     hashed_at = time.perf_counter()
 
-    # The dimension gate runs on the header, before the decode: cv2.imdecode
-    # allocates for whatever the header declares, so checking a decoded image's
-    # shape is a check that arrives after the memory is already spent.
+    # Dimensions gated on header before decoding because cv2.imdecode allocates whatever the header declares
     integrity = validate_header_dimensions(image_bytes)
 
     decode_started = time.perf_counter()
@@ -593,9 +560,7 @@ async def stream_full_import_image(
             hash_prefix=image_identity.hash_prefix,
             integrity=integrity,
         )
-        # The client gets the message only. The full integrity vector (chrome
-        # score, reasons) stays server-side: handing a forger a live score is a
-        # tuning oracle.
+        # Client gets the message only, since a live integrity score gives cheaters a reference
         yield ndjson_event({
             "type": "error",
             "success": False,
@@ -628,9 +593,7 @@ async def stream_full_import_image(
         return await loop.run_in_executor(executor, process_region_task, (region, crops[region]))
 
     storage_enabled = r2_image_store.settings.enabled
-    # An accepted image starts storage concurrently with recognition. Deferring
-    # it until after OCR guaranteed a `pending` result at response time, which
-    # hands the frontend an optimistic key for an upload that has barely started.
+    # Storage starts alongside recognition so the upload is usually done by the time the response hands out its key
     storage_started_at = time.perf_counter()
     storage_task = start_storage_task(image_bytes, image_identity, scan_id)
     tasks = [asyncio.create_task(run_region(region)) for region in REGION_KEYS]
@@ -705,11 +668,7 @@ async def stream_full_import_image(
             progress[region] = "error"
             region_errors[region] = "Region recognition did not complete"
 
-    # Phase B: echo-bed integrity, OBSERVE-ONLY. A pasted stat cell breaks the
-    # panel's substat-bed gradient; this scores that without rejecting. It cannot
-    # gate yet because wrapped substat names ("Resonance Liberation DMG Bonus")
-    # still produce false positives. Log only the elevated tail so the signal can
-    # be hardened against real traffic without flooding the logs.
+    # Echo-bed integrity logged but not enforced: pasted stat cells break the gradient, but so do wrapped names
     bed = echo_bed_score(image)
     if bed["score"] >= BED_OBSERVE_SCORE_FLOOR:
         log_event(
@@ -722,13 +681,9 @@ async def stream_full_import_image(
             chrome_score=integrity.get("chromeScore"),
         )
 
-    # The object name is already definitive because it is the SHA-256 of the
-    # exact request bytes. Do not hold completed OCR behind a stalled R2 call:
-    # return the optimistic sourceImageKey and retain the upload in the process.
-    # trainingImageKey remains confirmation-only for consumers that must know
-    # the object exists (notably issue reports).
-    # Give an already-completing storage coroutine one non-blocking scheduler
-    # turn so normal fast uploads retain the confirmed-key response shape.
+    # Key is the SHA-256 of the request bytes, so OCR returns it without waiting on a stalled R2 upload
+    # trainingImageKey stays confirmation-only for consumers that need the object to exist (issue reports)
+    # One scheduler turn lets an already-finishing upload return its confirmed key
     await asyncio.sleep(0)
     if storage_task.done():
         storage_result = await storage_task
@@ -856,7 +811,7 @@ async def health_check():
 
 @app.get("/ocr-results")
 async def ocr_results():
-    """Serve the batch OCR results JSON for frontend bulk submission."""
+    """Serve the batch OCR results JSON for frontend bulk submission"""
     results_path = Path(__file__).parent.parent / "ocr_results.json"
     if not results_path.exists():
         return JSONResponse(status_code=404, content={"error": "ocr_results.json not found — run batch_ocr.py first"})

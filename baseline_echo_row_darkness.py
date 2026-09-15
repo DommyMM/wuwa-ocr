@@ -1,10 +1,6 @@
-"""
-baseline_echo_row_darkness.py — scan local build-card images for dark row runs.
+"""Scan local build-card images for unusually dark substat rows in echo panels 3-5
 
-This is a targeted follow-up to forensics_echo_integrity.py. It measures fixed
-substat-row regions in each echo panel and reports images where panels 3-5 have
-unusually large near-black rectangular runs. In the confirmed edited sample,
-this was the strongest low-false-positive signal.
+Follow-up to forensics_echo_integrity.py for near-black rows, its strongest low-false-positive signal on the confirmed edit
 
 Usage:
   py baseline_echo_row_darkness.py ../r2-backup --suspect <image>.jpg

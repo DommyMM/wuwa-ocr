@@ -1,4 +1,4 @@
-"""Uniform wrappers around every local OCR engine we're evaluating.
+"""Uniform wrappers around every local OCR engine under evaluation
 
 Each engine exposes the same contract:
 
@@ -6,12 +6,8 @@ Each engine exposes the same contract:
     Engine.load()  -> None            (cold-start cost lives here)
     Engine.read(img_bgr) -> list[str] (text lines, top-to-bottom)
 
-An engine that isn't installed / can't initialise reports itself unavailable
-with a reason instead of raising, so the bench runs on whatever is present.
-
-Deliberately excluded: Surya and the VLM-class readers (GOT-OCR, dots.ocr,
-olmOCR). They are 650M-7B params to read a 6-digit number, and they'd contend
-with the game for the GPU. Wrong tool.
+An engine that can't load reports itself unavailable with a reason, so the bench runs on whatever is installed
+Surya and VLM readers (GOT-OCR, dots.ocr, olmOCR) are left out, at 650M-7B params and contending with the game for GPU
 """
 from __future__ import annotations
 
@@ -33,13 +29,9 @@ class Engine:
         raise NotImplementedError
 
     def read_batch(self, imgs: list[np.ndarray]) -> list[list[str]]:
-        """Read all of one echo's value cells. This is the real per-echo unit.
+        """Read all of one echo's value cells, the real per-echo unit, one call per cell by default
 
-        Default: one call per cell. Tesseract overrides it, because its per-call
-        cost is ~all process spawn and it can take N images in one invocation
-        while still returning N separate results (so row alignment is preserved -
-        we never batch cells into a single image, which is what lets an engine
-        drop a line and shift every row below it).
+        Cells are never stitched into one image, since an engine can then drop a line and shift every row below it
         """
         return [self.read(i) for i in imgs]
 
@@ -51,12 +43,8 @@ class Engine:
             return False, f"{type(exc).__name__}: {exc}"
 
 
-# --- Tesseract ---------------------------------------------------------------
-
 class Tesseract(Engine):
-    """psm 6 = uniform block of text. The values strip needs it (psm 3 drops
-    short integers like 470 / 2280); see docs/echo-substat-tesseract-only.md.
-    """
+    """Defaults to psm 6 (uniform block), since psm 3 drops short integers like 470 on a values strip"""
     langs = "100+ (all 9 WuWa langs); fine-tunable on the shipped game fonts"
 
     def __init__(self, psm: int = 6, whitelist: str | None = None, lang: str = "eng"):
@@ -81,16 +69,11 @@ class Tesseract(Engine):
         return [l.strip() for l in txt.splitlines() if l.strip()]
 
     def read_batch(self, imgs: list[np.ndarray]) -> list[list[str]]:
-        """One tesseract process for all N cells, N separate results.
+        """One Tesseract process for all N cells, returning N separate results
 
-        pytesseract spawns a process per call and reloads eng.traineddata each
-        time; that spawn is ~all of the measured 184 ms, not recognition.
-        Tesseract's CLI accepts a file LIST and emits one form-feed-separated page
-        per image, so we pay spawn once and keep per-cell alignment.
-
-        Inventory Kamera solves the same problem by pooling 8 warm in-process
-        Tesseract engines via the C API. tesserocr would give us that directly,
-        but it has no Python 3.13 wheel, so this is the dependency-free equivalent.
+        pytesseract spawns a process that reloads eng.traineddata per call, which is nearly all of its per-call cost
+        A file list gives one form-feed-separated page per image, so spawn is paid once and cells stay aligned
+        tesserocr would keep engines warm in-process but has no Python 3.13 wheel
         """
         import subprocess
         import tempfile
@@ -121,14 +104,10 @@ class Tesseract(Engine):
         return results
 
 
-# --- RapidOCR (PP-OCR models on ONNX) ----------------------------------------
-
 class RapidOCRv1(Engine):
-    """rapidocr-onnxruntime 1.x - what backend/data.py pins today.
+    """rapidocr-onnxruntime 1.x, PP-OCR models on ONNX
 
-    rec_only: the icon already localised the cell, so running the DETECTION model
-    on a 285x68 crop is pure waste - and it actively hurts, because the detector
-    fails to find a box in a tiny crop and returns nothing.
+    rec_only skips detection, since the icon already localised the cell and the detector finds no box in a tiny crop
     """
     langs = "en/ch (per-model); PP-OCRv4 era"
 
@@ -148,7 +127,7 @@ class RapidOCRv1(Engine):
 
 
 class RapidOCRv3(Engine):
-    """rapidocr 3.x - current line, runs PP-OCRv5/v6 incl. Thai."""
+    """rapidocr 3.x, running PP-OCRv5/v6 including Thai"""
     langs = "~100 incl. th/ja/ko/ch_tra (PP-OCRv5/v6)"
 
     def __init__(self, rec_only: bool = True):
@@ -166,8 +145,6 @@ class RapidOCRv3(Engine):
         txts = getattr(res, "txts", None)
         return [t.strip() for t in txts] if txts else []
 
-
-# --- PaddleOCR (same models, heavier runtime) --------------------------------
 
 class Paddle(Engine):
     name = "paddleocr"
@@ -192,8 +169,6 @@ class Paddle(Engine):
         return out
 
 
-# --- EasyOCR -----------------------------------------------------------------
-
 class Easy(Engine):
     langs = "80+ incl. th/ja/ko/ch_tra"
     note = "PyTorch; ~2GB+ in an exe"
@@ -213,13 +188,12 @@ class Easy(Engine):
             return [t.strip() for _, t, _ in self._r.readtext(img)]
         import cv2
         grey = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        # horizontal_list=None + free_list=None => treat the whole crop as one box
+        # horizontal_list and free_list of None treat the whole crop as one box
         return [t.strip() for _, t, _ in self._r.recognize(grey, None, None)]
 
 
-# --- OneOCR (Windows Snipping Tool engine) -----------------------------------
-
 class OneOCR(Engine):
+    """Windows Snipping Tool's OCR engine"""
     name = "oneocr"
     langs = "CJK-strong; exact list undocumented"
     note = "needs oneocr.dll + .onemodel lifted from Windows ScreenSketch"
@@ -234,9 +208,8 @@ class OneOCR(Engine):
         return [l["text"].strip() for l in res.get("lines", [])]
 
 
-# --- WinRT OCR (built into Windows) ------------------------------------------
-
 class WinRT(Engine):
+    """Windows.Media.Ocr, built into Windows"""
     name = "winrt"
     langs = "depends on installed Windows language packs (~25)"
     note = "zero bundle size"

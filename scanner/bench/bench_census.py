@@ -1,26 +1,11 @@
-"""Look-ahead census: identify every tile in the grid WITHOUT clicking anything.
+"""Look-ahead census: identify every tile in the grid without clicking
 
     py bench/bench_census.py
 
-If this works, identity + set + cost + level all come from the grid, and the click is
-only ever needed for substats. That is the whole scan strategy: census first, then
-click only what is worth clicking.
-
-Ground truth is all 24 tiles of samples/bag_4k_01.jpg, hand-labelled.
-
-Notes on the tricky classes:
-  * Phantom echoes share the BASE echo's canonical id (there is no "Phantom:" entry in
-    Echoes.json). At tile scale the Phantom art is indistinguishable from the base, so
-    matching a Phantom tile to its base id is the CORRECT identity answer. The phantom
-    FLAG is a separate, cosmetic problem and needs phantom icon templates we don't have.
-  * Nightmare echoes have their own ids and their own templates, so they are a normal
-    identity problem here.
-  * Reminiscence is just part of the official name, not a prefix family.
-
-Matching is on SOBEL GRADIENT MAGNITUDE, not grayscale. Grayscale is background-
-sensitive and mis-identified Frostbite Coleoid (light tile background vs dark template
-background); a smooth gradient background has near-zero gradient while the creature has
-strong edges, so gradient matching is background-invariant.
+Identity, set, cost and level come from the grid, so a click is only needed for substats
+Ground truth is all 24 tiles of samples/bag_4k_01.jpg, hand-labelled
+Phantoms share their base echo's id, so a Phantom tile matching its base id is correct
+Nightmare echoes have their own ids and templates, and Reminiscence is part of the name, not a prefix family
 """
 from __future__ import annotations
 
@@ -42,7 +27,7 @@ SIZE = 128
 INNER = 0.85          # centre crop before matching (best margin in the rep sweep)
 
 P = "PHANTOM"
-# (id, note) for every tile of bag_4k_01.jpg, row-major.
+# (id, note) for every tile of bag_4k_01.jpg, row-major
 GOLD = [
     # row 0
     ("60002185", ""), ("60002185", ""), ("60001915", P), ("60001155", "Nightmare"),
@@ -53,8 +38,7 @@ GOLD = [
     # row 2
     ("60000595", ""), ("60002015", "Nightmare"), ("60002015", "Nightmare"),
     ("60001925", ""), ("60001895", ""), ("60001165", ""),
-    # row 3 - footer occluded by the sort bar, so cost/level are NOT readable here,
-    # but the ART is fully visible, so identity still works.
+    # row 3 footer is under the sort bar, so cost and level are unreadable but the art still identifies
     ("60000605", P), ("60000605", ""), ("60001925", "?"), ("60001905", P),
     ("60001895", ""), ("60001605", ""),
 ]
@@ -95,17 +79,14 @@ def load_templates() -> dict[str, np.ndarray]:
 
 
 def main() -> None:
-    # Exercise the SHIPPED path (tile.census), not a copy of it: cost read -> identity
-    # (gradient + hue, phantom art as a same-id variant) -> family-scoped sonata badge.
+    # Exercise the shipped tile.census rather than a copy: cost, identity by gradient and hue, family-scoped badge
     from wuwa_scanner import tile
     from wuwa_scanner.identify import _load
 
     img = cv2.imdecode(np.fromfile("samples/bag_4k_01.jpg", dtype=np.uint8), cv2.IMREAD_COLOR)
     lat = grid.detect_lattice(img)
 
-    # Load templates BEFORE timing. It costs ~320 ms once, and folding that into the
-    # per-tile average inflated it 6x (2.5 -> 16 ms/tile). The scanner keeps the
-    # templates warm for the whole scan, so the one-time cost is not a per-echo cost.
+    # Load templates before timing, since the scanner loads them once (~320 ms) and they'd inflate the per-tile average
     t0 = time.perf_counter()
     _load()
     print(f"template load (one-time): {(time.perf_counter() - t0) * 1000:.0f} ms")
@@ -118,7 +99,7 @@ def main() -> None:
     t_all = 0.0
     for i, (gid, note) in enumerate(GOLD):
         r, c = divmod(i, 6)
-        # Row 3's footer is occluded, so it is not in row_tops; extrapolate for the bench.
+        # Row 3's footer is occluded so it's missing from row_tops, extrapolate it from the pitch
         y0 = lat["row_tops"][0] + r * lat["row_pitch"]
         x0 = lat["col_x"][c]
         box = (x0, y0, x0 + L.TILE_W, y0 + L.TILE_H)
@@ -145,10 +126,8 @@ def main() -> None:
     print("-" * 112)
     print(f"identity: {ok}/{n}   ({by_hue} near-ties resolved by hue)")
     print(f"sonata:   {n_set}/{n} resolved")
-    # The cost read only PREFILTERS and abstains rather than guess, so an abstain costs a
-    # full template sweep and nothing else. It used to abstain on 2 of 24 here; since the
-    # glyph-mask rewrite it reads all 24. Correctness across all three costs is measured
-    # by bench_fields.py, not here -- this page is entirely cost 4.
+    # Cost only prefilters and abstains rather than guess, so an abstain costs a full template sweep
+    # Cost correctness is measured in bench_fields.py, since this page is entirely cost 4
     print(f"cost:     {n_cost}/{n} read ({n - n_cost} abstained -> full template sweep)")
     print(f"{t_all / n * 1000:.1f} ms per tile  ->  {t_all / n * 1000 * 24:.0f} ms per 24-tile page")
 

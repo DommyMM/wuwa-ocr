@@ -1,9 +1,6 @@
-"""
-forensics_echo_integrity.py — exploratory echo-panel integrity checks.
+"""Exploratory echo-panel integrity checks that make no moderation decisions
 
-This does not make moderation decisions. It extracts the five frontend echo
-crops, computes per-panel consistency metrics, and writes debug artifacts that
-make likely splice/edit regions easier to inspect.
+Crops the five echo panels, computes per-panel consistency metrics and writes debug images that make edits easy to spot
 
 Usage:
   py forensics_echo_integrity.py suspect.jpg --reference clean.jpeg
@@ -84,8 +81,7 @@ def rel_crop(img: np.ndarray, x1: float, y1: float, x2: float, y2: float) -> np.
 
 def mask_gold(img: np.ndarray) -> np.ndarray:
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-    # Gold UI ranges from muted beige to saturated yellow. Keep S threshold low
-    # enough for compressed text but high enough to avoid white echo art.
+    # Gold UI spans muted beige to saturated yellow, so the S floor admits compressed text but not white echo art
     return cv2.inRange(hsv, np.array([10, 25, 55]), np.array([45, 255, 255]))
 
 
@@ -269,8 +265,7 @@ def compare_panel_geometry(out_dir: Path, suspect_panels: dict[str, np.ndarray],
     for name, panel in suspect_panels.items():
         ref = reference_panels[name]
         ref = cv2.resize(ref, (panel.shape[1], panel.shape[0]))
-        # Low-frequency UI/background comparison: blur heavily to suppress text
-        # and echo identity differences, then compare color/lighting structure.
+        # Heavy blur suppresses text and echo identity, leaving the color and lighting structure to compare
         a = cv2.GaussianBlur(panel, (0, 0), 9)
         b = cv2.GaussianBlur(ref, (0, 0), 9)
         diff = cv2.absdiff(a, b)

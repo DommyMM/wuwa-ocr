@@ -1,16 +1,9 @@
-"""End-to-end validation on both labelled 4K echoes.
+"""End-to-end stat icon and substat value check on the three labelled 4K echoes
 
     py bench/validate_e2e.py
 
-Region comes from the hand-measured panel X (2620..3720 at 4K), with the Y band
-extended PAST any substat wrap. Everything finer self-locates:
-  icon column   -> first ink run in the column projection
-  row centres   -> ink runs within that column
-  row bands     -> centre +/- half the median pitch
-  real rows     -> icon IoU >= floor (rejects the "Echo Skill" heading)
-
-Echo 2 is the important one: it has BOTH a two-line wrap (Resonance Liberation
-DMG Bonus) and a flat DEF - the two cases that broke previous designs.
+Panel X is hand-measured and the Y band runs past any substat wrap, while icon column, rows and value cells self-locate
+Echo 2 holds a two-line wrap with a flat DEF, and echo 3 two consecutive wraps with an ATK% substat
 """
 from __future__ import annotations
 
@@ -34,8 +27,7 @@ STATS_Y = (0.400, 0.790)                 # extended well past any wrap
 VALUE_FRAC = 0.74
 NUM_RX = re.compile(r"\d+(?:[.,]\d+)?")
 
-# (stat, value). Row 0 = main, row 1 = innate base; both DERIVED from cost in the
-# real pipeline (EchoStats.json), never OCR'd. Listed here only to score the icons.
+# (stat, value), rows 0 and 1 are main and innate, derived from cost in the pipeline and listed only to score icons
 GOLD = {
     "bag_4k_01.jpg": [
         ("Crit DMG", 44.0), ("ATK", 150.0),
@@ -47,9 +39,7 @@ GOLD = {
         ("Heavy Attack DMG Bonus", 7.9), ("DEF", 60.0), ("Crit DMG", 12.6),
         ("Resonance Liberation DMG Bonus", 7.1), ("Crit Rate", 6.9),
     ],
-    # Frostbite Coleoid, cost 3. The hardest case we have: TWO consecutive two-line
-    # wraps, an ATK% substat (7.9% - flat ATK's legal set is 30-60, so the disjoint
-    # sets must pick the percent member), and innate ATK 100 (cost 3) not 150 (cost 4).
+    # Frostbite Coleoid, cost 3: two consecutive wraps, ATK% 7.9 against flat ATK's 30-60, and innate ATK 100 not 150
     "bag_4k_03_cost3.jpg": [
         ("Glacio DMG", 30.0), ("ATK", 100.0),
         ("Resonance Skill DMG Bonus", 10.9), ("Resonance Liberation DMG Bonus", 10.1),
@@ -59,7 +49,7 @@ GOLD = {
 
 
 def read_values(cells: list[np.ndarray]) -> list[float | None]:
-    """One tesseract process, N images, N results. Never batch cells into one image."""
+    """One Tesseract process with a result per cell, never one stitched image, which lets a dropped line shift rows"""
     with tempfile.TemporaryDirectory() as td:
         paths = []
         for i, im in enumerate(cells):
@@ -114,10 +104,9 @@ def main() -> None:
 
         for i, (r, num) in enumerate(zip(rows, nums)):
             g_stat, g_val = gold[i] if i < len(gold) else ("?", 0.0)
-            # % is never read: the family + disjoint legal sets decide it.
+            # % is never read, so percent-ness is a first guess by magnitude that the legal sets below settle
             stat = resolve_stat(r["icon"], "%" if num is not None and num < 100 else "")
-            # For HP/ATK/DEF the flat and percent legal sets are disjoint, so the
-            # NUMBER picks the member. Resolve properly against both.
+            # Flat and percent legal sets are disjoint, so the nearest legal value within 2.0 picks the member
             members = [m for m in (stat, stat.rstrip("%") if stat else "") if m]
             chosen, snapped = stat, num
             if num is not None:

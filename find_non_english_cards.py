@@ -1,8 +1,7 @@
-"""Find likely non-English build-card screenshots in a local r2-backup folder.
+"""Find likely non-English build-card screenshots in a local r2-backup folder
 
-This is a fast scout, not the full import parser. By default it OCRs only the
-stat-name strips from the five echo panels, then writes live JSONL checkpoints
-plus final candidate manifests for targeted parser validation.
+Fast scout rather than the full import parser, so by default it OCRs only the five echo panels' stat-name strips
+Writes live JSONL checkpoints and final candidate manifests for validate_non_english_cards.py
 
 Usage:
   py find_non_english_cards.py ../r2-backup

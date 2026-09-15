@@ -1,23 +1,8 @@
-"""Fast, deterministic validity checks for supported KuroBot build cards.
+"""Fast deterministic validity checks for KuroBot build cards
 
-Two independent phases, each keyed on an invariant a legitimate player cannot
-vary. Every past false positive came from keying on something a real player DOES
-vary -- progression (no echoes, no weapon), language, or image quality -- so
-none of that is measured here.
-
-  Phase A -- validate_image_integrity: "is this a KuroBot card at all?"
-    Dimensions, then a template match against the card's fixed chrome (frame,
-    labels, forte pentagon, weapon frame -- everything above the echo band that
-    is identical on every genuine card). Rejects wrong-size images, screenshots,
-    crops, and AI-generated cards. Runs BEFORE OCR, so junk never reaches the
-    worker pool. Blind to progression, language and blur by construction.
-
-  Phase B -- echo_bed_score: "is the echo content authentic?"
-    The substat bed of a genuine panel is a gradient that varies only with x; a
-    pasted stat cell carries its own background level and breaks that. OBSERVE-
-    ONLY: it returns a score for logging and never rejects, because wrapped
-    substat names ("Resonance Liberation DMG Bonus") still produce false
-    positives that must be resolved before it can gate a user.
+Both phases key on invariants a player can't vary, since past false positives came from progression, language or quality
+Phase A gates dimensions and the fixed chrome before OCR, rejecting screenshots, crops and AI-generated cards
+Phase B scores pasted stat cells for logging only, since wrapped substat names still produce false positives
 """
 
 from __future__ import annotations
@@ -40,42 +25,30 @@ WRONG_SIZE_MESSAGE = (
 
 _ASSETS = Path(__file__).resolve().parent / "assets"
 
-# --- Phase A: chrome template -------------------------------------------------
-
 CHROME_WIDTH, CHROME_HEIGHT = 480, 270
 CHROME_BLUR_SIGMA = 1.6
-# The reference mask covers only invariant chrome. The weapon panel is EXCLUDED:
-# the weapon is a player choice, and a distinctive one (e.g. a bright glowing
-# weapon) deviates from the average-weapon blur enough to flag a clean card --
-# the same failure the echo band caused, one region over.
-# With that fixed: genuine English cards score <= 2.4, AI-generated fakes and
-# non-cards score >= 4.0. 3.5 sits in the empty gap (~1.5x headroom over the
-# worst genuine English card) and still catches every fake in the r2-backup
-# corpus. Non-English cards (rejected downstream with a language message) may sit
-# near this and pass the gate, which is intended -- they get the correct error,
-# not "not a build card". Env-overridable for threshold tuning.
+# Reference mask covers invariant chrome only, without the weapon panel since a distinctive weapon flagged clean cards
+# Genuine English cards score <= 2.4, AI fakes and non-cards >= 4.0
+# Non-English cards can score near this and pass, so they get the language error downstream instead
 CHROME_REJECT_SCORE = float(os.getenv("OCR_CHROME_REJECT", "3.5"))
 
 try:
     _CHROME_MEDIAN: np.ndarray | None = np.load(_ASSETS / "chrome_ref_median.npy")
     _CHROME_MASK: np.ndarray | None = np.load(_ASSETS / "chrome_ref_mask.npy")
 except OSError as exc:  # pragma: no cover - asset packaging failure
-    # Fail OPEN: a missing reference must not crash the OCR server or reject every
-    # upload. Phase A simply does nothing until the asset is restored.
+    # Fail open so a missing reference skips the chrome check instead of crashing the server or rejecting every upload
     print(f"image_integrity: chrome reference unavailable, Phase A disabled ({exc})", flush=True)
     _CHROME_MEDIAN = None
     _CHROME_MASK = None
 
 
 def chrome_score(image: np.ndarray) -> float:
-    """Masked mean absolute deviation of the card chrome from the reference.
+    """Masked mean absolute deviation of the card chrome from the reference
 
-    Low for genuine cards, high for anything whose fixed frame does not match.
-    Per-card median normalization makes it blind to a global tint/exposure shift;
-    the shared low-pass makes a soft scan and a sharp one converge while a wrong
-    layout does not. Returns 0.0 (accept) if the reference failed to load.
+    Per-card median normalization ignores a global tint or exposure shift
+    Shared blur lets soft and sharp scans converge while a wrong layout still doesn't
+    Returns 0.0 (accept) when the reference failed to load
     """
-
     if _CHROME_MEDIAN is None or _CHROME_MASK is None:
         return 0.0
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
@@ -88,8 +61,6 @@ def chrome_score(image: np.ndarray) -> float:
     return float(np.mean(np.abs(deviation)[_CHROME_MASK]))
 
 
-# --- Phase B: echo bed integrity (observe-only) -------------------------------
-
 _BED_PANELS_X = (
     (0.0125, 0.2042),
     (0.2057, 0.3974),
@@ -97,19 +68,15 @@ _BED_PANELS_X = (
     (0.5969, 0.7891),
     (0.7911, 0.9833),
 )
-# Substat rows only: below the main stat, ABOVE the panel's gold frame edge.
-# Including the frame put a bright bar at the bottom of every card and swamped
-# the whole measurement.
+# Substat rows only, stopping above the gold frame edge since its bright bar swamped the measurement
 _BED_BAND_Y = (0.8150, 0.9550)
 _BED_WIDTH, _BED_HEIGHT = 320, 200
-# Wide horizontal open erases text (narrow, gapped) and keeps a pasted fill
-# (wide, solid). 121px chosen against the corpus; see docs.
+# Wide horizontal open erases narrow gapped text but keeps a wide solid pasted fill, width tuned on the corpus
 _BED_KERNEL = cv2.getStructuringElement(cv2.MORPH_RECT, (121, 3))
 
 
 def _percentile_bounds(gray: np.ndarray) -> tuple[int, int]:
-    """Return 1st/99th percentile bounds without sorting every pixel."""
-
+    """1st/99th percentile gray levels from a histogram, without sorting every pixel"""
     histogram = cv2.calcHist([gray], [0], None, [256], [0, 256]).ravel()
     cumulative = np.cumsum(histogram)
     total = float(cumulative[-1])
@@ -119,15 +86,11 @@ def _percentile_bounds(gray: np.ndarray) -> tuple[int, int]:
 
 
 def echo_bed_score(image: np.ndarray) -> dict[str, Any]:
-    """Per-panel bed-step score for the five echo substat beds.
+    """Worst substat-bed row step per echo panel, as a percent of the image's dynamic range
 
-    For each panel: open away the glyphs, take the column-wise expected gradient
-    g(x) = median over y, and measure the worst row residual, normalized by the
-    image dynamic range so exposure does not matter. A pasted cell shows up as a
-    row that sits well above its panel's own gradient. Returns the max over
-    panels plus the per-panel breakdown for localization.
+    Glyphs are opened away and each column's median is the expected gradient, so a pasted cell is a row sitting above it
+    Returns the max over panels plus the per-panel scores for localization
     """
-
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     height, width = gray.shape[:2]
     low, high = _percentile_bounds(gray)
@@ -150,9 +113,6 @@ def echo_bed_score(image: np.ndarray) -> dict[str, Any]:
         panels.append(float(np.max(row_residual)) / dynamic_range * 100.0)
 
     return {"score": max(panels) if panels else 0.0, "panels": panels}
-
-
-# --- result plumbing ----------------------------------------------------------
 
 
 def _result(
@@ -178,22 +138,17 @@ def _result(
     }
 
 
-# --- Phase A, before the decode -----------------------------------------------
-
 _JPEG_MAGIC = b"\xff\xd8\xff"
 _PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
-# Frame headers carry the dimensions. The rest of the 0xC0-0xCF block does not:
-# DHT (C4), JPG (C8) and DAC (CC) are ordinary segments.
+# Frame headers carry the dimensions, but DHT (C4), JPG (C8) and DAC (CC) in the same block are ordinary segments
 _SOF_MARKERS = frozenset(range(0xC0, 0xD0)) - {0xC4, 0xC8, 0xCC}
 
 
 def read_header_dimensions(image_bytes: bytes) -> tuple[int, int] | None:
-    """Width and height straight from the container header, without decoding.
+    """Width and height straight from the container header, without decoding
 
-    None means the header could not be read, which callers treat as a reject:
-    decoding it to find out is the exact work this check exists to avoid.
+    None means an unreadable header, which callers reject since decoding to find out is the work this check avoids
     """
-
     if image_bytes.startswith(_PNG_MAGIC):
         if len(image_bytes) < 24 or image_bytes[12:16] != b"IHDR":
             return None
@@ -203,8 +158,7 @@ def read_header_dimensions(image_bytes: bytes) -> tuple[int, int] | None:
     if not image_bytes.startswith(_JPEG_MAGIC):
         return None
 
-    # Walk the segments to the frame header. Anything unexpected ends the walk
-    # rather than guessing past it: an unparseable card is not a genuine one.
+    # Walk segments to the frame header, stopping at anything unexpected since an unparseable card isn't genuine
     offset = 2
     while offset + 9 <= len(image_bytes):
         if image_bytes[offset] != 0xFF:
@@ -226,17 +180,11 @@ def read_header_dimensions(image_bytes: bytes) -> tuple[int, int] | None:
 
 
 def validate_header_dimensions(image_bytes: bytes) -> dict[str, Any] | None:
-    """Reject verdict for undecoded bytes, or None to proceed to the decode.
+    """Reject verdict for undecoded bytes, or None to proceed to the decode
 
-    This is validate_image_integrity's dimension gate hoisted in front of
-    cv2.imdecode. Decoding allocates width * height * 3 bytes before anything
-    inspects the image, and both containers can declare dimensions far out of
-    proportion to their compressed size: a PNG of a few hundred KiB, well
-    inside the 5 MiB upload cap, can declare 60000x60000 and ask for 10 GB.
-    A genuine card is exactly 1920x1080, so the header settles it for the cost
-    of a struct.unpack.
+    Same dimension gate as validate_image_integrity, run before cv2.imdecode allocates whatever the header declares
+    A PNG of a few hundred KiB can declare 60000x60000 and ask for 10 GB
     """
-
     dimensions = read_header_dimensions(image_bytes)
     if dimensions is None:
         return _result(
@@ -261,13 +209,11 @@ def validate_header_dimensions(image_bytes: bytes) -> dict[str, Any] | None:
 
 
 def validate_image_integrity(image: np.ndarray) -> dict[str, Any]:
-    """Triage an image before storage or expensive OCR begins.
+    """Triage an image before storage or expensive OCR begins
 
-    ``ok`` proceeds to concurrent storage + OCR. ``reject`` starts neither. There
-    is no ``suspect`` verdict: the only two things that turn a user away are a
-    wrong size and a chrome mismatch, both invariants of a genuine card.
+    ``ok`` starts storage and OCR concurrently, ``reject`` starts neither
+    No ``suspect`` verdict, since only a wrong size or a chrome mismatch turns a user away
     """
-
     height, width = image.shape[:2]
     if width != EXPECTED_WIDTH or height != EXPECTED_HEIGHT:
         return _result(

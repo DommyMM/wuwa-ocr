@@ -1,11 +1,8 @@
-"""Download the 17 unique stat icons referenced by backend/Data/Stats.json.
+"""Download the 17 unique stat icons referenced by Data/Stats.json
 
-20 stats share 17 icons: HP/HP%, ATK/ATK% and DEF/DEF% each share one. That is
-the whole ambiguity surface, and the value's %-suffix resolves it (flat values
-are integers from a disjoint legal set). So a 17-class icon match identifies the
-stat NAME in all 9 WuWa languages with no OCR at all.
-
-Saved as Data/Stats/<icon_stem>.png.
+20 stats share 17 icons since flat and percent HP, ATK and DEF share one each, and their disjoint legal sets split them
+So an icon match names the stat in all 9 WuWa languages without OCR
+Saved under Data/Stats with the icon URL's file name
 """
 from __future__ import annotations
 
@@ -15,7 +12,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from urllib.request import Request, urlopen
 
-# Wuthery 403s the default urllib agent.
+# Wuthery 403s the default urllib agent
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0 Safari/537.36"
 
 BACKEND = Path(__file__).resolve().parents[2]

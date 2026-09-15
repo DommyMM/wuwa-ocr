@@ -1,5 +1,5 @@
 """
-clean_invalid.py — delete images marked invalid during benchmark review.
+Delete images marked invalid during benchmark review
 
 Reads:  backend/invalid_images.json   (built by visualize_diffs.py)
 Reads:  wuwabuilds/.env               (R2 credentials)
@@ -12,6 +12,7 @@ Usage:
   py clean_invalid.py          # dry run — shows what would be deleted
   py clean_invalid.py --run    # actually deletes
   py clean_invalid.py --run --r2-only  # delete from R2 but keep local files
+  py clean_invalid.py --run --no-archive  # delete local files without archiving them
 """
 import sys
 import json
@@ -54,7 +55,6 @@ def main():
 
     print(f"{'[DRY RUN] ' if DRY_RUN else ''}Deleting {len(images)} invalid images\n")
 
-    # ── R2 deletion ──────────────────────────────────────────────────────────
     env = load_env(ENV_FILE)
     account_id = env.get("CLOUDFLARE_ACCOUNT_ID", "")
     bucket     = env.get("R2_BUCKET_NAME", "wuwabuilds")
@@ -101,7 +101,6 @@ def main():
                 else:
                     print(f"  [R2]  ERROR {code}: {name}")
 
-    # ── Local archival/deletion ───────────────────────────────────────────────
     local_deleted = 0
     local_missing = 0
     local_archived = 0
@@ -145,7 +144,7 @@ def main():
         if R2_ONLY:
             print(f"  Local files were kept because --r2-only was set.")
 
-        # Clear the invalid list after successful run
+        # Cleared after any --run, even when some R2 deletes errored
         with open(INVALID_FILE, "w") as f:
             json.dump([], f)
         print(f"  Cleared invalid_images.json")

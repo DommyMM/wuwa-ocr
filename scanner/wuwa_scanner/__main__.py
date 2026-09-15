@@ -19,10 +19,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-# Importing the scanner pulls in backend/data.py, which announces itself on stdout
-# ("Loaded local data: ..."). Both commands here emit JSON on stdout, so that banner
-# lands in the middle of the document and `census frame.jpg > out.json` produces a file
-# that will not parse. Push the noise to stderr, where progress output belongs anyway.
+# backend/data.py prints a load banner on import, so it goes to stderr to keep the JSON on stdout parseable
 with contextlib.redirect_stdout(sys.stderr):
     from wuwa_scanner import grid, layout as L, ocr, panel, tile  # noqa: E402
 
@@ -42,7 +39,7 @@ def cmd_census(path: str) -> None:
 
     boxes = [(r, c, grid.tile_box(lat, r, c))
              for r in range(len(lat["row_tops"])) for c in range(L.GRID_COLS)]
-    # One OCR invocation for the whole page; see tile.read_levels.
+    # One OCR call for the whole page (see tile.read_levels)
     levels = tile.read_levels(img, [b for _r, _c, b in boxes], ocr.level_reader())
 
     tiles = []

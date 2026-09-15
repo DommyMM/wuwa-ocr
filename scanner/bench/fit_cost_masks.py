@@ -1,16 +1,11 @@
-"""Regenerate wuwa_scanner/templates/cost_{1,3,4}.png from a labelled bag frame.
+"""Regenerate wuwa_scanner/templates/cost_{1,3,4}.png from a labelled bag frame
 
     py bench/fit_cost_masks.py            # refit and report
     py bench/fit_cost_masks.py --write    # refit and overwrite the shipped masks
 
-The masks are averaged ink shapes harvested from real tiles. See glyphs.py for why
-harvesting from tiles is safe here (a mask carries no artwork) when harvesting
-grayscale templates from tiles was not (PLAN.md bug #9).
-
-HARD REQUIREMENT, and it is the reason bug #8 happened twice: the training frame
-must contain ALL THREE costs. A frame missing a cost silently trains a two-way
-classifier that reports a confident third answer on anything it has not seen. Only
-bag_4k_04 qualifies today, which is also why cost 1 has no held-out test yet.
+Masks are averaged ink shapes from real tiles, safe to harvest there since a mask carries no artwork (see glyphs.py)
+Training frame must hold all three costs, since a frame missing one fits a classifier that confidently misreads it
+Only bag_4k_04 qualifies, so cost 1 has no held-out test
 """
 from __future__ import annotations
 
@@ -26,8 +21,7 @@ sys.path.insert(0, str(ROOT.parent))
 
 from wuwa_scanner import glyphs, grid, layout as L  # noqa: E402
 
-# samples/bag_4k_04_mixed_level.jpg, row-major over the 3 censusable rows.
-# Hand-read from the tiles: 15 cost-1, 1 cost-3, 2 cost-4.
+# Costs hand-read from the tiles, row-major over the 3 censusable rows (15 cost-1, 1 cost-3, 2 cost-4)
 TRAIN_FRAME = ROOT / "samples" / "bag_4k_04_mixed_level.jpg"
 TRAIN_COSTS = [1, 1, 1, 1, 1, 1,
                1, 1, 1, 1, 1, 3,

@@ -1,6 +1,5 @@
 """
-Test script: mimics what the frontend does — crops the image into each region
-and POSTs each crop to /api/ocr concurrently.
+Crop an image into the per-region boxes below and POST each crop to /api/ocr concurrently
 """
 import base64
 import sys
