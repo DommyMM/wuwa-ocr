@@ -60,7 +60,6 @@ def detect_lattice(frame: np.ndarray) -> dict:
 
     Bars are fitted to a regular lattice, since a missed bar (gold art, odd gradient) would shift every row below it
     """
-    h = frame.shape[0]
     tile_h = L.TILE_H
     bars = detect_bars(frame)
     tops = sorted(b - BAR_BOTTOM_FRAC * tile_h for b in bars)

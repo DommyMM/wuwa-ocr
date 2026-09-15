@@ -476,7 +476,6 @@ than the digit. A field is not fixed until a frame it has never seen says so.
 | `bench_values.py` | OCR engine shoot-out on substat value cells |
 | `engines.py` | uniform wrappers: Tesseract, RapidOCR 1.x/3.x, Paddle, EasyOCR, OneOCR, WinRT |
 | `fit_cost_masks.py` | refit `wuwa_scanner/templates/cost_*.png` from a labelled frame |
-| `fetch_stat_icons.py` | download the 17 stat icons into `Data/Stats/` |
 | `fetch_phantom_icons.py` | download the 38 phantom skins into `Data/EchoPhantoms/` |
 
 `bench_fields.py` labels are **hand-read from the tiles, never derived from identity**.

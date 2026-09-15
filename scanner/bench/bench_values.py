@@ -23,7 +23,6 @@ from bench.engines import ALL_ENGINES  # noqa: E402
 from wuwa_scanner.stats import find_rows  # noqa: E402
 
 STATS_BOX = (0.690, 0.415, 0.975, 0.715)
-ICON_FRAC = 0.075
 VALUE_FRAC = 0.74
 
 # Rows 0 and 1 are the main and innate stats, whose values follow from cost, stat and level via Data/EchoStats.json

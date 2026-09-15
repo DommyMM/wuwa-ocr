@@ -209,6 +209,3 @@ Generated forensic outputs (`backend/forensics/non_english_ocr_scan/`) are git-i
 - Run `backend/validate_non_english_cards.py` against the strong-candidate set for repeatable
   parser results. Latest local run: 123 strong candidates, 615 echoes, 615 passed the parser
   heuristic (FR 4/4, JA 93/93, ZH 26/26).
-- Run `backend/test_frontend_split.py` on representative English and localized cards; echo
-  outputs must stay schema-compatible with canonical English stat names, and legal value
-  snapping must still come from `EchoStats.json`.

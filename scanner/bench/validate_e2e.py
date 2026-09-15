@@ -19,7 +19,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from wuwa_scanner.stats import FAMILY, find_rows, resolve_stat, value_cells  # noqa: E402
+from wuwa_scanner.stats import find_rows, resolve_stat, value_cells  # noqa: E402
 
 REF_W, REF_H = 3840, 2160
 PANEL_X = (2620 / REF_W, 3720 / REF_W)   # hand-measured
@@ -90,7 +90,6 @@ def main() -> None:
             img[int(STATS_Y[0] * h):int(STATS_Y[1] * h),
                 int(PANEL_X[0] * w):int(PANEL_X[1] * w)]
         )
-        sw = st.shape[1]
 
         rows = find_rows(st)
         cells = value_cells(st, rows, VALUE_FRAC)
@@ -105,9 +104,8 @@ def main() -> None:
         for i, (r, num) in enumerate(zip(rows, nums)):
             g_stat, g_val = gold[i] if i < len(gold) else ("?", 0.0)
             # % is never read, so percent-ness is a first guess by magnitude that the legal sets below settle
-            stat = resolve_stat(r["icon"], "%" if num is not None and num < 100 else "")
+            stat = resolve_stat(r["icon"], num is not None and num < 100)
             # Flat and percent legal sets are disjoint, so the nearest legal value within 2.0 picks the member
-            members = [m for m in (stat, stat.rstrip("%") if stat else "") if m]
             chosen, snapped = stat, num
             if num is not None:
                 best = None

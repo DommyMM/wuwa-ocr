@@ -9,6 +9,7 @@ Nightmare echoes have their own ids and templates, and Reminiscence is part of t
 """
 from __future__ import annotations
 
+import json
 import sys
 import time
 from pathlib import Path
@@ -20,11 +21,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from wuwa_scanner import grid, layout as L  # noqa: E402
-import data  # noqa: E402
-
-TPL_DIR = Path(__file__).resolve().parents[2] / "Data" / "Echoes"
-SIZE = 128
-INNER = 0.85          # centre crop before matching (best margin in the rep sweep)
 
 P = "PHANTOM"
 # (id, note) for every tile of bag_4k_01.jpg, row-major
@@ -43,39 +39,8 @@ GOLD = [
     ("60001895", ""), ("60001605", ""),
 ]
 
-NAME = {e["id"]: e["name"] for e in data.ECHOES_RAW} if hasattr(data, "ECHOES_RAW") else {}
-if not NAME:
-    import json
-    _e = json.loads((Path(__file__).resolve().parents[2] / "Data" / "Echoes.json")
-                    .read_text(encoding="utf-8"))
-    NAME = {x["id"]: x["name"] for x in (_e if isinstance(_e, list) else _e.values())}
-
-
-def _grad(bgr: np.ndarray) -> np.ndarray:
-    g = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY).astype(np.float32)
-    gx = cv2.Sobel(g, cv2.CV_32F, 1, 0, ksize=3)
-    gy = cv2.Sobel(g, cv2.CV_32F, 0, 1, ksize=3)
-    return cv2.magnitude(gx, gy)
-
-
-def _inner(img: np.ndarray, f: float) -> np.ndarray:
-    h, w = img.shape[:2]
-    m = int((1 - f) / 2 * min(h, w))
-    return np.ascontiguousarray(img[m:h - m, m:w - m])
-
-
-def _feat(bgr: np.ndarray) -> np.ndarray:
-    x = _grad(cv2.resize(_inner(bgr, INNER), (SIZE, SIZE), interpolation=cv2.INTER_AREA))
-    return (x - x.mean()) / (x.std() + 1e-6)
-
-
-def load_templates() -> dict[str, np.ndarray]:
-    out = {}
-    for p in sorted(TPL_DIR.glob("*.webp")):
-        im = cv2.imdecode(np.fromfile(str(p), dtype=np.uint8), cv2.IMREAD_COLOR)
-        if im is not None:
-            out[p.stem] = _feat(im)
-    return out
+_ECHOES = json.loads((Path(__file__).resolve().parents[2] / "Data" / "Echoes.json").read_text(encoding="utf-8"))
+NAME = {str(e["id"]): e["name"] for e in _ECHOES}
 
 
 def main() -> None:

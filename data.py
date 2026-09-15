@@ -2,7 +2,6 @@ from pathlib import Path
 import json
 import cv2
 import numpy as np
-import os
 from typing import Dict, List, Set
 from cv2 import SIFT_create, FlannBasedMatcher
 
@@ -10,16 +9,11 @@ from cv2 import SIFT_create, FlannBasedMatcher
 CHARACTER_NAMES: List[str] = []
 CHARACTER_ID_MAP: Dict[str, str] = {}
 WEAPON_NAMES: List[str] = []
-WEAPON_DATA: Dict[str, str] = {}
 WEAPON_ID_MAP: Dict[str, str] = {}
 MAIN_STAT_NAMES: Set[str] = set()
 MAIN_STATS: Dict = {}
-DEFAULT_MAIN_STATS: Dict = {}
 SUB_STATS: Dict = {}
-SUB_STAT_NAMES: Set[str] = set()
-ECHO_NAMES: List[str] = []       # English names in load order, only counted in the load log
 ECHO_SET_IDS: Dict[str, List[int]] = {}  # echo id to legal set ids, authoritative
-ECHO_ELEMENTS: Dict = {}          # echo id to set names derived from the ids, unused outside this module
 ECHO_COSTS: Dict[str, int] = {}   # echo id to cost (1, 3 or 4)
 ECHO_NAME_MAP: Dict[str, str] = {} # echo id to English name for logs and the response
 ICON_TEMPLATES: Dict[str, np.ndarray] = {}
@@ -61,7 +55,7 @@ DATA_DIR = Path(__file__).parent / 'Data'
 
 def _load_from_local():
     """Load Characters, Weapons and Echoes from Data/"""
-    global CHARACTER_NAMES, CHARACTER_ID_MAP, WEAPON_NAMES, WEAPON_DATA, WEAPON_ID_MAP, ECHO_NAMES, ECHO_ELEMENTS, ECHO_SET_IDS, ECHO_COSTS, ECHO_NAME_MAP
+    global CHARACTER_NAMES
 
     with open(DATA_DIR / 'Characters.json', 'r', encoding='utf-8') as f:
         characters = json.load(f)
@@ -77,36 +71,30 @@ def _load_from_local():
             if cid in ROVER_GENDER_BY_ID:
                 ROVER_ELEMENT_BY_ID[cid] = c.get('element', '')
 
-    WEAPON_NAMES.clear(); WEAPON_DATA.clear(); WEAPON_ID_MAP.clear()
+    WEAPON_NAMES.clear(); WEAPON_ID_MAP.clear()
     with open(DATA_DIR / 'Weapons.json', 'r', encoding='utf-8') as f:
-        for weapon_type, weapons in json.load(f).items():
+        for weapons in json.load(f).values():
             for w in weapons:
                 name = w['name']
                 wid = str(w.get('id', '')).strip()
                 WEAPON_NAMES.append(name)
-                WEAPON_DATA[name] = weapon_type
                 # First id wins for duplicate names
                 if name and wid:
                     WEAPON_ID_MAP.setdefault(name, wid)
 
-    ECHO_NAMES.clear(); ECHO_ELEMENTS.clear(); ECHO_SET_IDS.clear(); ECHO_COSTS.clear(); ECHO_NAME_MAP.clear()
+    ECHO_SET_IDS.clear(); ECHO_COSTS.clear(); ECHO_NAME_MAP.clear()
     with open(DATA_DIR / 'Echoes.json', 'r', encoding='utf-8') as f:
         for e in json.load(f):
             eid  = str(e['id'])
-            name = e['name']
-            ECHO_NAMES.append(name)
             ECHO_COSTS[eid]    = e['cost']
-            set_ids = e.get('setIds') or []
-            ECHO_SET_IDS[eid] = set_ids
-            ECHO_ELEMENTS[eid] = [SET_NAME_BY_ID.get(s, str(s)) for s in set_ids]
-            ECHO_NAME_MAP[eid] = name
+            ECHO_SET_IDS[eid] = e.get('setIds') or []
+            ECHO_NAME_MAP[eid] = e['name']
 
     for eid, set_ids in ECHO_SET_ID_OVERRIDES.items():
         if eid in ECHO_SET_IDS:
             ECHO_SET_IDS[eid] = set_ids
-            ECHO_ELEMENTS[eid] = [SET_NAME_BY_ID.get(s, str(s)) for s in set_ids]
 
-    print(f"Loaded local data: {len(CHARACTER_NAMES)} characters, {len(WEAPON_NAMES)} weapons, {len(ECHO_NAMES)} echoes")
+    print(f"Loaded local data: {len(CHARACTER_NAMES)} characters, {len(WEAPON_NAMES)} weapons, {len(ECHO_NAME_MAP)} echoes")
 
 
 def _read_template_image(path: Path):
@@ -175,8 +163,6 @@ try:
         echo_stats = json.load(f)
         MAIN_STATS.clear()
         MAIN_STATS.update(echo_stats.get("mainStats", {}))
-        DEFAULT_MAIN_STATS.clear()
-        DEFAULT_MAIN_STATS.update(echo_stats.get("defaultMainStats", {}))
 
         for cost_data in MAIN_STATS.values():
             for stat_name in cost_data.keys():
@@ -186,7 +172,6 @@ try:
                     MAIN_STAT_NAMES.add(stat_name)
 
         SUB_STATS = echo_stats.get("subStats", {})
-        SUB_STAT_NAMES = set(SUB_STATS.keys())
 
     echo_count = load_templates('Echoes', ICON_TEMPLATES, TEMPLATE_FEATURES, (188, 188))
     element_count = load_templates('Elements', ELEMENT_TEMPLATES, ELEMENT_FEATURES, key_fn=int)
@@ -307,15 +292,3 @@ def determine_element(image, filter_ids):
             return max(color_scores, key=lambda x: x[1])[0]
 
     return best[0]
-
-
-ECHO_REGIONS = {
-    "name": {"top": 0.052, "left": 0.055, "width": 0.8, "height": 0.11},
-    "level": {"top": 0.23, "left": 0.08, "width": 0.1, "height": 0.08},
-    "main": {"top": 0.31, "left": 0.145, "width": 0.78, "height": 0.085},
-    "sub1": {"top": 0.53, "left": 0.115, "width": 0.81, "height": 0.08},
-    "sub2": {"top": 0.6, "left": 0.115, "width": 0.81, "height": 0.09},
-    "sub3": {"top": 0.685, "left": 0.115, "width": 0.81, "height": 0.09},
-    "sub4": {"top": 0.773, "left": 0.115, "width": 0.81, "height": 0.09},
-    "sub5": {"top": 0.86, "left": 0.115, "width": 0.81, "height": 0.09}
-}

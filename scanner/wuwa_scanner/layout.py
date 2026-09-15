@@ -10,19 +10,10 @@ from __future__ import annotations
 
 REF_W, REF_H = 3840, 2160
 
-
-def _b(x: int, y: int, w: int, h: int) -> tuple[float, float, float, float]:
-    """Pixel box at 4K to proportional (x0, y0, x1, y1)"""
-    return (x / REF_W, y / REF_H, (x + w) / REF_W, (y + h) / REF_H)
-
-
-# 3 fully visible rows, since the sort/filter bar hides a 4th row's sonata badge and +25
 GRID_COLS = 6
-GRID_ROWS_VISIBLE = 3
 
 # Selected tile is larger (345x425) but doesn't grow about its centre, so grid.tile_box uses the unselected box for it
 TILE_W, TILE_H = 325 / REF_W, 392 / REF_H
-TILE_SEL_W, TILE_SEL_H = 345 / REF_W, 425 / REF_H   # unused until its anchor is re-measured
 
 TILE_ORIGIN = (334 / REF_W, 266 / REF_H)      # top-left of unselected tile (0, 0)
 TILE_PITCH_X = 353.2 / REF_W                  # (2100 - 334) / 5
@@ -30,10 +21,6 @@ TILE_PITCH_Y = 423.0 / REF_H
 
 # TILE_ORIGIN[1] holds only at scroll-top since the grid scrolls smoothly, so rows come from grid.detect_lattice
 # Row pitch fits hand-measured row tops 688/1112/1533 within 2 px
-
-# Hand-measured with no reader behind them, so re-check on first use
-COUNTER = _b(400, 105, 400, 70)               # "1437/3000" scan completeness check
-SORT_CONTROL = _b(540, 1935, 700, 90)         # "Sort by Level"
 
 # Tile sub-boxes are fractions of the unselected 325x392 tile
 # Art is a 292x292 square matching the square Data/Echoes templates, since a full-width crop distorted aspect
@@ -59,31 +46,10 @@ def sub_box(box, frac) -> tuple[float, float, float, float]:
     return (x0 + fx0 * w, y0 + fy0 * h, x0 + fx1 * w, y0 + fy1 * h)
 
 
-# Whole panel: 1100x1635 at (2620, 220), name container to bottom of "Equipped by"
-# Only PANEL_STATS is read, since the tile already carries identity, cost, set and level
-PANEL = _b(2620, 220, 1100, 1635)
-
-PANEL_ART = _b(2620, 260, 1100, 592)
-PANEL_NAME = _b(2620, 222, 1100, 155)
-
-PANEL_LEVEL = _b(2665, 389, 120, 80)          # "+25"
-PANEL_SET = _b(2790, 395, 64, 64)             # sonata badge
-PANEL_COST = _b(2638, 490, 287, 80)           # "COST 4"
-PANEL_EQUIPPED = _b(2620, 1740, 1100, 115)
-
+# Only the panel's stats block is read, since the tile already carries identity, cost, set and level
 # Starts left of the icons and runs well past the last row, since a wrapped substat name pushes that row down
 # Rows swept up below the block (the "Echo Skill" heading) are rejected by icon-match confidence
 PANEL_STATS = (2620 / REF_W, 0.400, 3720 / REF_W, 0.790)
-
-# Hand-measured stats sub-structure for sanity-checking the self-locator, never crop with these
-REF_STAT_ICON_X = (2655 / REF_W, 2730 / REF_W)   # 75 px wide
-REF_VALUE_X = (3513 / REF_W, 3718 / REF_W)       # 205 px wide, right-aligned
-REF_ROW_PITCH = 89.25 / REF_H
-REF_ROW_Y = {                                    # row top, 4K px
-    "main": 910,
-    "innate": 1001,       # base stat, never OCR'd since it follows from cost (EchoStats.json)
-    "sub1": 1092, "sub2": 1181, "sub3": 1270, "sub4": 1359, "sub5": 1448,
-}
 
 # Value crop start as a fraction of PANEL_STATS width, left of the value text (3513) since values are right-aligned
 # Still clear of the longest substat names

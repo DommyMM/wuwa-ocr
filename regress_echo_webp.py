@@ -186,7 +186,7 @@ def main() -> int:
     start = time.time()
     try:
         build_webp_templates(template_dir, temp_root, args.quality)
-        webp_templates, webp_features = load_echo_features(temp_root)
+        _, webp_features = load_echo_features(temp_root)
         print(
             f"selected={len(selected)} images panels={len(selected) * len(REGIONS)} "
             f"workers={args.workers} quality={args.quality}",

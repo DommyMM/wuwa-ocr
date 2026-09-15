@@ -11,9 +11,6 @@ Surya and VLM readers (GOT-OCR, dots.ocr, olmOCR) are left out, at 650M-7B param
 """
 from __future__ import annotations
 
-import time
-from dataclasses import dataclass, field
-
 import numpy as np
 
 
@@ -98,7 +95,7 @@ class Tesseract(Engine):
 
         pages = out.split("\f")
         results = [[l.strip() for l in p.splitlines() if l.strip()] for p in pages]
-        results = [r for r in results if True][: len(imgs)]
+        results = results[: len(imgs)]
         while len(results) < len(imgs):
             results.append([])
         return results
@@ -244,32 +241,3 @@ ALL_ENGINES: list[Engine] = [
     OneOCR(),
     WinRT(),
 ]
-
-
-@dataclass
-class Timing:
-    cold_ms: float = 0.0
-    warm_ms: list[float] = field(default_factory=list)
-
-    @property
-    def warm_median(self) -> float:
-        if not self.warm_ms:
-            return 0.0
-        s = sorted(self.warm_ms)
-        return s[len(s) // 2]
-
-
-def time_load(engine: Engine) -> float:
-    t0 = time.perf_counter()
-    engine.load()
-    return (time.perf_counter() - t0) * 1000
-
-
-def time_read(engine: Engine, img: np.ndarray, runs: int = 5) -> tuple[list[str], Timing]:
-    t = Timing()
-    lines = engine.read(img)  # warm the path once, discard
-    for _ in range(runs):
-        t0 = time.perf_counter()
-        lines = engine.read(img)
-        t.warm_ms.append((time.perf_counter() - t0) * 1000)
-    return lines, t

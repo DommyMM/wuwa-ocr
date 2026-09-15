@@ -51,13 +51,13 @@ BACKEND_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(BACKEND_DIR))
 
 
-# Normalized full-card boxes matching server.py's IMPORT_REGIONS, except an older and narrower character strip
+# Normalized full-card boxes matching server.py's IMPORT_REGIONS
 # character_splash, watermark_uid and weapon_icon are this tool's own recognition crops
 FULL_REGIONS: dict[str, tuple[float, float, float, float]] = {
-    "character": (0.0328, 0.0074, 0.3021, 0.0833),
     "character_splash": (0.0200, 0.1000, 0.2700, 0.4500),
     "watermark": (0.0073, 0.0741, 0.1304, 0.1370),
     "watermark_uid": (0.0100, 0.1060, 0.1150, 0.1245),
+    "forte": (0.4057, 0.0222, 0.7422, 0.5917),
     "weapon": (0.7542, 0.3843, 0.9828, 0.5843),
     "weapon_icon": (0.7590, 0.4120, 0.8310, 0.5380),
     "echo1": (0.0125, 0.6019, 0.2042, 0.9843),

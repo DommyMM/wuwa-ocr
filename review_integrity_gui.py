@@ -15,7 +15,6 @@ import html
 import json
 import mimetypes
 import shutil
-import sys
 import threading
 import urllib.parse
 import webbrowser

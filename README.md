@@ -140,7 +140,6 @@ rejected wrong-format image is never written to the normal R2 namespace.
 
 - `GET /health` -> health check
 - `GET /` -> API status metadata
-- `GET /ocr-results` -> serves `../ocr_results.json` (output of `batch_ocr.py`); 404 when missing
 
 ## Environment Variables
 

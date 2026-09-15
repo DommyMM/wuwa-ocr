@@ -9,7 +9,6 @@ import numpy as np
 
 import image_integrity
 from image_integrity import (
-    CHROME_REJECT_SCORE,
     chrome_score,
     echo_bed_score,
     read_header_dimensions,

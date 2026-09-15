@@ -9,12 +9,11 @@ Press 's' to save as regions_debug.png, any other key to close
 """
 import sys
 import cv2
-import numpy as np
 from pathlib import Path
 
-# Normalized 0-1 boxes on the full card
+# Normalized 0-1 boxes on the full card, matching server.py's IMPORT_REGIONS
 OUTER_REGIONS = {
-    'character': (0.0328, 0.0074, 0.3021, 0.0833),
+    'character': (0.0000, 0.0000, 0.3800, 0.5500),
     'watermark':  (0.0073, 0.0741, 0.1304, 0.1370),
     'forte':      (0.4057, 0.0222, 0.7422, 0.5917),
     'sequences':  (0.0703, 0.4787, 0.3318, 0.5843),
@@ -50,6 +49,13 @@ ECHO_SUB = {
 }
 # element region is normalized within the echo crop
 ECHO_ELEMENT_NORM = (0.654, 0.027, 0.797, 0.148)
+
+# Normalized boxes inside the character crop, from card.py's CHAR_*_SUBBOX
+CHARACTER_SUB = {
+    'splash':  (0.0842, 0.16, 0.8421, 0.9455, (0, 255, 255)),
+    'name':    (0.0863, 0.0135, 0.7949, 0.1515, (0, 200, 255)),
+    'element': (0.0152, 0.025, 0.0884, 0.14, (0, 255, 200)),
+}
 
 # Pixel boxes inside the weapon crop
 WEAPON_SUB = {
@@ -130,6 +136,13 @@ def main():
                       ox1 + round(ex1*cw), oy1 + round(ey1*ch),
                       ox1 + round(ex2*cw), oy1 + round(ey2*ch),
                       (0, 255, 200), text='element')
+
+        elif name == 'character':
+            for sub, (fx1, fy1, fx2, fy2, sc) in CHARACTER_SUB.items():
+                draw_rect(out,
+                          ox1 + round(fx1*cw), oy1 + round(fy1*ch),
+                          ox1 + round(fx2*cw), oy1 + round(fy2*ch),
+                          sc, text=sub)
 
         elif name == 'weapon':
             for sub, (sx1, sy1, sx2, sy2, sc) in WEAPON_SUB.items():

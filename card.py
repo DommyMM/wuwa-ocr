@@ -276,17 +276,13 @@ def _clean_main_name(raw_name: str, raw_value: str) -> str:
     return f"{name}%" if name in ("HP", "ATK", "DEF") else name
 
 
-def _name_in(candidates: list[str], read: str | None) -> str | None:
-    if not read:
-        return None
-    probe = _clean_main_name(*_parse_main_line(read))
-    match = process.extractOne(probe, candidates, scorer=fuzz.WRatio, score_cutoff=60)
-    return match[0] if match else None
-
-
 def _tiebreak_main_name(candidates: list[str], tess_name: str | None) -> str | None:
     """Break a main-stat tie by the Tesseract name read"""
-    return _name_in(candidates, tess_name)
+    if not tess_name:
+        return None
+    probe = _clean_main_name(*_parse_main_line(tess_name))
+    match = process.extractOne(probe, candidates, scorer=fuzz.WRatio, score_cutoff=60)
+    return match[0] if match else None
 
 
 def resolve_echo_main(cost: int, raw_name: str, raw_value: str) -> dict:
@@ -411,10 +407,6 @@ def _substat_bands(names: list[str], values: list[str]) -> list[dict | None]:
     return [_resolve_substat(n, v) for n, v in zip(names, values)]
 
 
-def _legal_substat_rows(names: list[str], values: list[str]) -> list[dict]:
-    return [r for r in _substat_bands(names, values) if r is not None]
-
-
 def _reread_after_wrap(names: list[str], values: list[str], names_img: np.ndarray, render) -> list[str]:
     """Re-read the row after each wrapping stat with tighter tops and keep the more confident read
 
@@ -438,12 +430,11 @@ def _reread_after_wrap(names: list[str], values: list[str], names_img: np.ndarra
     return names
 
 
-def read_substat_rows(names_img: np.ndarray, values_img: np.ndarray) -> tuple[list[dict], list[str], list[str], str]:
-    """Substats by fixed row band, returning (rows, raw_names, raw_values, path)
+def read_substat_rows(names_img: np.ndarray, values_img: np.ndarray) -> tuple[list[dict], list[str], list[str]]:
+    """Substats by fixed row band, returning (rows, raw_names, raw_values)
 
-    Path 'B' is the thresholded pass, and plain grayscale ('G') runs only when it resolves fewer than five rows
+    Thresholded pass ('B') runs first, and plain grayscale ('G') only when it resolves fewer than five rows
     Grayscale recovers dim cards the threshold shreds but loses ~1.2% on bright ones, so it is only a fallback
-    A trailing '+' means the other pass filled empty bands
     """
     name_bands = [_substat_band(names_img, k) for k in range(SUBSTAT_ROWS)]
     value_bands = [_substat_band(values_img, k) for k in range(SUBSTAT_ROWS)]
@@ -453,7 +444,7 @@ def read_substat_rows(names_img: np.ndarray, values_img: np.ndarray) -> tuple[li
     names = _reread_after_wrap(names, values, names_img, preprocess_region)
     bands = _substat_bands(names, values)
     if sum(b is not None for b in bands) >= SUBSTAT_ROWS:
-        return [b for b in bands if b], names, values, "B"
+        return [b for b in bands if b], names, values
 
     gray = lambda b: cv2.cvtColor(b, cv2.COLOR_BGR2GRAY)
     g_names = tess_batch([_upscale2(gray(b)) for b in name_bands], SUBSTAT_NAME_CONFIG)
@@ -464,11 +455,11 @@ def read_substat_rows(names_img: np.ndarray, values_img: np.ndarray) -> tuple[li
     # Pass with more resolved rows wins (thresholded on a tie) and the other fills only its empty bands
     # Letting the loser replace resolved rows swapped in legal but wrong values
     if sum(g is not None for g in g_bands) > sum(b is not None for b in bands):
-        won, lost = "G", "B"
+        lost = "B"
         win_bands, win_names, win_values = g_bands, g_names, g_values
         fill_bands, fill_names, fill_values = bands, names, values
     else:
-        won, lost = "B", "G"
+        lost = "G"
         win_bands, win_names, win_values = bands, names, values
         fill_bands, fill_names, fill_values = g_bands, g_names, g_values
 
@@ -481,7 +472,7 @@ def read_substat_rows(names_img: np.ndarray, values_img: np.ndarray) -> tuple[li
     rows = [b for b in win_bands if b]
     if filled:
         print(f"Substats: {lost} filled {filled} empty row(s) -> {len(rows)} rows")
-    return rows, merged_names, merged_values, (won + "+" if filled else won)
+    return rows, merged_names, merged_values
 
 
 def validate_character_name(raw_name: str) -> str:
@@ -818,7 +809,7 @@ def parse_sequence_region(image) -> int:
     }
     active_count = 0
     
-    for seq_num, region in SEQUENCE_REGIONS.items():
+    for region in SEQUENCE_REGIONS.values():
         center_x, center_y = region["center"]
         half_w = region["width"] // 2
         half_h = region["height"] // 2
@@ -1214,7 +1205,7 @@ def _process_card_inner(image, region: str):
 
         names_img = _crop_region(image, ECHO_REGIONS["subs_names"])
         values_img = _crop_region(image, ECHO_REGIONS["subs_values"])
-        substats, raw_names, raw_values, subs_path = read_substat_rows(names_img, values_img)
+        substats, raw_names, raw_values = read_substat_rows(names_img, values_img)
         for i, row in enumerate(substats, 1):
             print(f"Substat {i}: '{row['name']} {row['value']}'")
         lang_signal = echo_language_signal(raw_names, raw_values)

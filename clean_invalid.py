@@ -1,7 +1,7 @@
 """
 Delete images marked invalid during benchmark review
 
-Reads:  backend/invalid_images.json   (built by visualize_diffs.py)
+Reads:  backend/invalid_images.json   (exported by review_integrity_gui.py)
 Reads:  wuwabuilds/.env               (R2 credentials)
 
 Actions (dry-run by default):
@@ -43,7 +43,7 @@ def load_env(path: Path) -> dict:
 
 def main():
     if not INVALID_FILE.exists():
-        print("No invalid_images.json found. Run visualize_diffs.py first.")
+        print("No invalid_images.json found. Export deletions from review_integrity_gui.py first.")
         sys.exit(0)
 
     with open(INVALID_FILE) as f:
