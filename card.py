@@ -627,8 +627,8 @@ def parse_watermark_username(lines: list[str], uid: int) -> str:
 # binarised glyphs are plainly legible (a card reading 500019690 returned
 # 500013650) and the crop has generous margin. A 2x upscale before the read is what
 # resolves it. Measured over 600 r2-backup cards with every disagreement
-# hand-labelled, UID error fell 1.7% -> 0.17%; that 1.7% baseline matches the
-# 1.2-1.7% per-scan rate in OCR_PROFILE_INVESTIGATION.md.
+# hand-labelled, UID error fell 1.7% -> 0.17%, the same 1.2-1.7% per-scan misread
+# rate that had split profiles in the database.
 #
 # Scoped deliberately to this strip. The same upscale DESTROYS forte (77% missed
 # nodes vs 0.4% today), because preprocess_region's fixed threshold(140) is
