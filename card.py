@@ -4,8 +4,8 @@ import re
 from data import CHARACTER_NAMES, CHARACTER_ID_MAP, WEAPON_NAMES, WEAPON_ID_MAP, MAIN_STAT_NAMES, MAIN_STATS, SUB_STATS, ECHO_SET_IDS, SET_NAME_BY_ID, ECHO_COSTS, ECHO_NAME_MAP, ROVER_GENDER_BY_ID, ROVER_ELEMENT_BY_ID, ICON_TEMPLATES, TEMPLATE_FEATURES, COST_TEMPLATES, determine_element
 import numpy as np
 from rapidfuzz import fuzz, process
-from typing import Tuple
-from cv2 import SIFT_create, FlannBasedMatcher
+from typing import Collection, Tuple
+from cv2 import FlannBasedMatcher
 from pathlib import Path
 import io
 import os
@@ -115,7 +115,7 @@ def clean_stat_name(name: str, value: str) -> str:
         return f"{name.upper()}%"
     return name.upper() if name.upper() in ["ATK", "HP", "DEF"] else name
 
-def validate_stat(name: str, valid_names: set) -> str:
+def validate_stat(name: str, valid_names: Collection[str]) -> str:
     if not valid_names:
         return name
     match = process.extractOne(name, list(valid_names))
@@ -242,7 +242,7 @@ def _main_strip_lines(main_img: np.ndarray) -> list[str]:
 
     Fixed 140 threshold shreds the dim name row, so psm 3 reads nothing and resolve_echo_main falls to HP%
     Grayscale held 99.99% across a softness ladder where the threshold fell from 99.60% to 7.79%
-    Sweep and rejected options: docs/echo-main-strip-preprocessing.md
+    Sweep and rejected options: docs/echo-main-strip.md
     """
     upscaled = cv2.resize(
         cv2.cvtColor(main_img, cv2.COLOR_BGR2GRAY), None,
@@ -333,7 +333,7 @@ def resolve_echo_main(cost: int, raw_name: str, raw_value: str) -> dict:
 # Each substat row is read on its own fixed band with psm 7, so page segmentation can never drop a row
 # Grid is pixel-exact (first row at 15.5 px, 34 px pitch) and wrapped names spill into the gap without shifting rows
 # Names use the band's first line, since the closed vocabulary resolves a wrapped name from its first half
-# Measurements and rejected options: docs/echo-substat-tesseract-only.md
+# Measurements and rejected options: docs/echo-substats.md
 SUBSTAT_ROW_FIRST = 15.5
 SUBSTAT_ROW_PITCH = 34
 SUBSTAT_ROW_HALF = 14
@@ -659,8 +659,8 @@ def validate_echo_family_by_element(
         for variant in variants
         if badge in ECHO_SET_IDS.get(variant, [])
     ]
-    if not candidates:
-        # determine_element only returns one of family_set_ids, so this is defensive
+    if badge is None or not candidates:
+        # No badge keeps SIFT's pick, and a badge matching no variant can't happen since it comes from family_set_ids
         return best_match, best_conf, detected_element
 
     conf_of = dict(sorted_matches)
@@ -723,7 +723,7 @@ def _identify_icon_core(image: np.ndarray):
     Returns (echo_name, confidence, element, sorted_matches, element_region)
     """
     icon_img = image[0:182, 0:188]
-    sift = SIFT_create()
+    sift = cv2.SIFT.create()
     kp1, des1 = sift.detectAndCompute(icon_img, None)
     flann = FlannBasedMatcher(dict(algorithm=1, trees=5), dict(checks=50))
 
@@ -772,7 +772,7 @@ def _identify_icon_core(image: np.ndarray):
             ]
             # A badge matching exactly one candidate decides alone
             # Otherwise icon hue arbitrates the badge survivors, or every close match when the badge decided nothing
-            if len(element_matches) == 1:
+            if detected_element is not None and len(element_matches) == 1:
                 best_match, best_conf = element_matches[0]
                 print(f"-> badge {SET_NAME_BY_ID.get(detected_element, detected_element)} -> '{best_match}'")
             else:
@@ -875,7 +875,7 @@ def _subcrop(img: np.ndarray, box: tuple) -> np.ndarray:
 
 
 def _load_asset_features(folder: str, max_side: int) -> dict:
-    sift = SIFT_create()
+    sift = cv2.SIFT.create()
     feats = {}
     for path in sorted((DATA_DIR / folder).glob("*.webp")):
         img = cv2.imdecode(np.fromfile(str(path), dtype=np.uint8), cv2.IMREAD_COLOR)
@@ -889,7 +889,7 @@ def _load_asset_features(folder: str, max_side: int) -> dict:
 
 def _match_asset(region: np.ndarray, feats: dict) -> tuple:
     """Top template by SIFT good-match ratio, returning (id, confidence, margin)"""
-    sift = SIFT_create()
+    sift = cv2.SIFT.create()
     flann = FlannBasedMatcher(dict(algorithm=1, trees=5), dict(checks=50))
     kp1, des1 = sift.detectAndCompute(region, None)
     if des1 is None or len(kp1) < 2:

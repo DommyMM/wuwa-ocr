@@ -27,7 +27,7 @@ STATS_Y = (0.400, 0.790)                 # extended well past any wrap
 VALUE_FRAC = 0.74
 NUM_RX = re.compile(r"\d+(?:[.,]\d+)?")
 
-# (stat, value), rows 0 and 1 are main and innate, derived from cost in the pipeline and listed only to score icons
+# (stat, value), rows 0 and 1 are main and innate, never OCR'd and listed only to score icons
 GOLD = {
     "bag_4k_01.jpg": [
         ("Crit DMG", 44.0), ("ATK", 150.0),
@@ -133,7 +133,7 @@ def main() -> None:
                   f"MISS exp {g_stat} {g_val:g}"
             rd = "-" if num is None else f"{num:g}"
             sn = "-" if snapped is None else f"{snapped:g}"
-            note = "" if is_sub else "  (derived, not OCR'd)"
+            note = "" if is_sub else "  (not OCR'd)"
             print(f"{i:>2} {str(chosen):32s} {r['iou']:5.2f} {r['margin']:5.2f} "
                   f"{rd:>7s} {sn:>7s}  {tag}{note}")
 

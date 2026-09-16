@@ -89,7 +89,7 @@ def main() -> None:
     ]
     print(f"{path.name} {w}x{h} -> {len(cells)} SUBSTAT value cells, "
           f"each ~{cells[0].shape[1]}x{cells[0].shape[0]}")
-    print("(main + innate rows are derived from cost via EchoStats.json, never OCR'd)")
+    print("(main + innate rows are skipped, never OCR'd)")
     print("scoring: digits only, then snapped to the icon-identified stat's legal set\n")
 
     print(f"{'engine':28s} {'load':>7s} {'ms/cell':>8s} {'ms/echo':>8s} {'acc':>6s}   snapped reads")
@@ -127,7 +127,7 @@ def main() -> None:
 
     print("-" * 108)
     print(f"truth: {[f'{n:g}' for n in truth_nums]}")
-    print("\nms/echo = ms/cell x 7 rows. The click+settle wall is ~150-250 ms, so any")
+    print(f"\nms/echo = ms/cell x {len(cells)} substat cells. The click+settle wall is ~150-250 ms, so any")
     print("engine under ~150 ms/echo disappears entirely behind navigation.")
 
 

@@ -3,7 +3,7 @@
 A re-typed row is brighter than its neighbours with a lower error level, since it skipped the original JPEG quantization
 ela_delta ignores background level, so the wrapped labels that break echo_bed_score's gradient don't move it
 Only combined flags, since highlighted substat rows push genuine cards to gap 41 with near-zero ela_delta
-Corpus validation: docs/card-forgery-detection.md
+Across the full corpus ELA tracks encoder era and ranked the known forgeries 18th and 24th, see docs/image-integrity.md
 
 Usage:
   py forensics_card_render.py ../r2-backup --out ../forensics/card_render
@@ -37,8 +37,8 @@ MIN_TEXT_PX = 80          # fewer than this means the slot is empty, not dim
 TOP_N = 40                # fixed pixel count -> independent of glyph count
 MIN_GRP = 3               # smallest believable number of edited rows
 
-# GAP_TRIGGER only picks which cards pay the re-encode, and trips on 2/2625 genuine cards
-# COMBINED_FLAG sits between the genuine peak of 2.00 and the two known forgeries at 40.8 and 64.4
+# GAP_TRIGGER only picks which cards pay the re-encode, and trips on 3/2649 genuine cards
+# COMBINED_FLAG sat between a stratified sample's genuine peak of 2.00 and the forgeries at 40.8 and 64.4
 GAP_TRIGGER = 5.0
 COMBINED_FLAG = 5.0
 

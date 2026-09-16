@@ -1,7 +1,8 @@
-from fastapi import FastAPI, HTTPException, Request, UploadFile
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
+from starlette.datastructures import UploadFile
 import cv2
 import numpy as np
 import json
@@ -18,7 +19,6 @@ import os
 import asyncio
 from contextlib import asynccontextmanager
 import ipaddress
-import inspect
 import hmac
 import sys
 import uuid
@@ -330,16 +330,13 @@ async def read_upload_image_bytes(request: Request) -> bytes:
         reject_oversized_declaration(request, MAX_MULTIPART_BYTES)
         form = await request.form()
         value = form.get("image")
-        if not isinstance(value, UploadFile) and not hasattr(value, "read"):
+        # request.form() yields Starlette's UploadFile, which fastapi.UploadFile subclasses rather than aliases
+        if not isinstance(value, UploadFile):
             raise HTTPException(status_code=400, detail="Missing multipart file field 'image'.")
         try:
             image_bytes = await value.read()
         finally:
-            close = getattr(value, "close", None)
-            if callable(close):
-                close_result = close()
-                if inspect.isawaitable(close_result):
-                    await close_result
+            await value.close()
     else:
         image_bytes = await read_bounded_body(request, MAX_IMAGE_BYTES)
 
@@ -547,7 +544,7 @@ async def stream_full_import_image(
             return
         integrity = validate_image_integrity(image)
 
-    if not integrity["accepted"]:
+    if image is None or not integrity["accepted"]:
         log_event(
             "ocr_import_rejected",
             f"ocr_import_rejected {','.join(integrity['reasons'])}",

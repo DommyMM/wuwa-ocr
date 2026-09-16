@@ -3,7 +3,7 @@ import json
 import cv2
 import numpy as np
 from typing import Dict, List, Set
-from cv2 import SIFT_create, FlannBasedMatcher
+from cv2 import FlannBasedMatcher
 
 
 CHARACTER_NAMES: List[str] = []
@@ -104,9 +104,9 @@ def _read_template_image(path: Path):
     return cv2.imdecode(data, cv2.IMREAD_COLOR)
 
 
-def load_templates(folder: str, templates: dict, features: dict, target_size: tuple = None, key_fn=None) -> int:
+def load_templates(folder: str, templates: dict, features: dict, target_size: tuple | None = None, key_fn=None) -> int:
     loaded_names: set = set()
-    sift = SIFT_create()
+    sift = cv2.SIFT.create()
 
     template_paths = sorted(
         [
@@ -258,7 +258,7 @@ def determine_element(image, filter_ids):
 
     # Top two in one hue cluster can't be separated by HSV, so SIFT decides
     if second is not None and _same_cluster([best[0], second[0]]):
-        sift = SIFT_create()
+        sift = cv2.SIFT.create()
         flann = FlannBasedMatcher(dict(algorithm=1, trees=5), dict(checks=50))
         kp1, des1 = sift.detectAndCompute(image, None)
         if des1 is not None:
