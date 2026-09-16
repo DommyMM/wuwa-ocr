@@ -1,245 +1,90 @@
-# Wuthering Waves OCR Backend
+# WuWaBuilds OCR backend
 
-FastAPI OCR service for WuWaBuilds import scans.  
-Hosted at `https://ocr.wuwa.build`.
+FastAPI service that reads KuroBot build cards for wuwa.build imports, hosted at `https://ocr.wuwa.build` behind the Cloudflare gateway.
 
-## Runtime Model
+The service takes the original screenshot, gates it as a genuine 1920x1080 card, crops ten fixed regions and recognizes them on a process pool, streaming each region back as it finishes. The original bytes are stored in R2 under a content-addressed key while recognition runs. Game vocabularies and templates load from `Data/` at import time (`data.py`).
 
-- Single OCR mode: English full-card import processing. The API receives the original
-  screenshot, decodes it once, validates the supported card layout, crops fixed
-  regions server-side, then fans out region recognition through `card.py`.
-- Legacy full-screen mode (`char.py` / `echo.py`) has been removed
-- Data is loaded from local `backend/Data/*.json` and image templates at startup import time (`data.py`)
-- Echo, character, and weapon OCR results include IDs for robust frontend matching
-- Echo and element templates may be PNG or WebP; current element templates are WebP-only.
-- The original JPEG/PNG request bytes are content-addressed and persisted to
-  Cloudflare R2 concurrently with recognition when `OCR_R2_UPLOAD_ENABLED=1`.
-  High-confidence integrity failures are rejected before R2 storage and OCR;
-  suspicious inputs must pass OCR structure checks before storage begins.
+| doc | covers |
+| --- | --- |
+| [docs/ocr-recognition.md](docs/ocr-recognition.md) | Recognition design per region, decisions, rejected approaches, gating a change, open items |
+| [docs/echo-substats.md](docs/echo-substats.md) | Banded substat reader and its evidence |
+| [docs/echo-main-strip.md](docs/echo-main-strip.md) | Why the echo main strip skips preprocessing |
+| [docs/image-integrity.md](docs/image-integrity.md) | Card gate, pasted-cell score, forgery forensics, review tools |
+| [docs/multilingual-echo-investigation.md](docs/multilingual-echo-investigation.md) | Non-English stat names: bake-off and chosen design |
+| [docs/railway-observability.md](docs/railway-observability.md) | Railway logs, metrics, memory and cost |
+| [scanner/AGENTS.md](scanner/AGENTS.md) | Echo inventory scanner, excluded from the deployed image |
 
-## Start
+## Run
 
 ```bash
-py server.py
+py server.py              # port 5000, or PORT
+py -m pytest tests -q     # fake S3 clients and in-memory images, no network
 ```
 
-Default port is `5000` (`PORT` env var supported).
+## `POST /api/ocr`
 
-## API
-
-### `POST /api/ocr`
-
-Process one full build-card screenshot.
-
-Request body can be `multipart/form-data`:
-
-```http
-image=<file>
-```
-
-or a raw image body with an image `Content-Type`.
-
-The response is always an `application/x-ndjson` stream. Each line is one JSON
-event: `meta`, zero or more per-region `region` events, then a final `done`
-event that contains the merged import analysis, per-region status, and timing
-data. Unsupported card layouts instead receive one structured `error` event
-with an `integrity` verdict and do not enter the normal R2 namespace.
+Send one card as `multipart/form-data` with an `image` file field, or as a raw image body. The response is an `application/x-ndjson` stream, one JSON event per line, every event carrying the same `scanId`:
 
 ```json
-{"type":"meta","scanId":"00000000-0000-4000-8000-000000000000","sourceImageKey":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.jpg","image":{"width":1920,"height":1080,"bytes":271977,"mediaType":"image/jpeg"}}
+{"type":"meta","scanId":"00000000-0000-4000-8000-000000000000","sourceImageKey":"0123…cdef.jpg","image":{"width":1920,"height":1080,"bytes":271977,"mediaType":"image/jpeg"}}
 {"type":"region","scanId":"00000000-0000-4000-8000-000000000000","region":"watermark","status":"done","analysis":{"username":"Player","uid":123456789},"elapsedMs":180.2}
-{"type":"region","scanId":"00000000-0000-4000-8000-000000000000","region":"echo1","status":"done","analysis":{"main":{"name":"ATK%","value":"18%"}},"elapsedMs":1111.0}
-{"type":"done","success":true,"scanId":"00000000-0000-4000-8000-000000000000","analysis":{},"progress":{},"timings":{"r2Ms":86.4,"storageWaitMs":0},"storage":{"result":"stored","elapsedMs":86.4},"sourceImageKey":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.jpg","trainingImageKey":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.jpg"}
+{"type":"done","success":true,"scanId":"00000000-0000-4000-8000-000000000000","analysis":{},"progress":{},"regionErrors":{},"timings":{},"storage":{"result":"stored","elapsedMs":86.4},"sourceImageKey":"0123…cdef.jpg","trainingImageKey":"0123…cdef.jpg","unsupportedLanguage":false}
 ```
 
-Interactive import consumes the `region` events for live UI updates. Bulk import
-uses the same stream parser and only consumes the final `done` event.
+- `region` events arrive in completion order with `status` `done` or `error`. Interactive import renders them live, and bulk import reads only `done`
+- A card that fails the integrity gate, an unsupported format, a decode failure, a recognition exception or the `OCR_TIMEOUT` deadline ends the stream with one `{"type":"error","success":false,"scanId":…,"error":…}` event. A rejected card reaches neither R2 nor recognition, and the error carries only a message
+- `sourceImageKey` is optimistic: it names the object even while the upload is still running, and it is null when storage is disabled or the upload failed. Builds use it for provenance without waiting on R2
+- `trainingImageKey` is confirmation-only, set once R2 reports `stored` or `already_present`. Issue reports use it
+- `storage.result` is `stored`, `already_present`, `pending` (recognition finished first and the upload continues in the process), `failed`, `timed_out` or `disabled`. A storage problem never fails recognition
+- `unsupportedLanguage` flags a real build card whose substat names don't read as English, so the frontend keeps it out of auto-submit
 
-`meta.sourceImageKey` is the deterministic root-level object name derived from
-the exact request bytes. It is optimistic: storage may still be running, but a
-later upload of the same bytes always addresses the same object. The final
-`done.sourceImageKey` is used for build provenance without waiting behind R2.
-`done.trainingImageKey` remains confirmation-only and is `null` until R2 reports
-`stored` or `already_present`; issue reports use this stricter field or resend
-the original file. A storage problem does not fail otherwise-successful OCR.
-For a suspicious image, `meta.sourceImageKey` is intentionally `null`; the key
-is emitted in `done` only after the OCR structure check permits R2 storage.
+Errors before the stream starts are JSON: `400` for a missing image, `413` over 5 MiB, `429` over the per-IP rate limit (with `Retry-After`), `500` for an unexpected failure.
 
-The final `storage.result` is one of:
+## `POST /api/report-ocr-issue`
 
-- `stored` — this request wrote the object;
-- `already_present` — identical exact bytes were already stored;
-- `pending` — OCR completed first; the retained upload continues in the backend;
-- `failed` — R2 returned an error;
-- `timed_out` — the configured storage deadline elapsed;
-- `disabled` — backend persistence is turned off.
+Stores one import issue report as JSON in R2, attached to its card image. The body is `multipart/form-data` with a `report` field (JSON, at most 256 KiB) and optionally an `image` file (at most 5 MiB).
 
-Every event includes the same `scanId`, which can be passed to downstream build
-submission and used to correlate frontend, OCR, and leaderboard logs.
+- The report's `trainingImageKey` from the `done` event is the normal image source and is trusted without another R2 round trip, since this service minted and stored it
+- Without a key, the fallback `image` is stored under the same content-addressed key, reusing an existing object. A key wins when both are sent
+- `route` must be `/import` and `reason` one of `illegal_echo`, `ocr_error`, `validation_error`, `manual_report`. `scanId` is null or a canonical UUID, and image keys must be canonical, since a key becomes an R2 object name
+- Validation stops there on purpose. Unknown top-level fields are dropped rather than rejected and unknown `progress` regions are kept, since a report about unexpected client state is the one worth keeping
 
-### `POST /api/report-ocr-issue`
+Success is `201` with `{"success":true,"reportId":…,"reportKey":"reports/YYYY/MM/DD/<id>.json","trainingImageKey":…,"imageStorage":"referenced|stored|already_present"}`. Errors are `{"success":false,"reason":…}` with `400`, `403` (not from the gateway while `INTERNAL_API_KEY` is set), `413`, `415`, `429` or `503` (storage not configured or unavailable), and never include R2 details.
 
-Persist one import issue report and attach it to the original training image.
-The request must be `multipart/form-data` with:
+`GET /health` returns `{"status":"ok"}` and `GET /` returns endpoint metadata.
 
-- one `report` text field containing at most 256 KiB of JSON; and
-- an image source: either a canonical `trainingImageKey` inside the report JSON
-  or one `image` file containing at most 5 MiB of original JPEG/PNG bytes.
+## R2 persistence
 
-The normal path uses the `trainingImageKey` from the final OCR `done` event and
-does not send the image again. That key was minted and stored by this service,
-so it is taken at face value rather than re-confirmed with an extra R2 HEAD.
-When OCR could not return a key, the fallback sends the original file once; the
-service derives the same content-addressed key and reuses an object that already
-exists before attempting a write. If both are supplied, the key wins.
+Only JPEG and PNG are accepted, detected from file magic rather than the filename or `Content-Type`. The key is `<sha256 of the exact request bytes>.<jpg|png>` at the bucket root. Before writing, a `HEAD` reuses an existing object whose size and stored digest match. A new `PUT` carries the original bytes, MIME type, SHA-256 checksum and digest metadata. Use a token scoped to the bucket with Object Read & Write, and never expose these credentials to the browser.
 
-```text
-report={"schemaVersion":1,"route":"/import","reason":"manual_report",...}
-image=<optional fallback file>
-```
+## Environment
 
-`reason` must be `illegal_echo`, `ocr_error`, `validation_error`, or
-`manual_report`, and `route` must be `/import`. `scanId` may be null when a
-network or gateway failure happened before the first OCR event; otherwise it
-must be a canonical UUID. Non-canonical image keys are rejected, because a key
-becomes an R2 object name.
+| variable | default | purpose |
+| --- | --- | --- |
+| `PORT` | `5000` | Listen port |
+| `OCR_WORKERS` | `6` | Process pool size, one worker per heavy region. Production runs `10`, and each worker holds its own templates, so this is the main lever on the RAM bill |
+| `OCR_OPENCV_THREADS` | `1` | `cv2.setNumThreads` per worker |
+| `OCR_TIMEOUT` | `60` | Seconds before recognition times out |
+| `OCR_RATE_LIMIT` | `10` | OCR requests per minute per client IP. Raise it locally for batch imports |
+| `OCR_REPORT_RATE_LIMIT` | `5` | Issue reports per minute per client IP |
+| `INTERNAL_API_KEY` | unset | Gateway key: trusts the forwarded client IP and, when set, is required on the issue-report route |
+| `OCR_CHROME_REJECT` | `3.5` | Chrome score at or above which a card is rejected |
+| `OCR_BED_OBSERVE_FLOOR` | `2.5` | Echo-bed score worth a log line |
+| `OCR_NONENGLISH_NAME_FLOOR` | `0.35` | English substat-name match rate below which a card is flagged non-English |
+| `OCR_NONENGLISH_MIN_VALUES` | `15` | Readable values a card needs before the language flag applies |
+| `OCR_R2_UPLOAD_ENABLED` | `0` | Enables R2 persistence (`1/0`, `true/false`, `yes/no`, `on/off`), and startup fails if a credential below is missing |
+| `OCR_R2_TIMEOUT_SECONDS` | `5` | Deadline for the R2 `HEAD` and `PUT` result |
+| `CLOUDFLARE_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET_NAME` | unset | R2 endpoint and credentials |
+| `TESS_BATCH_DIR` | `/dev/shm` when present | Temp directory for batched Tesseract images |
+| `OMP_THREAD_LIMIT` | `1` in the Dockerfile | Keeps each Tesseract process single-threaded while workers parallelize |
 
-Validation deliberately stops there. A report is diagnostic material, so unknown
-fields and unrecognized `progress` regions are stored rather than rejected: a
-report about an unexpected client state is exactly the report worth keeping, and
-a 400 would discard it at the moment it is most useful.
+## Data sync
 
-A successful response is `201 application/json`:
+The backend never fetches game data at runtime. From `wuwabuilds/scripts`, run the data sync (`py sync_all.py`, see `wuwabuilds/docs/sync-sources.md`), then `py sync_backend.py`, which writes the vocabulary JSONs, copies `EchoStats.json` and `Stats.json`, and refreshes the character, weapon, echo and element templates as WebP. From `backend/`, `py regress_echo_webp.py --limit 500` checks a full echo-template swap before committing it.
 
-```json
-{"success":true,"reportId":"11111111-1111-4111-8111-111111111111","reportKey":"reports/2026/07/11/11111111-1111-4111-8111-111111111111.json","trainingImageKey":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.jpg","imageStorage":"referenced"}
-```
+## Local helpers
 
-`imageStorage` is `referenced`, `stored`, or `already_present`. Error responses
-use the stable shape `{"success":false,"reason":"..."}` and never include R2
-or credential details. When `INTERNAL_API_KEY` is configured, this write route
-only accepts requests from the trusted gateway.
-
-## R2 image persistence
-
-Only JPEG and PNG inputs are accepted, determined from file magic rather than
-the multipart filename or request `Content-Type`. The canonical key is:
-
-```text
-<64 lowercase hexadecimal SHA-256 of the exact request bytes>.<jpg|png>
-```
-
-Keys live at the bucket root; there is no `training-images/` prefix. Before
-writing, the service performs `HEAD` and reuses an existing object with the
-same key and byte length. A new `PUT` carries the original bytes, detected MIME
-type, SHA-256 checksum, and digest metadata. R2 work begins alongside region
-recognition for normal cards. Suspicious cards run OCR validation first so a
-rejected wrong-format image is never written to the normal R2 namespace.
-
-### Other Endpoints
-
-- `GET /health` -> health check
-- `GET /` -> API status metadata
-
-## Environment Variables
-
-| Variable | Default | Description |
-|---|---|---|
-| `PORT` | `5000` | HTTP listen port |
-| `INTERNAL_API_KEY` | — | Trusted proxy key (gateway → OCR); selects the forwarded client IP and is required by the issue-report write route when configured. |
-| `OCR_WORKERS` | `6` | `ProcessPoolExecutor` size — parallel Tesseract processes. One per heavyweight region (5 echoes + forte), which is the wave that sets the wall; the lighter regions clear in a following wave regardless. Each worker holds its own OCR models, so this is also the main lever on the RAM bill. Raise locally for batch work (e.g. `16` for 7800X3D); Railway is capped at `8` vCPU. |
-| `OCR_RATE_LIMIT` | `10` | Requests per minute per IP. Set to `10000` locally to disable effective limiting during batch import. |
-| `OCR_REPORT_RATE_LIMIT` | `5` | Issue reports per minute per client IP. Independent of OCR admission. |
-| `OCR_TIMEOUT` | `60` | Seconds before a single OCR request times out. |
-| `OCR_OPENCV_THREADS` | `1` | Per-worker `cv2.setNumThreads` value. |
-| `OCR_R2_UPLOAD_ENABLED` | `0` | Enable backend-owned R2 persistence. Accepts `1/0`, `true/false`, `yes/no`, or `on/off`. |
-| `OCR_R2_TIMEOUT_SECONDS` | `5` | End-to-end deadline for the asynchronous R2 `HEAD`/`PUT` result. Must be positive. |
-| `CLOUDFLARE_ACCOUNT_ID` | — | Cloudflare account used to form the R2 S3 endpoint; required when upload is enabled. |
-| `R2_ACCESS_KEY_ID` | — | R2 S3 access-key ID; required when upload is enabled. |
-| `R2_SECRET_ACCESS_KEY` | — | R2 S3 secret; required when upload is enabled. |
-| `R2_BUCKET_NAME` | — | Destination bucket; required when upload is enabled. |
-| `OMP_THREAD_LIMIT` | `1` in Dockerfile | Keeps each Tesseract subprocess single-threaded while the service parallelizes across regions/workers. |
-| `RAILWAY_ENVIRONMENT_NAME` | — | Auto-set on Railway; used to log environment context. |
-
-## Limits and Errors
-
-- OCR rate limit: `OCR_RATE_LIMIT` requests/minute per IP (default `10`)
-- Issue-report rate limit: `OCR_REPORT_RATE_LIMIT` requests/minute per IP (default `5`)
-- Image body: at most 5 MiB after multipart extraction
-- Issue-report metadata: at most 256 KiB; fallback image at most 5 MiB; full
-  multipart envelope at most 5,570,560 bytes
-- Timeout: `OCR_TIMEOUT` per OCR request (default `60s`)
-- Common statuses:
-  - `400` invalid image/region/request
-  - `408` processing timeout
-  - `429` rate limit exceeded
-  - `500` internal server error
-
-Use an R2 token scoped to the destination bucket with Object Read & Write
-permission: the service needs `HEAD` for image deduplication and `PUT` for new
-image and report objects.
-When R2 upload is enabled, startup fails fast if any required setting is absent
-or the timeout value is invalid. Do not expose these credentials to the browser.
-
-## Tests
-
-```bash
-py -m unittest discover -s tests -v
-```
-
-The ingest tests use fake S3 clients and local in-memory images. They do not
-contact R2, Railway, or any production service.
-
-## OCR benchmarks
-
-The local `r2-backup/` corpus is evaluation input, not automatic ground truth.
-Historical database values may contain the same OCR error being investigated,
-so benchmark reports distinguish database-proxy agreement from visually
-verified gold-label accuracy.
-
-```bash
-# UID configuration ablation (scale-safe preprocessing + per-reader latency)
-py benchmark_uid_ocr.py --limit 500
-
-# Corpus pass after narrowing the candidates
-py benchmark_uid_ocr.py --all --workers 12 \
-  --configs live tight_up4_fixed_psm7_digits
-
-# Render raw UID bands wherever two readers disagree
-py render_uid_review.py benchmarks/uid_ocr/<run>/results.tsv \
-  --right tight_up4_fixed_psm7_digits
-```
-
-`benchmark_uid_ocr.py` accepts the explicit gold-label JSON shape documented in
-`optimize_crops.py`, or a two-column `image-key<TAB>uid` proxy TSV. Pass
-`--labels-are-gold` only after the pixels were reviewed by a human.
-
-The July 2026 corpus pass selected `tight_up4_fixed_psm7_digits` for UID OCR:
-a tight UID-only crop, 4x cubic upscale, grayscale fixed threshold 140,
-Tesseract `--psm 7`, digit whitelist, and an exact-nine-digit acceptance rule.
-It produced 18,942 valid reads out of 19,567 images (96.81%), versus 17,699
-(90.45%) for the live watermark reader, while being about 5% faster locally.
-All 262 cases where both readers returned different UIDs were visually reviewed
-and favored the candidate. Benchmark output under `benchmarks/` is intentionally
-ignored by Git.
-
-## Railway Operations
-
-Production runs in Railway project `wuwa-backend` as service `WuWa OCR`.
-Operational commands, latency/cost snapshots, and log
-query examples live in [`docs/railway-observability.md`](docs/railway-observability.md).
-
-## Data Sync Expectations
-
-The backend does not fetch runtime game data from production frontend URLs.  
-Keep `backend/Data` synchronized from `wuwabuilds/scripts`:
-
-1. From `wuwabuilds/scripts`, run the data sync (`py sync_all.py`, or the targeted Encore merge path documented in `wuwabuilds/docs/sync-sources.md`).
-2. Run `py sync_backend.py` to refresh backend JSONs and Encore element badge templates.
-3. Run `py download_echo_icons.py --clean --force` only when echo icon templates need a full refresh. The downloader stores backend echo templates as WebP by default, converting PNG source assets when needed.
-4. To validate a full echo-template WebP swap without committing converted assets, run `py backend\regress_echo_webp.py --limit 500` from the workspace root after installing `backend/requirements.txt`.
-
-## Local Backfill Helpers
-
-- `py backend\r2_date_summary.py --since 2026-06-07T19:00:00-07:00` counts local R2 screenshots in a patch window.
-- `py backend\stage_r2_backfill.py --since 2026-06-07T19:00:00-07:00 --clean` stages a filtered folder for the frontend `/bulk-import` page.
+- `sync_r2.py` mirrors the R2 bucket into `r2-backup/` and stamps original upload times on file mtimes
+- `r2_date_summary.py --since <iso time>` counts local screenshots in a patch window
+- `stage_r2_backfill.py --since <iso time> --clean` stages a filtered folder for the frontend `/bulk-import` page
+- `visualize_regions.py [image]` draws every crop region and sub-box on a card

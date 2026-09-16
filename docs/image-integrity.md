@@ -1,80 +1,75 @@
-# Build Card Image Integrity
+# Build card image integrity
 
-The upload path validates KuroBot build cards before trusting them as build or
-training data. It is a deterministic layout check, not a generic AI detector.
+Uploads are validated as KuroBot build cards before they become build or training data. Every check keys on an invariant a genuine card can't vary. Past false positives all came from keying on something a real player does vary (progression, language, image quality), so none of that is measured.
 
-## Production flow
+Three phases ask different questions, and only the first gates today.
 
-Phase A is split across the decode. `validate_header_dimensions` reads the
-dimensions out of the PNG or JPEG header first; only if they are exactly
-1920x1080 does `cv2.imdecode` run, and `validate_image_integrity` then chrome-
-checks the decoded card. Both return the same verdict shape, and there is
-deliberately no `suspect` tier: the only two things that turn a user away are a
-wrong size and a chrome mismatch, both invariants of a genuine card.
+| phase | question | where | status |
+| --- | --- | --- | --- |
+| A | Is this a KuroBot card at all? | `image_integrity.validate_header_dimensions`, `validate_image_integrity` | Rejects uploads |
+| B | Was a stat cell pasted onto the echo bed? | `image_integrity.echo_bed_score` | Logged only |
+| C | Were substat rows re-rendered in an editor? | `forensics_card_render.render_consistency` | Offline tool, ELA unreliable across the corpus |
 
-- `ok`: a 1920x1080 card whose fixed chrome matches the template. R2 upload and
-  region OCR run concurrently.
-- `reject`: wrong or unreadable header dimensions, or a chrome score at or above
-  `CHROME_REJECT_SCORE`. R2 storage and OCR are both skipped and the client
-  receives a specific message.
+## Phase A: card gate
 
-The dimension gate sits ahead of the decode because `cv2.imdecode` allocates
-`width * height * 3` for whatever the header declares, and both containers can
-declare dimensions wildly out of proportion to their compressed size: a PNG of a
-few hundred KiB, comfortably inside the 5 MiB upload cap, can claim 60000x60000
-and ask for roughly 10 GB. Checking a decoded image's `shape` is a check that
-arrives after the memory is already spent. `validate_image_integrity` keeps its
-own dimension check so the invariant holds for every caller, not just ingest.
+- Dimensions are read from the PNG or JPEG header before `cv2.imdecode`, which allocates `width * height * 3` for whatever the header declares. A few-hundred-KiB PNG inside the 5 MiB cap can claim 60000x60000 and ask for ~10 GB
+- Anything but exactly 1920x1080 is rejected. `validate_image_integrity` repeats the dimension check so the invariant holds for every caller, not just ingest
+- The decoded card's fixed chrome (frame, labels, forte pentagon, everything above the echo band) is compared against a median reference under a mask. Per-card median normalisation ignores tint and exposure, and a shared blur lets soft and sharp scans converge while a wrong layout doesn't
+- The mask excludes the weapon panel, since a distinctive weapon deviated from the average-weapon blur enough to flag clean cards
+- Genuine English cards score <= 2.4 and AI-generated fakes and non-cards >= 4.0, so `OCR_CHROME_REJECT` defaults to 3.5 in the gap. Non-English cards can score near it and pass, which is intended: they get the language error downstream instead of "not a build card"
+- There is no suspect tier. A card passes and runs OCR and storage concurrently, or is rejected before either, and the client gets only the message, since a live score would give cheaters a reference
+- A missing reference asset fails open: the chrome check is skipped rather than rejecting every upload
 
-This is Phase A ("is this a KuroBot card at all?"). It rejects wrong-size images,
-screenshots, crops and AI-generated cards, and is blind to progression, language
-and blur by construction. Phase B (`echo_bed_score`) and Phase C
-(`forensics_card_render.render_consistency`) both ask "is the echo content
-authentic?" and neither gates today — see `card-forgery-detection.md`.
+## Phase B: echo bed score
 
-An earlier revision of this document described a three-verdict flow with a QR
-anchor and an OCR-structure gate. That is not what the code does; the text was
-corrected on 2026-08-19 to match `image_integrity.py`.
+A genuine panel's substat bed is a gradient that varies only with x, and a pasted stat cell carries its own background level. It can't gate, because wrapped substat names ("Resonance Liberation DMG Bonus") break the same assumption. `server.py` logs `echo_bed_observed` only at or above `OCR_BED_OBSERVE_FLOOR` (2.5), since genuine cards sit ~1.6 and labelled pastes start at 3.2.
 
-## Evidence and thresholds
+## Phase C: re-rendered substat rows
 
-The fast checks were evaluated against 17,938 canonical local images. The
-absolute lower-row rule initially produced 95 candidates, including broadly
-dark but otherwise genuine-looking transformations. Requiring the signature in
-at least two of echo panels 3-5 while limiting whole-image near-black coverage
-narrowed direct rejection to six files; review found all six invalid and no
-genuine card among them.
+A row re-typed in an image editor is brighter than its neighbours and has a lower error level, since it never went through the original JPEG quantization. `render_consistency` sorts the 25 substat label cells by brightness, splits at the largest gap leaving at least three rows per side, and compares error level across the split. `ela_delta` ignores background level, so the wrapped names that blind Phase B don't move it.
 
-Brightness-relative row-deficit limits are deliberately escalation-only. In a
-1,500-card sample, observed p99.9 values were below 0.099, 0.088, and 0.087 for
-echo3, echo4, and echo5. Production limits are 0.105, 0.100, and 0.095. This
-signal continued to flag the generated example after recompression, blur,
-brightness, gamma, and noise transformations. A blurred dark-run signal makes
-the check resilient to pixel noise, while an unusual 1st-percentile tone floor
-escalates whole-image brightness/gamma shifts.
+The two confirmed forgeries were Hiyuki with 8 of 25 rows redrawn and Aemeath with 14. Every forged value was a legal roll, since `lb` already enforces the exact roll table, so stored CV matched the forged pixels exactly.
 
-The expected QR anchor is also escalation-only because a small number of valid
-historical cards do not decode reliably. In a 300-card sample, 296 decoded an
-accepted Discord host and four did not decode. A Discord screenshot containing
-an embedded card can retain the QR, which is why OCR structure remains the
-second gate.
+A sample stratified at 300 or more cards per upload month looked clean: `combined` (gap x ela_delta) peaked at 2.00 on 2649 genuine cards against 40.8 and 64.4 for the forgeries, and `gap >= 5` fired on 3 of them. The full-corpus sweep overturned that. It flagged 40 of 25,551 cards with the forgeries ranked only 18th and 24th, and the flag rate tracks encoder era rather than content (15.4% of `dqt 1.0` files, 0.22% of canvas re-encodes, 0 of 4757 original-byte uploads, 0.06% of PNG). ELA measures the storage pipeline, so don't tune it per era.
 
-On a 1,500-image local run, 1,440 were accepted immediately, 56 were escalated,
-and four known-invalid files were directly rejected. The fast pass measured
-18.6 ms median and 21.2 ms p95. Only suspicious inputs pay the additional OCR
-validation/storage sequencing cost; normal OCR wall time remains concurrent
-with R2.
+Tone spread, the max minus min text tone over the 25 label cells, is the era-stable signal. A genuine card is one render pass with one text tone, while a forgery goes bimodal:
+
+| population | median | p90 | p99 | max |
+| --- | --- | --- | --- | --- |
+| Canvas re-encodes (249) | 10.3 | 11.8 | 17.6 | 139.2 |
+| Original bytes (248) | 9.8 | 11.2 | 11.8 | 12.2 |
+| PNG (249) | 9.8 | 11.2 | 12.6 | 72.3 |
+| Both forgeries | ~33 | | | |
+
+It's also cheaper, one grayscale pass with no re-encode. Absolute tone isn't comparable across eras, so re-rendered rows aren't reliably brighter, and `gap` or `tone_sd` alone flag genuine highlight-band cards (gap 41, tone_sd 18). `render_consistency` doesn't output tone spread yet.
+
+### JPEG encoder signature
+
+`encoder_signature` is for triage and logging, never grounds for rejection. The forgeries carry `DQT[0] mean 9.25`, 4:4:4 chroma and a JFIF header, which looks decisive against recent uploads but is only the older encoder era:
+
+| era | signature |
+| --- | --- |
+| Frontend canvas re-encodes | `dqt 9.25` with APP0 dominant, ~10% 4:4:4 |
+| Original upload bytes | `dqt 23.08`, 4:2:0, no APP0, plus PNG |
+
+A stale cached client would look identical to a forgery.
 
 ## Offline tools
 
-- `scan_image_integrity.py`: corpus scan and JSON/CSV review queue.
-- `review_integrity_gui.py`: manual keep/delete/review decisions.
-- `forensics_echo_integrity.py`: panel crops and diagnostic overlays.
-- `forensics_card_render.py`: re-rendered substat rows (Phase C) plus JPEG
-  encoder signature; corpus scan and review queue. See `card-forgery-detection.md`.
-- `baseline_echo_row_darkness.py`: position-specific threshold analysis.
-- `clean_invalid.py`: dry-run or apply reviewed deletions.
+- `scan_image_integrity.py` scans a corpus and writes a JSON and CSV review queue
+- `review_integrity_gui.py` records keep, delete and review decisions and exports `invalid_images.json`
+- `clean_invalid.py` dry-runs or applies the reviewed deletions from R2 and `r2-backup/`
+- `forensics_card_render.py` runs Phase C with the encoder signature over a corpus
+- `forensics_echo_integrity.py` writes panel crops and diagnostic overlays for one suspect
+- `baseline_echo_row_darkness.py` measures position-specific row darkness thresholds
 
-Do not auto-delete new statistical outliers. Direct rejection should remain
-limited to rules validated against the corpus; novel cases belong in review
-until enough labeled examples exist to justify another production rule.
+Never auto-delete a statistical outlier. Direct rejection stays limited to rules validated against the corpus, and novel cases go to review until enough labelled examples justify another production rule. Two labelled forgeries don't.
+
+## Open work
+
+1. Add tone spread to `render_consistency`, then eyeball ~10 cards from the canvas and PNG tails (up to 139 and 72, absent in original bytes) to learn whether they're highlight-band layouts or more forgeries before choosing any threshold
+2. Review corpus candidates by hand: `py sync_r2.py --run`, then `py forensics_card_render.py ../r2-backup --out ../forensics/card_render`
+3. A structural detector needs no pixels: builds with no `scanId` or source image and most substats at max roll, and UIDs one digit from a blacklisted UID treated as the same actor
+4. Promote a detector to a review queue only once it is era-stable across canvas, original-byte and PNG uploads, never as a user-facing rejection
+
+The payload-side attack (builds submitted with no image and out-of-range scalars) is an `lb` problem with its own fixes in `lb/docs/submit-hardening-plan.md`.
