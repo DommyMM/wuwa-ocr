@@ -5,7 +5,7 @@ Downloads only keys missing locally and stamps each file with its original uploa
 Date-based backfills can then select screenshots by patch window without relisting R2
 
 Usage:
-  py sync_r2.py                         # dry run — reports downloads and mtime drift
+  py sync_r2.py                         # dry run, reports downloads and mtime drift
   py sync_r2.py --run                   # download missing keys, stamp drifted mtimes
   py sync_r2.py --run --recheck-legacy  # re-close the original-time table after
                                         # another migration-style copy job

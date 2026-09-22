@@ -9,7 +9,7 @@ Actions (dry-run by default):
   2. Archives then deletes each image from local r2-backup/
 
 Usage:
-  py clean_invalid.py          # dry run — shows what would be deleted
+  py clean_invalid.py          # dry run, shows what would be deleted
   py clean_invalid.py --run    # actually deletes
   py clean_invalid.py --run --r2-only  # delete from R2 but keep local files
   py clean_invalid.py --run --no-archive  # delete local files without archiving them
