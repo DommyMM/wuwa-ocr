@@ -40,6 +40,7 @@ SET_NAME_BY_ID: Dict[int, str] = {
     26: 'Rite', 27: 'Trailblazing', 28: 'Chromatic', 29: 'Sound',
     30: 'QuietSnow', 31: 'Memories', 32: 'Adam',
     33: 'Feathered', 34: 'EvilPurge', 35: 'Nether',
+    36: 'Vigil', 37: 'Reflection', 38: 'Yearning',
 }
 
 # Synced data has no Rover gender field, so a new Rover element adds its two ids here
@@ -184,16 +185,17 @@ except Exception as e:
     print(f"Data directory exists: {DATA_DIR.exists()}")
 
 # Set ids whose badges share a hue, so HSV can't separate them and SIFT decides within a cluster
-# A set in no cluster, like Electro (H≈135), is decided by HSV alone
+# A set in no cluster, like Adam (H≈0), is decided by HSV alone
 _HUE_CLUSTERS = [
     {8, 14, 33},                    # ER, Tidebreaking, Feathered (grayscale)
     {27, 28, 2, 22, 18, 9, 20, 35}, # Trailblazing, Chromatic, Fusion, Flamewing, Flaming, Attack, Crown, Nether (H≈7)
     {24, 26, 5, 11},                # Pact, Rite, Spectro, Radiance (H≈26)
-    {25, 7},                        # Halo, Healing (H≈41)
+    {25, 7, 38},                    # Halo, Healing, Yearning (H≈41)
     {29, 4, 16, 17, 34},            # Sound, Aero, Gust, Windward, EvilPurge (H≈77)
     {1, 10, 30},                    # Glacio, Frosty, QuietSnow (H≈102)
     {21, 13, 31},                   # Law, Empyrean, Memories (H≈109)
     {12, 19, 23, 6},                # Midnight, Dream, Thread, Havoc (H≈161)
+    {3, 36, 37},                    # Electro, Vigil, Reflection (H≈135)
 ]
 
 def _same_cluster(candidates: list) -> bool:
