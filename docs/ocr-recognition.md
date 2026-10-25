@@ -78,11 +78,10 @@ Mount a candidate `card.py` over `/app/card.py` for the second run instead of re
 | RapidOCR as a fallback reader | Every worker paid its RAM whether called or not. Banded Tesseract, the pill reader and the name-strip reads replaced every call site with no accuracy loss on the gates |
 | Otsu in the shared `preprocess_region` | Forte's circuit node read 0 on most cards and substats lost 597 rows per 30,000 |
 | Forte by digit templates | Scores for `LV.1` to `LV.10` don't separate |
-| Accepting 16:9 inputs below 1920 wide | Text that reads at native 1920 doesn't survive the 720p round trip |
+| Accepting 16:9 inputs below 1920 wide | Text that reads at native 1920 doesn't survive the 720p round trip. Over 1,000 cards put through a 1280 q70 copy, the best upscale back to 1920 (linear for echo regions, Lanczos elsewhere) read 87.6% board-identical to the original, and raw 1280 read none |
 | Client-side region crops as the upload | Ten PNG crops averaged ~1.5 MB against a ~350 KB original, and cost ~55 ms of browser CPU for under 1 ms of backend cropping |
 | R2 as the OCR transport | Adds a network hop and makes OCR wait on storage, so OCR consumes the bytes the browser already sent |
 | Proxying the image through Vercel Functions | Vercel would pay function time and origin transfer on every upload |
-| Scraping wuwaflex | The UID exists only in the image, so rows can't be attributed without running this pipeline anyway, and its copies are 720p |
 
 Substat and main-strip rejections live in their own docs.
 
@@ -103,7 +102,7 @@ Missing-weapon reference cards for the empty-weapon contract: Lucilla `1109` (si
 - FLANN's randomized kd-tree wobbles near-tie confidence between runs, so echo identity flips about twice per 30,000 echoes below confidence ~0.07. Treat a lone low-confidence identity diff in a gate as noise. A deterministic matcher or an abstain floor would end it
 - Forte uses the shared thresholded preprocess and misreads 10 as 0 on soft cards. It isn't persisted in builds, so it corrupts the import UI rather than boards. Running the main-strip harness on forte is the cheap first experiment
 - A light or grey card layout can clip the echo main box (`Havoc DMG` read as `avoc DMG`)
-- Some builds' `source_image_key` points at the wrong image, and at least one all-black image backs a build row. `lb/cmd/sourceimageaudit` and `cmd/sourceimagematch` exist for this class
+- Some builds' `source` screenshot key points at the wrong image, and at least one all-black image backs a build row. `lb/cmd/sourceimageaudit` and `cmd/sourceimagematch` exist for this class
 - Stored panel order can permute against read order (44 of 109 disputed panels matched another echo index better), so anything joining `echoPanels[i]` to `echo{i+1}` must tolerate that
 - Latency: with `OCR_WORKERS=10` the wall is one echo region at ~790 ms and nothing else, so the next lever is inside the echo region (the SIFT sweep and its Tesseract batches)
 - 24 transitive dependencies stay unpinned. A full `pip freeze` lock would close that, though none of them touch the OCR path
