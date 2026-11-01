@@ -184,13 +184,14 @@ class R2ImageStore:
 
         # Outer asyncio deadline is authoritative, so two attempts fit inside it
         # A pooled connection dies silently after ~6-8 min idle, so the retry after its timeout opens a fresh one
+        # Legacy mode: standard mode's retry quota never refunds a retried 404 HEAD, so new images drained it in ~2 days
         attempt_timeout = min(1.5, settings.timeout_seconds / 2)
         client_config = Config(
             connect_timeout=attempt_timeout,
             read_timeout=attempt_timeout,
             max_pool_connections=16,
             region_name="auto",
-            retries={"mode": "standard", "total_max_attempts": 2},
+            retries={"mode": "legacy", "total_max_attempts": 2},
             signature_version="s3v4",
         )
         return boto3.client(
