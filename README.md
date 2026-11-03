@@ -21,6 +21,8 @@ py server.py              # port 5000, or PORT
 py -m pytest tests -q     # fake S3 clients and in-memory images, no network
 ```
 
+Railway builds `Dockerfile` from the service's own settings: start `python server.py`, healthcheck `/` (30 s), restart on failure up to 10 times.
+
 ## `POST /api/ocr`
 
 Send one card as `multipart/form-data` with an `image` file field, or as a raw image body. The response is an `application/x-ndjson` stream, one JSON event per line, every event carrying the same `scanId`:
