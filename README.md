@@ -11,7 +11,7 @@ The service takes the original screenshot, gates it as a genuine 1920x1080 card,
 | [docs/echo-main-strip.md](docs/echo-main-strip.md) | Why the echo main strip skips preprocessing |
 | [docs/image-integrity.md](docs/image-integrity.md) | Card gate, pasted-cell score, forgery forensics, review tools |
 | [docs/multilingual-echo-investigation.md](docs/multilingual-echo-investigation.md) | Non-English stat names: bake-off and chosen design |
-| [docs/railway-observability.md](docs/railway-observability.md) | Railway logs, metrics, memory and cost |
+| [docs/observability.md](docs/observability.md) | OCR service logs and events, memory and cost, R2 |
 | [scanner/AGENTS.md](scanner/AGENTS.md) | Echo inventory scanner, excluded from the deployed image |
 
 ## Run
