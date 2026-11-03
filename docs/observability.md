@@ -29,7 +29,7 @@ Railway classifies Uvicorn's startup and shutdown `INFO:` lines as errors. They 
 railway metrics -e production -s "WuWa OCR" --since 6h --json
 ```
 
-- The bill is RAM-bound: CPU idles between imports while every worker holds its memory. The dashboard Usage page is the bill of record, since the CLI has no billing command
+- The bill is RAM-bound: CPU idles between imports while every worker holds its memory. `railway usage` shows the period's usage and estimated bill (`--period previous`, `--json`, `usage projects` per project)
 - A deploy hour double-counts memory, since the old and new containers overlap
 
 `railway metrics` reports the service total. The per-worker split needs `/proc`, and the container has no `ps`. `railway ssh` needs a registered key first (`railway ssh keys github`).
